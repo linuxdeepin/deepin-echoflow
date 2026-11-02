@@ -99,7 +99,8 @@ install -m 0644 "$BUILD_DIR/systemd/user/echoflow.service" "$SYSTEMD_USER_DIR/ec
 install -m 0644 "$BUILD_DIR/systemd/user/echoflow-ui.service" "$SYSTEMD_USER_DIR/echoflow-ui.service"
 
 systemctl --user daemon-reload
-systemctl --user enable echoflow.service echoflow-ui.service
+# Replace links from older installations that started at default.target.
+systemctl --user reenable echoflow.service echoflow-ui.service
 if [[ "$START_SERVICES" == "1" ]]; then
   systemctl --user restart echoflow.service echoflow-ui.service
   if command -v fcitx5 >/dev/null 2>&1; then

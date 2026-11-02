@@ -1,0 +1,17 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 Hualet Wang
+# SPDX-License-Identifier: GPL-3.0-or-later
+set -e
+
+# Migrate the old default.target links before debhelper records the new ones.
+# Preserve services disabled by the administrator.
+if [ "$1" = configure ] && [ -z "${DPKG_ROOT:-}" ]; then
+    for unit in echoflow.service echoflow-ui.service; do
+        if deb-systemd-helper --quiet --user debian-installed "$unit" &&
+           deb-systemd-helper --quiet --user was-enabled "$unit"; then
+            deb-systemd-helper --user reenable "$unit" >/dev/null || true
+        fi
+    done
+fi
+
+#DEBHELPER#

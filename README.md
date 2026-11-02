@@ -60,6 +60,12 @@ cmake --build build
 - `echoflow.service`——语音识别后台守护进程
 - `echoflow-ui.service`——托盘图标和语音胶囊提示
 
+两个服务在图形会话就绪后启动，注销时停止，重新登录后自动启动。
+用户安装脚本会迁移旧版本的自启动链接；deb 升级会迁移系统级链接，
+但不会覆盖 `~/.config/systemd/user/` 下已有的用户安装版服务。
+若曾从源码安装，再安装 deb，请先运行 `./uninstall-user.sh` 移除用户版
+（保留模型和配置），避免用户版覆盖系统包。
+
 本地安装会同时重载 Fcitx，使用户目录中的 addon 和对应的绝对模块路径
 立即生效。使用 `--no-start` 时不会修改当前 Fcitx 会话，稍后需手动执行
 `fcitx5 -rd`。
