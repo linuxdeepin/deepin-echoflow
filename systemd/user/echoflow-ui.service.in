@@ -3,7 +3,9 @@
 
 [Unit]
 Description=EchoFlow tooltip UI host
+Requisite=graphical-session.target
 After=graphical-session.target
+PartOf=graphical-session.target
 
 [Service]
 Type=simple
@@ -11,4 +13,4 @@ ExecStart=@CMAKE_INSTALL_FULL_BINDIR@/echoflow-ui
 Restart=on-failure
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target

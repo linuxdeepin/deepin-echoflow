@@ -101,11 +101,11 @@ assert_contains "$ROOT/install-user.sh" 'cmake -S "$ROOT_DIR"' "install-user.sh 
 assert_contains "$ROOT/install-user.sh" 'cmake --install "$BUILD_DIR"' "install-user.sh installs root build"
 assert_contains "$ROOT/install-user.sh" '$BUILD_DIR/systemd/user/echoflow.service' "install-user.sh installs configured service unit"
 assert_contains "$ROOT/install-user.sh" '$BUILD_DIR/systemd/user/echoflow-ui.service' "install-user.sh installs configured UI service unit"
-assert_contains "$ROOT/install-user.sh" 'systemctl --user enable echoflow.service echoflow-ui.service' "install-user.sh always enables user services"
+assert_contains "$ROOT/install-user.sh" 'systemctl --user reenable echoflow.service echoflow-ui.service' "install-user.sh migrates user service links"
 assert_contains "$ROOT/install-user.sh" 'systemctl --user restart echoflow.service echoflow-ui.service' "started installs restart both user services"
 assert_absent "$ROOT/install-user.sh" 'systemctl --user enable --now' "install-user.sh does not leave running services on old binaries"
 assert_before "$ROOT/install-user.sh" 'if [[ "$START_SERVICES" == "1" ]]' 'systemctl --user restart echoflow.service echoflow-ui.service' "service restart is guarded by START_SERVICES"
-assert_before "$ROOT/install-user.sh" 'systemctl --user enable echoflow.service echoflow-ui.service' 'if [[ "$START_SERVICES" == "1" ]]' "no-start still enables services before skipping restart"
+assert_before "$ROOT/install-user.sh" 'systemctl --user reenable echoflow.service echoflow-ui.service' 'if [[ "$START_SERVICES" == "1" ]]' "no-start still enables services before skipping restart"
 
 assert_absent "$ROOT/CMakeLists.txt" "qwen-asr-runtime" "top-level no longer builds qwen-asr-runtime"
 assert_contains "$ROOT/CMakeLists.txt" 'set(ECHOFLOW_CPU_TARGET "native" CACHE STRING' "CMake exposes the CPU target"
@@ -338,11 +338,12 @@ fi
 assert_contains "$ROOT/debian/control" "Package: echoflow" "debian control defines echoflow package"
 assert_contains "$ROOT/debian/control" "debhelper-compat (= 13)" "debian control uses debhelper compat 13"
 assert_contains "$ROOT/debian/control" "desktop-file-utils" "debian build dependencies provide desktop-file-validate"
-if [[ ! -e "$ROOT/debian/postinst" ]]; then
-  echo "ok   - Debian uses debhelper-generated user-service maintainer scripts"
+assert_contains "$ROOT/debian/postinst" '#DEBHELPER#' "Debian retains generated maintainer scripts"
+assert_absent "$ROOT/debian/postinst" 'systemctl' "Debian migration does not restart user sessions"
+if bash "$ROOT/tests/spec/test_systemd_upgrade.sh"; then
   pass=$((pass + 1))
 else
-  echo "FAIL - manual Debian postinst would duplicate debhelper user-service restart"
+  echo "FAIL - Debian session autostart migration"
   fail=$((fail + 1))
 fi
 assert_contains "$ROOT/debian/control" "libdtk6widget-dev (>= 6.7)" "debian control keeps DTK widget dependency at minor version"

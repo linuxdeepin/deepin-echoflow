@@ -95,12 +95,12 @@ DEFAULT_HOME="$TEST_ROOT/default-home"
 : > "$TEST_LOG"
 default_output="$(run_install "$DEFAULT_HOME")"
 assert_logged "systemctl --user daemon-reload"
-assert_logged "systemctl --user enable echoflow.service echoflow-ui.service"
+assert_logged "systemctl --user reenable echoflow.service echoflow-ui.service"
 assert_logged "systemctl --user restart echoflow.service echoflow-ui.service"
 assert_logged "fcitx5 -rd"
 assert_ordered \
   "systemctl --user daemon-reload" \
-  "systemctl --user enable echoflow.service echoflow-ui.service" \
+  "systemctl --user reenable echoflow.service echoflow-ui.service" \
   "systemctl --user restart echoflow.service echoflow-ui.service" \
   "fcitx5 -rd"
 grep -qF 'EchoFlow installed.' <<< "$default_output" || fail "default install did not report success"
@@ -109,7 +109,7 @@ NO_START_HOME="$TEST_ROOT/no-start-home"
 : > "$TEST_LOG"
 no_start_output="$(run_install "$NO_START_HOME" --no-start)"
 assert_logged "systemctl --user daemon-reload"
-assert_logged "systemctl --user enable echoflow.service echoflow-ui.service"
+assert_logged "systemctl --user reenable echoflow.service echoflow-ui.service"
 assert_not_logged "systemctl --user restart"
 assert_not_logged "fcitx5"
 grep -qF 'Start services later:' <<< "$no_start_output" || fail "no-start guidance missing"
