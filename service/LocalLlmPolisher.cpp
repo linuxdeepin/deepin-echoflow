@@ -84,7 +84,8 @@ void LocalLlmPolisher::ensureLoadedLocked()
     params.n_threads = threads_;
     params.n_threads_batch = threads_;
     params.n_ctx = kContextTokens;
-    params.n_gpu_layers = 0;
+    // Keep the runtime's default GPU offload policy; CPU-only builds still
+    // run on CPU, while CUDA builds can offload the model's layers.
 
     llama_log_set(forwardErrors, nullptr);
     crispasr_chat_error err {};

@@ -1,0 +1,129 @@
+{
+  "measured_at": "2026-11-02",
+  "cpu": "Intel Core Ultra 9 275HX",
+  "gpu": "NVIDIA GeForce RTX 5070 Laptop GPU",
+  "driver": "595.91.07",
+  "kernel": "7.3.0-amd64-desktop-rolling",
+  "cuda_toolkit": "12.8.1 (nvcc 12.8.93)",
+  "build_type": "RelWithDebInfo",
+  "cpu_target": "native",
+  "threads": 8,
+  "runtime_base": "5d7d8dd00c533213376fa7f910852ffc48762393",
+  "runtime_upstream": "830ca6024ece6477da959236ee4f825a4d085300",
+  "measurement": "Discard the first of five calls; median of four model-resident calls, no capture/VAD/commit timing.",
+  "asr": {
+    "audio": "third_party/crispasr/samples/paraformer_zh.wav",
+    "audio_sha256": "732f28a4445eb2b656675b946695e59752b7df824d475c4bc531c441f43b30f9",
+    "audio_seconds": 13.052,
+    "model": "qwen3-asr-0.6b-q4_k.gguf",
+    "language": "Chinese",
+    "iterations": {
+      "cpu": [
+        {
+          "transcribe_ms": 1452.457,
+          "transcript": "正是因为存在绝对正义，所以我们接受现实的相对正义。但是不要因为现实的相对正义，我们就认为这个世界没有正义。因为如果当你认为这个世界没有正义"
+        },
+        {
+          "transcribe_ms": 1285.932,
+          "transcript": "正是因为存在绝对正义，所以我们接受现实的相对正义。但是不要因为现实的相对正义，我们就认为这个世界没有正义。因为如果当你认为这个世界没有正义"
+        },
+        {
+          "transcribe_ms": 1269.675,
+          "transcript": "正是因为存在绝对正义，所以我们接受现实的相对正义。但是不要因为现实的相对正义，我们就认为这个世界没有正义。因为如果当你认为这个世界没有正义"
+        },
+        {
+          "transcribe_ms": 1272.319,
+          "transcript": "正是因为存在绝对正义，所以我们接受现实的相对正义。但是不要因为现实的相对正义，我们就认为这个世界没有正义。因为如果当你认为这个世界没有正义"
+        },
+        {
+          "transcribe_ms": 1267.123,
+          "transcript": "正是因为存在绝对正义，所以我们接受现实的相对正义。但是不要因为现实的相对正义，我们就认为这个世界没有正义。因为如果当你认为这个世界没有正义"
+        }
+      ],
+      "cuda": [
+        {
+          "transcribe_ms": 361.24,
+          "transcript": "正是因为存在绝对正义，所以我们接受现实的相对正义。但是，不要因为现实的相对正义，我们就认为这个世界没有正义。因为如果当你认为这个世界没有正义"
+        },
+        {
+          "transcribe_ms": 177.628,
+          "transcript": "正是因为存在绝对正义，所以我们接受现实的相对正义。但是，不要因为现实的相对正义，我们就认为这个世界没有正义。因为如果当你认为这个世界没有正义"
+        },
+        {
+          "transcribe_ms": 167.005,
+          "transcript": "正是因为存在绝对正义，所以我们接受现实的相对正义。但是，不要因为现实的相对正义，我们就认为这个世界没有正义。因为如果当你认为这个世界没有正义"
+        },
+        {
+          "transcribe_ms": 166.42,
+          "transcript": "正是因为存在绝对正义，所以我们接受现实的相对正义。但是，不要因为现实的相对正义，我们就认为这个世界没有正义。因为如果当你认为这个世界没有正义"
+        },
+        {
+          "transcribe_ms": 167.832,
+          "transcript": "正是因为存在绝对正义，所以我们接受现实的相对正义。但是，不要因为现实的相对正义，我们就认为这个世界没有正义。因为如果当你认为这个世界没有正义"
+        }
+      ]
+    }
+  },
+  "polish": {
+    "model": "Qwen3-1.7B-Q4_K_M.gguf",
+    "inputs": [
+      "今天下午三点开会，请大家提前准备好材料。",
+      "我想测试一下语音输入的速度，看看修改后的效果怎么样。",
+      "请把今天讨论的内容整理成会议纪要，明天上午发给大家。",
+      "这个功能现在已经可以正常使用了，但是还需要继续测试。",
+      "我们先比较两种运行方式的速度，然后再决定是否默认开启。"
+    ],
+    "iterations": {
+      "cpu": [
+        {
+          "generate_ms": 5942,
+          "output": "今天下午3点开会，请大家提前准备好材料。"
+        },
+        {
+          "generate_ms": 607,
+          "output": "我想测试一下语音输入的速度，看看修改后的效果怎么样。"
+        },
+        {
+          "generate_ms": 704,
+          "output": "请把今天讨论的内容整理成会议纪要，明天上午发给大家。"
+        },
+        {
+          "generate_ms": 556,
+          "output": "这个功能现在已经可以正常使用了，但是还需要继续测试。"
+        },
+        {
+          "generate_ms": 626,
+          "output": "我们先比较两种运行方式的速度，然后再决定是否默认开启。"
+        }
+      ],
+      "cuda": [
+        {
+          "generate_ms": 238,
+          "output": "今天下午3点开会，请大家提前准备好材料。"
+        },
+        {
+          "generate_ms": 110,
+          "output": "我想测试一下语音输入的速度，看看修改后的效果怎么样。"
+        },
+        {
+          "generate_ms": 124,
+          "output": "请把今天讨论的内容整理成会议纪要，明天上午发给大家。"
+        },
+        {
+          "generate_ms": 100,
+          "output": "这个功能现在已经可以正常使用了，但是还需要继续测试。"
+        },
+        {
+          "generate_ms": 111,
+          "output": "我们先比较两种运行方式的速度，然后再决定是否默认开启。"
+        }
+      ]
+    }
+  },
+  "limitations": [
+    "Small sample, not corpus CER or a release performance gate.",
+    "ASR CPU/CUDA outputs differ in punctuation.",
+    "Polish outputs agree for all five inputs.",
+    "Model loading and initial prompt warm-up excluded from medians."
+  ]
+}

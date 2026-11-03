@@ -91,9 +91,12 @@ run_install() {
     bash "$ROOT/install-user.sh" "$@"
 }
 
+unset GGML_CUDA CMAKE_CUDA_ARCHITECTURES
+
 DEFAULT_HOME="$TEST_ROOT/default-home"
 : > "$TEST_LOG"
 default_output="$(run_install "$DEFAULT_HOME")"
+grep -qF -- '<-DGGML_CUDA=OFF>' "$TEST_LOG" || fail "default install must select CPU build"
 assert_logged "systemctl --user daemon-reload"
 assert_logged "systemctl --user enable echoflow.service echoflow-ui.service"
 assert_logged "systemctl --user restart echoflow.service echoflow-ui.service"
@@ -113,6 +116,14 @@ assert_logged "systemctl --user enable echoflow.service echoflow-ui.service"
 assert_not_logged "systemctl --user restart"
 assert_not_logged "fcitx5"
 grep -qF 'Start services later:' <<< "$no_start_output" || fail "no-start guidance missing"
+
+CUDA_HOME="$TEST_ROOT/cuda-home"
+: > "$TEST_LOG"
+GGML_CUDA=ON CMAKE_CUDA_ARCHITECTURES=120 run_install "$CUDA_HOME" --no-start > "$TEST_ROOT/cuda.out"
+grep -qF -- '<-DGGML_CUDA=ON>' "$TEST_LOG" || fail "CUDA install did not enable CUDA"
+grep -qF -- '<-DCMAKE_CUDA_ARCHITECTURES=120>' "$TEST_LOG" || fail "CUDA install lost target architecture"
+assert_not_logged "systemctl --user restart"
+assert_not_logged "fcitx5"
 
 FAIL_HOME="$TEST_ROOT/failure-home"
 : > "$TEST_LOG"
