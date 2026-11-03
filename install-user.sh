@@ -11,6 +11,7 @@ SYSTEMD_USER_DIR="${SYSTEMD_USER_DIR:-$HOME/.config/systemd/user}"
 BUILD_DIR="${BUILD_DIR:-$ROOT_DIR/build/install-user}"
 BUILD_TYPE="${CMAKE_BUILD_TYPE:-RelWithDebInfo}"
 JOBS="${JOBS:-$(nproc)}"
+GGML_CUDA="${GGML_CUDA:-OFF}"
 START_SERVICES=1
 
 usage() {
@@ -20,6 +21,10 @@ Usage: $0 [--no-start]
 Options:
   --no-start  Install files and enable user services without starting them.
   -h, --help  Show this help.
+
+Build environment:
+  GGML_CUDA=ON                     Enable NVIDIA CUDA inference (default: OFF).
+  CMAKE_CUDA_ARCHITECTURES=<arch>   Optional CUDA target, e.g. 120 for RTX 50.
 EOF
 }
 
@@ -43,10 +48,16 @@ done
 
 mkdir -p "$STATE_DIR" "$CONFIG_DIR" "$SYSTEMD_USER_DIR"
 
+CMAKE_EXTRA_ARGS=("-DGGML_CUDA=$GGML_CUDA")
+if [[ -n "${CMAKE_CUDA_ARCHITECTURES:-}" ]]; then
+  CMAKE_EXTRA_ARGS+=("-DCMAKE_CUDA_ARCHITECTURES=$CMAKE_CUDA_ARCHITECTURES")
+fi
+
 cmake -S "$ROOT_DIR" -B "$BUILD_DIR" \
   -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
   -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-  -DECHOFLOW_BUILD_TESTS=OFF
+  -DECHOFLOW_BUILD_TESTS=OFF \
+  "${CMAKE_EXTRA_ARGS[@]}"
 cmake --build "$BUILD_DIR" -j "$JOBS"
 cmake --install "$BUILD_DIR"
 

@@ -13,6 +13,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 option(ECHOFLOW_BUILD_TESTS "Build QTest unit tests + spec tests" ON)
+option(GGML_CUDA "Enable NVIDIA CUDA inference for ASR and transcript polish" OFF)
 set(ECHOFLOW_CPU_TARGET "native" CACHE STRING
     "CPU target for CrispASR: native or x86-64-v3")
 set_property(CACHE ECHOFLOW_CPU_TARGET PROPERTY STRINGS native x86-64-v3)

@@ -50,6 +50,36 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build
 ```
 
+#### NVIDIA CUDA（可选）
+
+默认构建使用 CPU。安装 NVIDIA 驱动和 CUDA Toolkit 后，可为识别和文本润色
+启用 CUDA；VAD 仍在 CPU 上运行。RTX 50 系列使用 CUDA 12.8 或更新的工具链。
+下面以 RTX 5070 Laptop（计算能力 12.0）为例，显式指定架构也允许在驱动尚未
+就绪时编译：
+
+```bash
+cmake -S . -B build/cuda -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=120
+cmake --build build/cuda
+ctest --test-dir build/cuda --output-on-failure
+```
+
+其他显卡应填写对应架构，或在驱动已就绪时省略架构参数，使用上游自动检测。
+工具链不在默认搜索路径时，可添加 `-DCUDAToolkit_ROOT=/path/to/cuda`
+和 `-DCMAKE_CUDA_COMPILER=/path/to/cuda/bin/nvcc`。
+运行 CUDA 版本需要对应的 CUDA 运行库、cuBLAS 和可用的 NVIDIA 驱动；这不是
+可直接分发给所有 CPU 机器的通用二进制。默认 deb 构建仍为 CPU 版。
+
+本地安装脚本使用独立构建目录，需显式传入相同选项：
+
+```bash
+GGML_CUDA=ON CMAKE_CUDA_ARCHITECTURES=120 ./install-user.sh --no-start
+```
+
+驱动修复后先用 `nvidia-smi` 确认 GPU 可用，再运行 CUDA 构建中的
+`echoflow-service --transcribe-file your_audio.wav` 或
+`echoflow-service --polish-text "待整理的转写文本"`，检查设备日志及显存占用。
+
 ### 第二步：安装
 
 ```bash
