@@ -233,7 +233,9 @@ Config loadDtkConf(const fs::path& path)
         if (section == "basic.model.model_name") {
             cfg.modelName = val;
         } else if (section == "basic.recognition.language") {
-            cfg.language = val.empty() ? std::optional<std::string>{} : std::optional<std::string>(val);
+            cfg.language = val.empty() || val == "auto"
+                ? std::optional<std::string>{}
+                : std::optional<std::string>(val);
         } else if (section == "basic.recognition.prompt") {
             cfg.prompt = val;
         } else if (section == "basic.recognition.stream_transcription") {
