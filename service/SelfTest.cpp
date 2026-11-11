@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "SelfTest.h"
+#include "CrispSession.h"
 
 #include "SileroVadBackend.h"
 
@@ -34,16 +35,29 @@ bool canCreateDirectory(const fs::path& path)
 std::vector<RuntimeCheck> runtimeChecks(const Config& cfg)
 {
     const std::string modelPath = cfg.crispModelPath;
-    bool modelOk = !modelPath.empty() && fs::exists(modelPath);
+    bool modelOk = !modelPath.empty() && fs::is_regular_file(modelPath);
     std::string modelDetail = modelOk
         ? modelPath
         : (modelPath.empty() ? std::string("crisp model path not set")
                              : "missing: " + modelPath);
+    bool modelLoadable = false;
+    if (modelOk) {
+        try {
+            CrispSession session(modelPath, cfg.crispBackend, cfg.crispThreads);
+            modelLoadable = session.isLoaded();
+            if (!modelLoadable) {
+                modelDetail = "model file exists but CrispASR could not load it: " + modelPath;
+            }
+        } catch (const std::exception& error) {
+            modelDetail = error.what();
+        }
+    }
 
     std::vector<RuntimeCheck> checks = {
         {"recordings dir can be created", canCreateDirectory(cfg.recordingsDir), cfg.recordingsDir},
         {"pw-record available", std::system("command -v pw-record >/dev/null 2>&1") == 0, "pw-record"},
-        {"crisp model available", modelOk, modelDetail},
+        {"crisp model file available", modelOk, modelDetail},
+        {"crisp model loadable", modelLoadable, modelDetail},
         {"VAD backend supported", cfg.vadBackend == "energy" || cfg.vadBackend == "silero",
          cfg.vadBackend},
         {"control socket path parent", fs::exists(controlSocketPath(cfg).parent_path()),
