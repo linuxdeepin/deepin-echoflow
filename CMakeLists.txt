@@ -19,7 +19,9 @@ set_property(CACHE ECHOFLOW_CPU_TARGET PROPERTY STRINGS native x86-64-v3)
 
 if(ECHOFLOW_CPU_TARGET STREQUAL "x86-64-v3")
     if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
-        message(FATAL_ERROR "x86-64-v3 requires an amd64 build host")
+        message(FATAL_ERROR
+            "x86-64-v3 requires an amd64 build host; use ECHOFLOW_CPU_TARGET=native "
+            "for ${CMAKE_SYSTEM_PROCESSOR}")
     endif()
     set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
     set(GGML_SSE42 ON CACHE BOOL "" FORCE)
@@ -36,7 +38,8 @@ if(ECHOFLOW_CPU_TARGET STREQUAL "x86-64-v3")
     set(GGML_AMX_TILE OFF CACHE BOOL "" FORCE)
     set(GGML_AMX_INT8 OFF CACHE BOOL "" FORCE)
     set(GGML_AMX_BF16 OFF CACHE BOOL "" FORCE)
-elseif(NOT ECHOFLOW_CPU_TARGET STREQUAL "native")
+elseif(NOT ECHOFLOW_CPU_TARGET STREQUAL "native"
+       AND NOT ECHOFLOW_CPU_TARGET STREQUAL "x86-64-v3")
     message(FATAL_ERROR "Unsupported ECHOFLOW_CPU_TARGET=${ECHOFLOW_CPU_TARGET}")
 endif()
 
