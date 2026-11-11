@@ -17,7 +17,6 @@
 #include <utility>
 
 #include <QAction>
-#include <QApplication>
 #include <QCommandLineParser>
 #include <QCursor>
 #include <QDebug>
@@ -35,12 +34,12 @@
 #include <QString>
 #include <QSystemTrayIcon>
 #include <QTimer>
-#include <QTranslator>
 #include <QUrl>
 #include <QWindow>
 
 #include <DSettings>
 #include <DSettingsOption>
+#include <DApplication>
 #include <DGuiApplicationHelper>
 #include <DPalette>
 
@@ -327,17 +326,11 @@ private:
 int main(int argc, char **argv) {
     previousMessageHandler = qInstallMessageHandler(echoflowMessageHandler);
 
-    QApplication app(argc, argv);
+    Dtk::Widget::DApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("echoflow-ui"));
     app.setOrganizationName(QStringLiteral("echoflow"));
     app.setQuitOnLastWindowClosed(false);
-
-    // Translations ship as qm resources under :/i18n (qt_add_translations).
-    QTranslator translator;
-    if (translator.load(QLocale::system(), QStringLiteral("echoflow"),
-                        QStringLiteral("_"), QStringLiteral(":/i18n"))) {
-        QCoreApplication::installTranslator(&translator);
-    }
+    app.loadTranslator();
 
     const QIcon appIcon(QStringLiteral(":/icons/echoflow.svg"));
     app.setWindowIcon(appIcon);

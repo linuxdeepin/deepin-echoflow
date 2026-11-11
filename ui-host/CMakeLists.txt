@@ -73,8 +73,8 @@ target_compile_definitions(echoflow-ui PRIVATE
     ECHOFLOW_AUTOSTART_DESKTOP_PATH="${CMAKE_INSTALL_FULL_DATADIR}/echoflow/echoflow-autostart.desktop")
 
 # lupdate runs on this target's sources (the .qrc pulls in the QML files);
-# rebuild the update_translations target to refresh the .ts files. The .qm
-# files are rebuilt on every build and embedded under :/i18n.
+# rebuild the update_translations target to refresh the .ts files. Install
+# generated .qm files where DApplication::loadTranslator() looks for them.
 qt_add_translations(echoflow-ui
     SOURCES
         ../qml/EchoFlowTooltip.qml
@@ -85,7 +85,16 @@ qt_add_translations(echoflow-ui
         translations/echoflow_fr.ts
         translations/echoflow_it.ts
         translations/echoflow_pt.ts
+    QM_FILES_OUTPUT_VARIABLE ECHOFLOW_TRANSLATION_QM_FILES
 )
+foreach(translation_file IN LISTS ECHOFLOW_TRANSLATION_QM_FILES)
+    get_filename_component(translation_name "${translation_file}" NAME)
+    string(REGEX REPLACE "^echoflow_(.+)\\.qm$" "\\1" translation_locale
+        "${translation_name}")
+    install(FILES "${translation_file}"
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/echoflow-ui/translations"
+        RENAME "echoflow-ui_${translation_locale}.qm")
+endforeach()
 
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/echoflow.desktop.in"
