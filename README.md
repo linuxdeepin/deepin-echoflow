@@ -162,6 +162,13 @@ ctest --test-dir build --output-on-failure
 ./build/ui-host/echoflow-ui
 ```
 
+默认 CTest 和 Debian 打包测试不运行依赖 Git 的发布工具测试。
+发布工具修改后，可在安装了 Git 的开发环境中单独验证：
+
+```bash
+python3 -m unittest -v tests.test_release_performance_driver tests.test_release_evidence
+```
+
 源码结构：
 
 ```
