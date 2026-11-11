@@ -168,9 +168,9 @@ std::string VoiceSession::handleCommand(const std::string& command)
     std::string verb = upper(space == std::string::npos ? cmd : cmd.substr(0, space));
     std::string argument = trim(space == std::string::npos ? std::string() : cmd.substr(space + 1));
 
-    // Focus and caret reports from the fcitx addon drive the UI host's focus
-    // hint, caret-anchored capsule and long-press detection. The service only
-    // relays them; they never change the session state.
+    // Keep accepting focus reports from older addons. Current addons notify
+    // the UI directly so focus tracking also works while this service is idle.
+    // These compatibility messages never change the session state.
     if (verb == "FOCUS" || verb == "CARET" || verb == "TYPED") {
         ui_.send(focusMessage(verb, argument));
         return "OK";
@@ -179,7 +179,11 @@ std::string VoiceSession::handleCommand(const std::string& command)
     if (verb == "BLUR") {
         // Focus left the input context: discard any live recording the same way
         // the X button does, then hide the capsule.
-        ui_.send("BLUR");
+        // New addons already sent BLUR on the UI focus channel. Relaying it
+        // again here could overwrite a newer FOCUS while ASR was busy.
+        if (argument != "ui-notified") {
+            ui_.send("BLUR");
+        }
         cancelActiveSession();
         return "TOOLTIP hide";
     }

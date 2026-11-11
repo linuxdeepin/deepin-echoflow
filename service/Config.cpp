@@ -136,14 +136,13 @@ std::string expandPath(const std::string& value, const fs::path& baseDir)
 
 fs::path runtimeDir()
 {
+    fs::path userRuntime = fs::path("/run/user") / std::to_string(getuid());
+    if (fs::is_directory(userRuntime) && access(userRuntime.c_str(), W_OK | X_OK) == 0) {
+        return userRuntime;
+    }
     const char* xdg = std::getenv("XDG_RUNTIME_DIR");
     if (xdg && access(xdg, W_OK | X_OK) == 0) {
         return xdg;
-    }
-
-    fs::path userRuntime = fs::path("/run/user") / std::to_string(getuid());
-    if (fs::exists(userRuntime)) {
-        return userRuntime;
     }
     return "/tmp";
 }

@@ -621,6 +621,7 @@ private slots:
     void focusIsRelayedToUi();
     void typedIsRelayedWithoutDisturbingRecording();
     void blurIsRelayedBeforeCancellation();
+    void directlyNotifiedBlurCancelsWithoutRelayingFocus();
     void startOnlyStartsFromIdle();
     void stopOnlyFinalizesRecording();
     void secondCtrlStopsTranscribesAndCommits();
@@ -748,6 +749,24 @@ void TestVoiceSession::blurIsRelayedBeforeCancellation()
     ui.clear();
     session.handleCommand("BLUR");
     QCOMPARE(ui.messages(), (std::vector<std::string> { "BLUR", "IDLE" }));
+}
+
+void TestVoiceSession::directlyNotifiedBlurCancelsWithoutRelayingFocus()
+{
+    FakeRecorder recorder;
+    FakeAsr asr;
+    FakeCommitter committer;
+    FakeUi ui;
+    auto session = makeSession(recorder, asr, committer, ui);
+
+    session.handleCommand("START");
+    ui.clear();
+    QCOMPARE(QString::fromStdString(session.handleCommand("BLUR ui-notified")),
+        QStringLiteral("TOOLTIP hide"));
+    QCOMPARE(recorder.stops(), 1);
+    QCOMPARE(session.state(), SessionState::Idle);
+    QVERIFY(committer.texts().empty());
+    QCOMPARE(ui.messages(), (std::vector<std::string> { "IDLE" }));
 }
 
 void TestVoiceSession::startOnlyStartsFromIdle()

@@ -9,6 +9,12 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cerrno>
+#include <cstring>
+#include <chrono>
+#include <cstdlib>
+#include <poll.h>
+#include <string>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -54,6 +60,44 @@ bool isSessionCommand(const std::string& verb)
         && verb != "STATUS";
 }
 
+int systemdActivationSocket()
+{
+    const char* pidValue = std::getenv("LISTEN_PID");
+    const char* fdsValue = std::getenv("LISTEN_FDS");
+    if (!pidValue || !fdsValue || std::strtol(pidValue, nullptr, 10) != getpid()
+        || std::strtol(fdsValue, nullptr, 10) != 1) {
+        return -1;
+    }
+    unsetenv("LISTEN_PID");
+    unsetenv("LISTEN_FDS");
+    constexpr int fd = 3;
+    int type = 0;
+    socklen_t typeSize = sizeof(type);
+    if (getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &typeSize) != 0
+        || type != SOCK_DGRAM) {
+        return -1;
+    }
+    return fd;
+}
+
+std::chrono::milliseconds idleTimeout()
+{
+    constexpr long kDefaultTimeoutMs = 10 * 60 * 1000;
+    const char* value = std::getenv("ECHOFLOW_IDLE_TIMEOUT_MS");
+    if (!value || !*value) {
+        return std::chrono::milliseconds(kDefaultTimeoutMs);
+    }
+    char* end = nullptr;
+    const long parsed = std::strtol(value, &end, 10);
+    return end != value && *end == '\0' && parsed > 0
+        ? std::chrono::milliseconds(parsed) : std::chrono::milliseconds(kDefaultTimeoutMs);
+}
+
+bool isActivityCommand(const std::string& verb)
+{
+    return verb == "START" || verb == "STOP" || verb == "CTRL_DOWN" || verb == "CANCEL";
+}
+
 }  // namespace
 
 Server::Server(Config cfg, VoiceSession& session)
@@ -64,6 +108,11 @@ Server::Server(Config cfg, VoiceSession& session)
 
 int Server::run()
 {
+    const int activationFd = systemdActivationSocket();
+    if (activationFd < 0) {
+        log("service must be started by echoflow.socket activation");
+        return 1;
+    }
     auto serverPath = controlSocketPath(cfg_);
     SingleInstanceGuard instance;
     std::string error;
@@ -71,28 +120,81 @@ int Server::run()
         log(error);
         return 1;
     }
-    int fd = instance.fd();
+    const int fd = instance.fd();
     log("EchoFlow service listening on " + serverPath.string());
 
+    using Clock = std::chrono::steady_clock;
+    const auto timeout = idleTimeout();
+    auto lastActivity = Clock::now();
+    auto lastState = session_.state();
     char buf[4096];
     for (;;) {
-        sockaddr_un peer {};
-        socklen_t peerLen = sizeof(peer);
-        ssize_t n = recvfrom(fd, buf, sizeof(buf) - 1, 0, reinterpret_cast<sockaddr*>(&peer), &peerLen);
-        if (n <= 0) {
+        const auto now = Clock::now();
+        const auto state = session_.state();
+        if (state != lastState) {
+            if (state == SessionState::Idle) {
+                lastActivity = now;
+            }
+            lastState = state;
+        }
+        if (state == SessionState::Idle && now - lastActivity >= timeout) {
+            log("service idle timeout reached; exiting normally");
+            return 0;
+        }
+
+        int waitMs = 1000;
+        if (state == SessionState::Idle) {
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                timeout - (now - lastActivity));
+            waitMs = static_cast<int>(std::max<long long>(0,
+                std::min<long long>(remaining.count(), waitMs)));
+        }
+        pollfd watched[2] = {{fd, POLLIN, 0}, {activationFd, POLLIN, 0}};
+        const int ready = poll(watched, 2, waitMs);
+        if (ready < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            log(std::string("poll failed: ") + std::strerror(errno));
             continue;
         }
-        buf[n] = '\0';
-        std::string command = trim(std::string(buf, n));
-        auto space = command.find(' ');
-        std::string verb = upper(space == std::string::npos ? command : command.substr(0, space));
-        if (isSessionCommand(verb)) {
-            log("control command: " + command);
+        if (ready == 0) {
+            continue;
         }
-        std::string reply = isAllowed(command) ? session_.handleCommand(command) + "\n"
-                                               : "ERR unknown-command\n";
-        if (peerLen > 0) {
-            sendto(fd, reply.data(), reply.size(), 0, reinterpret_cast<sockaddr*>(&peer), peerLen);
+
+        for (const auto& source : watched) {
+            if (!(source.revents & POLLIN)) {
+                continue;
+            }
+            sockaddr_un peer {};
+            socklen_t peerLen = sizeof(peer);
+            const ssize_t n = recvfrom(source.fd, buf, sizeof(buf) - 1, 0,
+                reinterpret_cast<sockaddr*>(&peer), &peerLen);
+            if (n <= 0) {
+                continue;
+            }
+            buf[n] = '\0';
+            std::string command = trim(std::string(buf, n));
+            auto space = command.find(' ');
+            std::string verb = upper(space == std::string::npos ? command : command.substr(0, space));
+            if (isSessionCommand(verb)) {
+                log("control command: " + command);
+            }
+            std::string reply = isAllowed(command) ? session_.handleCommand(command) + "\n"
+                                                   : "ERR unknown-command\n";
+            if (peerLen > 0) {
+                sendto(source.fd, reply.data(), reply.size(), 0,
+                    reinterpret_cast<sockaddr*>(&peer), peerLen);
+            }
+            const auto after = session_.state();
+            if (after != lastState) {
+                if (after == SessionState::Idle) {
+                    lastActivity = Clock::now();
+                }
+                lastState = after;
+            } else if (after == SessionState::Idle && isActivityCommand(verb)) {
+                lastActivity = Clock::now();
+            }
         }
     }
 }

@@ -56,9 +56,8 @@ cmake --build build
 ./install-user.sh
 ```
 
-安装完成后会自动启用两个用户 systemd 服务：
-- `echoflow.service`——语音识别后台守护进程
-- `echoflow-ui.service`——托盘图标和语音胶囊提示
+安装完成后会安装 `echoflow.service` 与 `echoflow.socket` 用户单元。登录时启动器导入图形会话环境、启动 UI 和录音唤醒 socket；service 仅在录音命令到达时启动，空闲 10 分钟后正常退出。
+Fcitx 将焦点和光标信息直接发送到 UI socket；服务未启动时，鼠标长按仍可判断输入框位置，普通输入不会唤醒语音服务。
 
 本地安装会同时重载 Fcitx，使用户目录中的 addon 和对应的绝对模块路径
 立即生效。使用 `--no-start` 时不会修改当前 Fcitx 会话，稍后需手动执行
@@ -109,10 +108,10 @@ fcitx5 -rd
 
 ```bash
 # 查看服务状态
-systemctl --user status echoflow.service echoflow-ui.service
+systemctl --user status echoflow.service
 
-# 重启服务
-systemctl --user restart echoflow.service echoflow-ui.service
+# 重启已运行的服务
+~/.local/bin/echoflow-session-start --restart-service-if-active
 
 # 环境自检
 ./build/service/echoflow-service --self-test
@@ -136,10 +135,10 @@ systemctl --user restart echoflow.service echoflow-ui.service
 | `basic.recording.min_record_seconds` | 最短录音时长 | `0.5` |
 | `basic.recognition.stream_transcription` | 启用流式预览 | `true` |
 
-修改配置后需重启服务生效：
+修改配置后，重启已运行的服务即可生效；未运行时，下次唤醒会加载新配置：
 
 ```bash
-systemctl --user restart echoflow.service echoflow-ui.service
+~/.local/bin/echoflow-session-start --restart-service-if-active
 ```
 
 ### 卸载

@@ -6,6 +6,12 @@
 #include "OnboardingState.h"
 
 #include <algorithm>
+#include <QCoreApplication>
+#include <QDir>
+
+#ifndef ECHOFLOW_AUTOSTART_DESKTOP_PATH
+#define ECHOFLOW_AUTOSTART_DESKTOP_PATH ""
+#endif
 
 OnboardingSetupController::OnboardingSetupController(ModelSetupSource *model,
                                                      SetupCommandRunner *runner,
@@ -32,6 +38,14 @@ OnboardingSetupController::OnboardingSetupController(ModelSetupSource *model,
         setItemState(SetupItem::Model,
                      ok ? SetupItemState::Succeeded : SetupItemState::Failed,
                      ok ? QString() : error);
+        if (ok && serviceStartAfterModel_) {
+            serviceStartAfterModel_ = false;
+            if (initialProbesRemaining_ > 0) {
+                serviceReloadRequested_ = true;
+            } else {
+                startService(QStringLiteral("service-after-model"));
+            }
+        }
         checkForCompletion();
     });
     connect(runner_, &SetupCommandRunner::finished, this,
@@ -115,11 +129,16 @@ void OnboardingSetupController::launchPendingSetup()
     startRequested_ = false;
 
     for (SetupItem item : {SetupItem::Model, SetupItem::UiAutostart,
-                           SetupItem::Service, SetupItem::Fcitx}) {
+                           SetupItem::Fcitx}) {
         if (itemState(item) == SetupItemState::Pending
             || itemState(item) == SetupItemState::Failed) {
             startItem(item);
         }
+    }
+    if (itemState(SetupItem::Model) == SetupItemState::Succeeded
+        && (itemState(SetupItem::Service) == SetupItemState::Pending
+            || itemState(SetupItem::Service) == SetupItemState::Failed)) {
+        startService(QStringLiteral("service"));
     }
     checkForCompletion();
 }
@@ -136,11 +155,17 @@ void OnboardingSetupController::retryFailed()
 
     bool retried = false;
     for (SetupItem item : {SetupItem::Model, SetupItem::UiAutostart,
-                           SetupItem::Service, SetupItem::Fcitx}) {
+                           SetupItem::Fcitx}) {
         if (itemState(item) == SetupItemState::Failed) {
             startItem(item);
             retried = true;
         }
+    }
+    if (itemState(SetupItem::Model) == SetupItemState::Succeeded
+        && (itemState(SetupItem::Service) == SetupItemState::Pending
+            || itemState(SetupItem::Service) == SetupItemState::Failed)) {
+        startService(QStringLiteral("service"));
+        retried = true;
     }
     if (!retried) {
         checkForCompletion();
@@ -158,19 +183,18 @@ void OnboardingSetupController::beginReconstruction()
         itemStates_[indexOf(SetupItem::Model)] = SetupItemState::Succeeded;
     } else if (model_->downloadRunning()) {
         itemStates_[indexOf(SetupItem::Model)] = SetupItemState::Running;
+        serviceStartAfterModel_ = true;
+    } else {
+        serviceStartAfterModel_ = true;
     }
 
-    itemStates_[indexOf(SetupItem::UiAutostart)] = SetupItemState::Running;
+    itemStates_[indexOf(SetupItem::UiAutostart)] = SetupItemState::Pending;
     itemStates_[indexOf(SetupItem::Service)] = SetupItemState::Running;
-    initialProbesRemaining_ = 2;
-    runner_->run(QStringLiteral("ui-autostart-initial-check"),
-                 QStringLiteral("systemctl"),
-                 {QStringLiteral("--user"), QStringLiteral("is-enabled"),
-                  QStringLiteral("echoflow-ui.service")});
+    initialProbesRemaining_ = 1;
     runner_->run(QStringLiteral("service-initial-check"),
                  QStringLiteral("systemctl"),
                  {QStringLiteral("--user"), QStringLiteral("is-active"),
-                  QStringLiteral("echoflow.service")});
+                  QStringLiteral("echoflow.socket")});
 }
 
 void OnboardingSetupController::startItem(SetupItem item)
@@ -181,24 +205,39 @@ void OnboardingSetupController::startItem(SetupItem item)
         if (model_->modelPresent()) {
             setItemState(item, SetupItemState::Succeeded);
         } else if (!model_->downloadRunning()) {
+            serviceStartAfterModel_ = true;
             model_->startDownload();
         }
         break;
-    case SetupItem::UiAutostart:
-        runner_->run(QStringLiteral("ui-autostart"), QStringLiteral("systemctl"),
-                     {QStringLiteral("--user"), QStringLiteral("enable"),
-                      QStringLiteral("echoflow-ui.service")});
+    case SetupItem::UiAutostart: {
+        QString source = QStringLiteral(ECHOFLOW_AUTOSTART_DESKTOP_PATH);
+        if (source.isEmpty()) {
+            source = QDir(QCoreApplication::applicationDirPath())
+                .filePath(QStringLiteral("../share/echoflow/echoflow-autostart.desktop"));
+        }
+        const QString destination = QDir::home().filePath(
+            QStringLiteral(".config/autostart/echoflow-autostart.desktop"));
+        runner_->run(QStringLiteral("ui-autostart"), QStringLiteral("install"),
+                     {QStringLiteral("-D"), source, destination});
         break;
+    }
     case SetupItem::Service:
-        runner_->run(QStringLiteral("service"), QStringLiteral("systemctl"),
-                     {QStringLiteral("--user"), QStringLiteral("enable"),
-                      QStringLiteral("--now"), QStringLiteral("echoflow.service")});
+        startService(QStringLiteral("service"));
         break;
     case SetupItem::Fcitx:
         runner_->run(QStringLiteral("fcitx"), QStringLiteral("fcitx5"),
                      {QStringLiteral("-rd")});
         break;
     }
+}
+
+void OnboardingSetupController::startService(const QString &id)
+{
+    setItemState(SetupItem::Service, SetupItemState::Running);
+    runner_->run(id,
+                 QDir(QCoreApplication::applicationDirPath())
+                     .filePath(QStringLiteral("echoflow-session-start")),
+                 {QStringLiteral("--socket-only")});
 }
 
 void OnboardingSetupController::setItemState(SetupItem item,
@@ -223,11 +262,8 @@ void OnboardingSetupController::handleCommandFinished(const QString &id,
                                                       const QString &error)
 {
     SetupItem item;
-    if (id == QStringLiteral("ui-autostart-initial-check")
-        || id == QStringLiteral("service-initial-check")) {
-        item = id == QStringLiteral("ui-autostart-initial-check")
-            ? SetupItem::UiAutostart
-            : SetupItem::Service;
+    if (id == QStringLiteral("service-initial-check")) {
+        item = SetupItem::Service;
         if (initialProbesRemaining_ <= 0
             || itemState(item) != SetupItemState::Running) {
             return;
@@ -235,8 +271,14 @@ void OnboardingSetupController::handleCommandFinished(const QString &id,
         setItemState(item, ok ? SetupItemState::Succeeded
                               : SetupItemState::Pending);
         --initialProbesRemaining_;
-        if (initialProbesRemaining_ == 0 && startRequested_) {
-            launchPendingSetup();
+        if (initialProbesRemaining_ == 0) {
+            if (serviceReloadRequested_) {
+                serviceReloadRequested_ = false;
+                startService(QStringLiteral("service-after-model"));
+            }
+            if (startRequested_) {
+                launchPendingSetup();
+            }
         }
         return;
     } else if (id == QStringLiteral("ui-autostart")) {
@@ -244,14 +286,8 @@ void OnboardingSetupController::handleCommandFinished(const QString &id,
         if (itemState(item) != SetupItemState::Running) {
             return;
         }
-        if (ok) {
-            runner_->run(QStringLiteral("ui-autostart-check"),
-                         QStringLiteral("systemctl"),
-                         {QStringLiteral("--user"), QStringLiteral("is-enabled"),
-                          QStringLiteral("echoflow-ui.service")});
-            return;
-        }
-    } else if (id == QStringLiteral("service")) {
+    } else if (id == QStringLiteral("service")
+               || id == QStringLiteral("service-after-model")) {
         item = SetupItem::Service;
         if (itemState(item) != SetupItemState::Running) {
             return;
@@ -260,11 +296,9 @@ void OnboardingSetupController::handleCommandFinished(const QString &id,
             runner_->run(QStringLiteral("service-check"),
                          QStringLiteral("systemctl"),
                          {QStringLiteral("--user"), QStringLiteral("is-active"),
-                          QStringLiteral("echoflow.service")});
+                          QStringLiteral("echoflow.socket")});
             return;
         }
-    } else if (id == QStringLiteral("ui-autostart-check")) {
-        item = SetupItem::UiAutostart;
     } else if (id == QStringLiteral("service-check")) {
         item = SetupItem::Service;
     } else if (id == QStringLiteral("fcitx")) {
