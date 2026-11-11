@@ -110,10 +110,22 @@ configure_file(
     "${CMAKE_BINARY_DIR}/systemd/user/echoflow.service"
     @ONLY)
 configure_file(
-    "${CMAKE_SOURCE_DIR}/systemd/user/echoflow-ui.service.in"
-    "${CMAKE_BINARY_DIR}/systemd/user/echoflow-ui.service"
+    "${CMAKE_SOURCE_DIR}/systemd/user/echoflow.socket.in"
+    "${CMAKE_BINARY_DIR}/systemd/user/echoflow.socket"
+    @ONLY)
+configure_file(
+    "${CMAKE_SOURCE_DIR}/ui-host/echoflow-autostart.desktop.in"
+    "${CMAKE_BINARY_DIR}/echoflow-autostart.desktop"
     @ONLY)
 install(FILES
     "${CMAKE_BINARY_DIR}/systemd/user/echoflow.service"
-    "${CMAKE_BINARY_DIR}/systemd/user/echoflow-ui.service"
+    "${CMAKE_BINARY_DIR}/systemd/user/echoflow.socket"
     DESTINATION "lib/systemd/user")
+install(FILES "${CMAKE_BINARY_DIR}/echoflow-autostart.desktop"
+    DESTINATION "${CMAKE_INSTALL_SYSCONFDIR}/xdg/autostart")
+install(FILES "${CMAKE_BINARY_DIR}/echoflow-autostart.desktop"
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/echoflow")
+install(PROGRAMS
+    "${CMAKE_SOURCE_DIR}/scripts/echoflow-session-start"
+    "${CMAKE_SOURCE_DIR}/scripts/echoflow-session-stop"
+    DESTINATION "${CMAKE_INSTALL_BINDIR}")

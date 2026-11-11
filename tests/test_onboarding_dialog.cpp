@@ -83,14 +83,11 @@ static void finishSuccessfulCommands(FakeCommandRunner &runner)
     runner.finish(QStringLiteral("ui-autostart"), true);
     runner.finish(QStringLiteral("service"), true);
     runner.finish(QStringLiteral("fcitx"), true);
-    runner.finish(QStringLiteral("ui-autostart-check"), true);
     runner.finish(QStringLiteral("service-check"), true);
 }
 
 static void finishInitialNotReady(FakeCommandRunner &runner)
 {
-    runner.finish(QStringLiteral("ui-autostart-initial-check"), false,
-                  QStringLiteral("disabled"));
     runner.finish(QStringLiteral("service-initial-check"), false,
                   QStringLiteral("inactive"));
     runner.calls.clear();
@@ -721,7 +718,7 @@ void TestOnboardingDialog::startRunsSetupAndDisablesPrimaryAction()
 
     QTest::mouseClick(next, Qt::LeftButton);
     QCOMPARE(model.starts, 1);
-    QCOMPARE(runner.calls.size(), 3);
+    QCOMPARE(runner.calls.size(), 2);
     QVERIFY(controller.isRunning());
     QVERIFY(!next->isEnabled());
     QCOMPARE(next->text(), QStringLiteral("Preparing…"));

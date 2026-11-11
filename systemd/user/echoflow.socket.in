@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: 2026 Hualet Wang
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[Unit]
+Description=EchoFlow recording activation socket
+
+[Socket]
+ListenDatagram=%t/echoflow-wakeup.sock
+SocketMode=0600
+Service=echoflow.service
+
+[Install]
+WantedBy=default.target

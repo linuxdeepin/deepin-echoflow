@@ -105,7 +105,11 @@ function(echoflow_enable_dead_strip target)
     endif()
 endfunction()
 
+add_test(NAME session_lifecycle_tests
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_session_lifecycle.py)
+
 set(ECHOFLOW_TESTS
+    test_addon_command_client
     test_audio_segmenter
     test_config
     test_crispasr_engine

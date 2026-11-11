@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Hualet Wang
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "CommandClient.h"
+
 #include <algorithm>
 #include <array>
 #include <cerrno>
@@ -34,7 +36,6 @@
 
 namespace {
 
-constexpr const char *kControlSocketName = "echoflow-control.sock";
 constexpr const char *kCommitSocketName = "echoflow-fcitx.sock";
 constexpr size_t kMaxMessageSize = 65536;
 constexpr std::string_view kCommitCommand = "COMMIT\n";
@@ -55,59 +56,27 @@ bool isUsableRuntimeDirectory(const std::string &path) {
 }
 
 std::string runtimeDir() {
+    std::string runUserDir = "/run/user/" + std::to_string(getuid());
+    if (isUsableRuntimeDirectory(runUserDir)) {
+        return runUserDir;
+    }
     if (const char *runtime = std::getenv("XDG_RUNTIME_DIR")) {
         if (runtime[0] != '\0' && isUsableRuntimeDirectory(runtime)) {
             return runtime;
         }
     }
-    std::string runUserDir = "/run/user/" + std::to_string(getuid());
-    if (isUsableRuntimeDirectory(runUserDir)) {
-        return runUserDir;
-    }
     return "/tmp";
-}
-
-std::string controlSocketPath() {
-    return runtimeDir() + "/" + kControlSocketName;
 }
 
 std::string commitSocketPath() { return runtimeDir() + "/" + kCommitSocketName; }
 
-bool sendControlCommand(std::string_view command) {
-    const std::string path = controlSocketPath();
-    const std::string clientPath = runtimeDir() + "/echoflow-addon-" +
-                                   std::to_string(getpid()) + "-" +
-                                   std::to_string(fcitx::now(CLOCK_MONOTONIC)) +
-                                   ".sock";
-    sockaddr_un server {};
-    sockaddr_un client {};
-    if (path.size() >= sizeof(server.sun_path) ||
-        clientPath.size() >= sizeof(client.sun_path)) {
-        return false;
-    }
+bool sendControlCommand(std::string_view command, bool wakeup = false) {
+    return echoflow::sendAddonCommand(runtimeDir(), wakeup
+        ? echoflow::CommandChannel::Wakeup : echoflow::CommandChannel::Control, command);
+}
 
-    int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
-    if (fd < 0) {
-        return false;
-    }
-
-    server.sun_family = AF_UNIX;
-    std::strncpy(server.sun_path, path.c_str(), sizeof(server.sun_path) - 1);
-    client.sun_family = AF_UNIX;
-    std::strncpy(client.sun_path, clientPath.c_str(),
-                 sizeof(client.sun_path) - 1);
-
-    unlink(clientPath.c_str());
-    bool ok = bind(fd, reinterpret_cast<sockaddr *>(&client), sizeof(client)) ==
-              0;
-    if (ok) {
-        ok = sendto(fd, command.data(), command.size(), 0,
-                    reinterpret_cast<sockaddr *>(&server), sizeof(server)) >= 0;
-    }
-
-    close(fd);
-    unlink(clientPath.c_str());
-    return ok;
+bool sendFocusCommand(std::string_view command) {
+    return echoflow::sendAddonCommand(runtimeDir(), echoflow::CommandChannel::Ui, command);
 }
 
 struct Request {
@@ -278,7 +247,7 @@ private:
         }
         cancelPendingBlur();
         rightCtrlDown_ = false;
-        sendControlCommand("BLUR");
+        echoflow::sendAddonBlur(runtimeDir());
     }
 
     void cancelPendingBlur() {
@@ -331,7 +300,7 @@ private:
         const fcitx::Rect &rect = ic->cursorRect();
         if (rect.height() <= 0 ||
             ic->capabilityFlags().test(fcitx::CapabilityFlag::Password)) {
-            sendControlCommand(verb);
+            sendFocusCommand(verb);
             return;
         }
         const std::string command =
@@ -339,7 +308,7 @@ private:
             std::to_string(rect.top()) + " " +
             std::to_string(std::max(rect.width(), 0)) + " " +
             std::to_string(rect.height());
-        sendControlCommand(command);
+        sendFocusCommand(command);
     }
 
     void handleKeyEvent(fcitx::Event &event) {
@@ -352,7 +321,7 @@ private:
             if (keyEvent->isRelease()) {
                 if (rightCtrlDown_) {
                     rightCtrlDown_ = false;
-                    sendControlCommand("STOP");
+                    sendControlCommand("STOP", true);
                 }
                 return;
             }
@@ -360,7 +329,7 @@ private:
                 return;
             }
             rightCtrlDown_ = true;
-            sendControlCommand("START");
+            sendControlCommand("START", true);
             return;
         }
 
@@ -368,7 +337,7 @@ private:
         // the focused input context, so tell the service to declutter the voice
         // capsule. Observer only: we never consume the event (no accept/filter).
         if (!keyEvent->isRelease() && !key.isModifier()) {
-            sendControlCommand("TYPED");
+            sendFocusCommand("TYPED");
         }
     }
 

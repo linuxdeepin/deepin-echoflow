@@ -96,14 +96,14 @@ bool isUsableRuntimeDirectory(const std::string &path) {
 }
 
 std::string runtimeDir() {
+    std::string runUserDir = "/run/user/" + std::to_string(getuid());
+    if (isUsableRuntimeDirectory(runUserDir)) {
+        return runUserDir;
+    }
     if (const char *runtime = std::getenv("XDG_RUNTIME_DIR")) {
         if (runtime[0] != '\0' && isUsableRuntimeDirectory(runtime)) {
             return runtime;
         }
-    }
-    std::string runUserDir = "/run/user/" + std::to_string(getuid());
-    if (isUsableRuntimeDirectory(runUserDir)) {
-        return runUserDir;
     }
     return "/tmp";
 }
@@ -122,6 +122,10 @@ QString defaultQmlPath() {
 
 std::string defaultControlSocketPath() {
     return runtimeDir() + "/echoflow-control.sock";
+}
+
+std::string defaultWakeupSocketPath() {
+    return runtimeDir() + "/echoflow-wakeup.sock";
 }
 
 QString defaultConfigPath() {
@@ -171,9 +175,10 @@ bool sendControlCommand(const QString &controlPath, std::string_view command) {
 }
 
 void restartServiceAfterSettingsChange() {
+    const QString launcher = QDir(QCoreApplication::applicationDirPath())
+        .filePath(QStringLiteral("echoflow-session-start"));
     const bool started = QProcess::startDetached(
-        QStringLiteral("systemctl"),
-        QStringList{QStringLiteral("--user"), QStringLiteral("restart"), QStringLiteral("echoflow.service")});
+        launcher, QStringList{QStringLiteral("--restart-service-if-active")});
     if (!started) {
         qWarning("failed to restart echoflow.service after settings change");
     }
@@ -394,8 +399,11 @@ int main(int argc, char **argv) {
     }
 
     const QString controlPath = QString::fromStdString(defaultControlSocketPath());
-    CapsuleController controller([controlPath](std::string_view command) {
-        return sendControlCommand(controlPath, command);
+    const QString wakeupPath = QString::fromStdString(defaultWakeupSocketPath());
+    CapsuleController controller([controlPath, wakeupPath](std::string_view command) {
+        const bool wakeup = command == "CTRL_DOWN" || command == "START"
+            || command == "STOP";
+        return sendControlCommand(wakeup ? wakeupPath : controlPath, command);
     });
     ThemeBridge theme;
     QQmlApplicationEngine engine;
@@ -446,11 +454,11 @@ int main(int argc, char **argv) {
                          longPress.handleRelease(echoflow::nativeToLogical(position));
                      });
     QObject::connect(&longPress, &LongPressDetector::holdStarted, &app,
-                     [controlPath] { sendControlCommand(controlPath, "START"); });
+                     [wakeupPath] { sendControlCommand(wakeupPath, "START"); });
     QObject::connect(&longPress, &LongPressDetector::holdFinished, &app,
-                     [controlPath] { sendControlCommand(controlPath, "STOP"); });
+                     [wakeupPath] { sendControlCommand(wakeupPath, "STOP"); });
     QObject::connect(&longPress, &LongPressDetector::holdCancelled, &app,
-                     [controlPath] { sendControlCommand(controlPath, "CANCEL"); });
+                     [wakeupPath] { sendControlCommand(wakeupPath, "CANCEL"); });
     QObject::connect(&buttonSource, &XEventMonitorSource::activeChanged, &app,
                      [&](bool active) {
                          longPress.setEnabled(active);

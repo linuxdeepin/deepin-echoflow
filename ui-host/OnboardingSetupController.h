@@ -64,6 +64,7 @@ private:
     void beginReconstruction();
     void launchPendingSetup();
     void startItem(SetupItem item);
+    void startService(const QString &id);
     void setItemState(SetupItem item, SetupItemState state,
                       const QString &error = {});
     void handleCommandFinished(const QString &id, bool ok,
@@ -81,6 +82,8 @@ private:
     bool complete_ = false;
     bool started_ = false;
     bool startRequested_ = false;
+    bool serviceStartAfterModel_ = false;
+    bool serviceReloadRequested_ = false;
     int initialProbesRemaining_ = 0;
     QString aggregateError_;
 };

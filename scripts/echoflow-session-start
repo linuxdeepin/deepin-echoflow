@@ -1,0 +1,63 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 Hualet Wang
+# SPDX-License-Identifier: GPL-3.0-or-later
+set -eu
+
+socket_only=0
+restart_service=0
+if [ "${1:-}" = "--socket-only" ]; then
+    socket_only=1
+    shift
+elif [ "${1:-}" = "--restart-service-if-active" ]; then
+    restart_service=1
+    shift
+fi
+if [ "$#" -ne 0 ]; then
+    echo "Usage: echoflow-session-start [--socket-only|--restart-service-if-active]" >&2
+    exit 2
+fi
+
+session_vars="XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS DISPLAY WAYLAND_DISPLAY XAUTHORITY PULSE_SERVER PIPEWIRE_REMOTE XDG_SESSION_TYPE XDG_CURRENT_DESKTOP DESKTOP_SESSION LANG LC_ALL LC_MESSAGES QT_QPA_PLATFORM XDG_DATA_DIRS XDG_CONFIG_DIRS GDK_BACKEND"
+set --
+for name in $session_vars; do
+    if printenv "$name" >/dev/null 2>&1; then
+        set -- "$@" "$name"
+    fi
+done
+if [ "$#" -gt 0 ]; then
+    systemctl --user import-environment "$@"
+fi
+
+if [ "$restart_service" -eq 1 ]; then
+    if systemctl --user is-active --quiet echoflow.service; then
+        systemctl --user restart echoflow.service
+    fi
+    exit 0
+fi
+
+systemctl --user start echoflow.socket
+
+if [ "$socket_only" -eq 1 ]; then
+    exit 0
+fi
+
+ui="$(dirname "$0")/echoflow-ui"
+ui_pid=
+stop_ui() {
+    trap '' TERM INT HUP
+    if [ -n "$ui_pid" ]; then
+        kill -TERM "$ui_pid" 2>/dev/null || true
+        wait "$ui_pid" 2>/dev/null || true
+    fi
+    exit 0
+}
+trap stop_ui TERM INT HUP
+while :; do
+    "$ui" &
+    ui_pid=$!
+    if wait "$ui_pid"; then
+        exit 0
+    fi
+    ui_pid=
+    sleep 1
+done

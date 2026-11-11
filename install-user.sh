@@ -8,6 +8,7 @@ PREFIX="${PREFIX:-$HOME/.local}"
 STATE_DIR="${STATE_DIR:-$HOME/.local/share/echoflow}"
 CONFIG_DIR="${CONFIG_DIR:-$HOME/.config/echoflow}"
 SYSTEMD_USER_DIR="${SYSTEMD_USER_DIR:-$HOME/.config/systemd/user}"
+AUTOSTART_DIR="${AUTOSTART_DIR:-$HOME/.config/autostart}"
 BUILD_DIR="${BUILD_DIR:-$ROOT_DIR/build/install-user}"
 BUILD_TYPE="${CMAKE_BUILD_TYPE:-RelWithDebInfo}"
 JOBS="${JOBS:-$(nproc)}"
@@ -18,7 +19,7 @@ usage() {
 Usage: $0 [--no-start]
 
 Options:
-  --no-start  Install files and enable user services without starting them.
+  --no-start  Install files without starting the service or UI.
   -h, --help  Show this help.
 EOF
 }
@@ -41,13 +42,24 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-mkdir -p "$STATE_DIR" "$CONFIG_DIR" "$SYSTEMD_USER_DIR"
+mkdir -p "$STATE_DIR" "$CONFIG_DIR" "$SYSTEMD_USER_DIR" "$AUTOSTART_DIR"
 
 cmake -S "$ROOT_DIR" -B "$BUILD_DIR" \
   -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
   -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+  -DCMAKE_INSTALL_SYSCONFDIR="$PREFIX/etc" \
   -DECHOFLOW_BUILD_TESTS=OFF
 cmake --build "$BUILD_DIR" -j "$JOBS"
+
+# Remove the legacy boot-enabled service before replacing its unit. Otherwise
+# an old default.target.wants link can start the new activation-only service
+# without its socket descriptor on the next login.
+systemctl --user disable --now echoflow.service 2>/dev/null || true
+systemctl --user stop echoflow.socket 2>/dev/null || true
+
+systemctl --user disable --now echoflow-ui.service 2>/dev/null || true
+"$ROOT_DIR/scripts/echoflow-session-stop" "$PREFIX/bin"
+
 cmake --install "$BUILD_DIR"
 
 if [[ ! -e "$CONFIG_DIR/echoflow.conf" ]]; then
@@ -56,8 +68,6 @@ if [[ ! -e "$CONFIG_DIR/echoflow.conf" ]]; then
 value=qwen3-asr-0.6b
 [basic.model.mirror]
 value=hf-mirror
-[basic.recognition.language]
-value=Chinese
 [basic.recognition.prompt]
 value=
 [basic.recognition.strip_trailing_punctuation]
@@ -96,12 +106,17 @@ sed "s|^Library=.*|Library=${ADDON_LIB%.so}|" \
   "$ROOT_DIR/fcitx-addon/echoflow.conf.in" > "$FCITX_ADDON_DIR/echoflow.conf"
 
 install -m 0644 "$BUILD_DIR/systemd/user/echoflow.service" "$SYSTEMD_USER_DIR/echoflow.service"
-install -m 0644 "$BUILD_DIR/systemd/user/echoflow-ui.service" "$SYSTEMD_USER_DIR/echoflow-ui.service"
+install -m 0644 "$BUILD_DIR/systemd/user/echoflow.socket" "$SYSTEMD_USER_DIR/echoflow.socket"
+install -m 0644 "$BUILD_DIR/echoflow-autostart.desktop" "$AUTOSTART_DIR/echoflow-autostart.desktop"
+rm -f "$SYSTEMD_USER_DIR/echoflow-ui.service"
 
 systemctl --user daemon-reload
-systemctl --user enable echoflow.service echoflow-ui.service
 if [[ "$START_SERVICES" == "1" ]]; then
-  systemctl --user restart echoflow.service echoflow-ui.service
+  if [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]]; then
+    "$PREFIX/bin/echoflow-session-start" >/dev/null 2>&1 &
+  else
+    "$PREFIX/bin/echoflow-session-start" --socket-only
+  fi
   if command -v fcitx5 >/dev/null 2>&1; then
     fcitx5 -rd || echo "Warning: restart Fcitx manually: fcitx5 -rd" >&2
   fi
@@ -111,6 +126,6 @@ echo "EchoFlow installed."
 echo "Config: $CONFIG_DIR/echoflow.conf"
 echo "Fcitx addon: $FCITX_ADDON_DIR/echoflow.conf"
 if [[ "$START_SERVICES" == "0" ]]; then
-  echo "Start services later: systemctl --user start echoflow.service echoflow-ui.service"
+  echo "Start UI and activation socket later: $PREFIX/bin/echoflow-session-start"
   echo "Then reload Fcitx: fcitx5 -rd"
 fi

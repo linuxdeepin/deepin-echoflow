@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 Hualet Wang
+# SPDX-License-Identifier: GPL-3.0-or-later
+set -euo pipefail
+
+if [[ $# -gt 1 ]]; then
+    echo "Usage: echoflow-session-stop [bin-directory]" >&2
+    exit 2
+fi
+bindir="${1:-$(dirname -- "$0")}"
+[[ -d "$bindir" ]] || exit 0
+bindir="$(cd -- "$bindir" && pwd -P)"
+
+# Match this user's exact executable/script paths, including the old launcher
+# without PID files. Do not stop instances belonging to another installation.
+declare -A processes=()
+supervisors=()
+children=()
+process_identity() {
+    local proc_stat fields
+    IFS= read -r proc_stat 2>/dev/null < "/proc/$1/stat" || return 1
+    read -ra fields <<< "${proc_stat##*) }"
+    [[ "${fields[0]}" != Z ]] || return 1
+    printf '%s' "${fields[19]}"
+}
+matches_command() {
+    local candidate="${1:-}" name="$2" directory
+    [[ "${candidate##*/}" == "$name" ]] || return 1
+    directory="$(cd -- "${candidate%/*}" 2>/dev/null && pwd -P)" || return 1
+    [[ "$directory" == "$bindir" ]]
+}
+for proc_dir in /proc/[0-9]*; do
+    [[ -O "$proc_dir" ]] || continue
+    pid="${proc_dir##*/}"
+    [[ "$pid" != "$$" ]] || continue
+    executable="$(readlink "$proc_dir/exe" 2>/dev/null)" || continue
+    executable="${executable% (deleted)}"
+    args=()
+    mapfile -d '' -t args 2>/dev/null < "$proc_dir/cmdline" || continue
+    if matches_command "${args[0]:-}" echoflow-session-start \
+        || matches_command "${args[1]:-}" echoflow-session-start; then
+        identity="$(process_identity "$pid")" || continue
+        processes[$pid]="$identity"
+        supervisors+=("$pid")
+    elif [[ "$executable" == "$bindir/echoflow-ui" ]] \
+        || matches_command "${args[0]:-}" echoflow-ui \
+        || matches_command "${args[1]:-}" echoflow-ui; then
+        identity="$(process_identity "$pid")" || continue
+        processes[$pid]="$identity"
+        children+=("$pid")
+    fi
+done
+
+# Stop supervisors before their children, otherwise the old crash-restart loop
+# could spawn a replacement while installation is replacing the executable.
+for pid in "${supervisors[@]}" "${children[@]}"; do
+    [[ "$(process_identity "$pid" || true)" == "${processes[$pid]}" ]] || continue
+    kill -TERM "$pid" 2>/dev/null || true
+done
+for ((attempt = 0; attempt < 50; ++attempt)); do
+    for pid in "${!processes[@]}"; do
+        if [[ "$(process_identity "$pid" || true)" != "${processes[$pid]}" ]]; then
+            unset 'processes[$pid]'
+        fi
+    done
+    [[ ${#processes[@]} -gt 0 ]] || exit 0
+    sleep 0.1
+done
+echo "EchoFlow UI did not stop; refusing to replace or remove running files." >&2
+exit 1

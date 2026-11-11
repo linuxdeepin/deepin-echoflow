@@ -68,6 +68,10 @@ target_link_libraries(echoflow-ui
         Dtk6::Gui
 )
 
+# Keep the onboarding source path tied to the configured install prefix.
+target_compile_definitions(echoflow-ui PRIVATE
+    ECHOFLOW_AUTOSTART_DESKTOP_PATH="${CMAKE_INSTALL_FULL_DATADIR}/echoflow/echoflow-autostart.desktop")
+
 # lupdate runs on this target's sources (the .qrc pulls in the QML files);
 # rebuild the update_translations target to refresh the .ts files. The .qm
 # files are rebuilt on every build and embedded under :/i18n.
