@@ -83,6 +83,7 @@ private slots:
     void typingOrBlurHidesHintForGood();
     void hintTextReflectsLongPress();
     void hintSuppressedWhenDisabledPersistentOrBusy();
+    void focusHintIsDisabledByDefault();
     void recordingCapsuleStaysAtLowerCenter();
     void inputFocusIsReportedForLongPress();
     void refocusTracksCaretWithoutHinting();
@@ -283,6 +284,7 @@ void CapsuleControllerTest::persistentFlagOnlySignalsActualChanges() {
 
 void CapsuleControllerTest::focusShowsHintBelowCaret() {
     CapsuleController controller(ignoreCommands());
+    controller.setFocusHintEnabled(true);
     QSignalSpy hintSpy(&controller, &CapsuleController::hintChanged);
 
     QVERIFY(controller.applyServiceMessage(QStringLiteral("FOCUS 100 200 2 18")));
@@ -298,6 +300,7 @@ void CapsuleControllerTest::focusShowsHintBelowCaret() {
 
 void CapsuleControllerTest::hintWaitsForCaretAfterFocus() {
     CapsuleController controller(ignoreCommands());
+    controller.setFocusHintEnabled(true);
     QSignalSpy hintSpy(&controller, &CapsuleController::hintChanged);
 
     controller.applyServiceMessage(QStringLiteral("FOCUS"));
@@ -315,14 +318,17 @@ void CapsuleControllerTest::hintWaitsForCaretAfterFocus() {
 
     // A caret without a preceding focus-in never shows a hint.
     CapsuleController unfocused(ignoreCommands());
+    unfocused.setFocusHintEnabled(true);
     QSignalSpy unfocusedSpy(&unfocused, &CapsuleController::hintChanged);
     unfocused.applyServiceMessage(QStringLiteral("CARET 40 60 0 20"));
     settleHint();
-    QVERIFY(unfocusedSpy.isEmpty());
+    QVERIFY(unfocusedSpy.isEmpty()
+            || !hintAt(unfocusedSpy, unfocusedSpy.count() - 1).visible);
 }
 
 void CapsuleControllerTest::hintFollowsCaretUntilTimeout() {
     CapsuleController controller(ignoreCommands());
+    controller.setFocusHintEnabled(true);
     controller.setHintTimeout(300);
     QSignalSpy hintSpy(&controller, &CapsuleController::hintChanged);
 
@@ -351,6 +357,7 @@ void CapsuleControllerTest::hintFollowsCaretUntilTimeout() {
 
 void CapsuleControllerTest::typingOrBlurHidesHintForGood() {
     CapsuleController controller(ignoreCommands());
+    controller.setFocusHintEnabled(true);
     QSignalSpy hintSpy(&controller, &CapsuleController::hintChanged);
 
     controller.applyServiceMessage(QStringLiteral("FOCUS 100 200 2 18"));
@@ -374,6 +381,7 @@ void CapsuleControllerTest::typingOrBlurHidesHintForGood() {
 
 void CapsuleControllerTest::hintTextReflectsLongPress() {
     CapsuleController controller(ignoreCommands());
+    controller.setFocusHintEnabled(true);
     QSignalSpy hintSpy(&controller, &CapsuleController::hintChanged);
 
     controller.applyServiceMessage(QStringLiteral("FOCUS 100 200 2 18"));
@@ -397,6 +405,7 @@ void CapsuleControllerTest::hintSuppressedWhenDisabledPersistentOrBusy() {
     QVERIFY(disabledSpy.isEmpty() || !hintAt(disabledSpy, disabledSpy.count() - 1).visible);
 
     CapsuleController persistent(ignoreCommands());
+    persistent.setFocusHintEnabled(true);
     persistent.setPersistent(true);
     QSignalSpy persistentSpy(&persistent, &CapsuleController::hintChanged);
     persistent.applyServiceMessage(QStringLiteral("FOCUS 100 200 2 18"));
@@ -405,6 +414,7 @@ void CapsuleControllerTest::hintSuppressedWhenDisabledPersistentOrBusy() {
             || !hintAt(persistentSpy, persistentSpy.count() - 1).visible);
 
     CapsuleController busy(ignoreCommands());
+    busy.setFocusHintEnabled(true);
     QSignalSpy busySpy(&busy, &CapsuleController::hintChanged);
     busy.applyServiceMessage(QStringLiteral("FOCUS 100 200 2 18"));
     settleHint();
@@ -416,6 +426,17 @@ void CapsuleControllerTest::hintSuppressedWhenDisabledPersistentOrBusy() {
     busy.applyServiceMessage(QStringLiteral("IDLE"));
     settleHint();
     QVERIFY(!hintAt(busySpy, busySpy.count() - 1).visible);
+}
+
+void CapsuleControllerTest::focusHintIsDisabledByDefault() {
+    CapsuleController controller(ignoreCommands());
+    QSignalSpy hintSpy(&controller, &CapsuleController::hintChanged);
+
+    controller.applyServiceMessage(QStringLiteral("FOCUS 100 200 2 18"));
+    settleHint();
+
+    QVERIFY(hintSpy.isEmpty()
+            || !hintAt(hintSpy, hintSpy.count() - 1).visible);
 }
 
 void CapsuleControllerTest::recordingCapsuleStaysAtLowerCenter() {
@@ -471,6 +492,7 @@ void CapsuleControllerTest::refocusTracksCaretWithoutHinting() {
     // REFOCUS is a repeat focus inside a program that already showed its
     // one hint: focus and caret tracking continue, but no new hint appears.
     CapsuleController controller(ignoreCommands());
+    controller.setFocusHintEnabled(true);
     QSignalSpy hintSpy(&controller, &CapsuleController::hintChanged);
     QSignalSpy focusSpy(&controller, &CapsuleController::inputFocusChanged);
 
@@ -498,6 +520,7 @@ void CapsuleControllerTest::clickFocusAnchorsAtPress() {
     // Chromium reports the previous field's caret when focus moves between
     // its inputs; the click that focused the new field is the better anchor.
     CapsuleController controller(ignoreCommands());
+    controller.setFocusHintEnabled(true);
     QSignalSpy hintSpy(&controller, &CapsuleController::hintChanged);
     QSignalSpy focusSpy(&controller, &CapsuleController::inputFocusChanged);
 
@@ -524,6 +547,7 @@ void CapsuleControllerTest::clickNearReportedCaretTrustsTheReport() {
     // space below the last line moved that caret itself, so the reported
     // rectangle is fresher than the raw press point and anchors the hint.
     CapsuleController controller(ignoreCommands());
+    controller.setFocusHintEnabled(true);
     QSignalSpy hintSpy(&controller, &CapsuleController::hintChanged);
     QSignalSpy focusSpy(&controller, &CapsuleController::inputFocusChanged);
     const QRect reported(100, 200, 2, 18);
@@ -595,6 +619,7 @@ void CapsuleControllerTest::staleCaretEchoKeepsPressAnchor() {
 
 void CapsuleControllerTest::focusChurnDoesNotFlickerHint() {
     CapsuleController controller(ignoreCommands());
+    controller.setFocusHintEnabled(true);
     QSignalSpy hintSpy(&controller, &CapsuleController::hintChanged);
 
     controller.notePointerPress(QPoint(700, 500));

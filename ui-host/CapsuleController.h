@@ -100,7 +100,7 @@ private:
     qint64 lastPressAt_ = -1;
     qint64 lastFocusAt_ = -1;
 
-    bool focusHintEnabled_ = true;
+    bool focusHintEnabled_ = false;
     bool longPressHint_ = false;
     // Set on focus-in and cleared once the hint has had its turn, so caret
     // moves never bring back a hint that timed out or was typed over.

@@ -167,6 +167,7 @@ bool EchoFlowSettings::init(const QString &configPath) {
             QStringLiteral("basic.recording.channels"),
             QStringLiteral("basic.recording.format"),
             QStringLiteral("basic.recording.source"),
+            QStringLiteral("basic.interaction.focus_hint"),
             QStringLiteral("basic.model.mirror"),
             QStringLiteral("advanced.runtime.asr_timeout_seconds"),
             QStringLiteral("advanced.fcitx.fcitx_commit"),
