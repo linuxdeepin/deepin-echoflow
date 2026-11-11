@@ -113,6 +113,7 @@ assert_absent "$ROOT/systemd/user/echoflow.service.in" 'WantedBy=default.target'
 
 assert_absent "$ROOT/CMakeLists.txt" "qwen-asr-runtime" "top-level no longer builds qwen-asr-runtime"
 assert_contains "$ROOT/CMakeLists.txt" 'set(ECHOFLOW_CPU_TARGET "native" CACHE STRING' "CMake exposes the CPU target"
+assert_contains "$ROOT/CMakeLists.txt" 'x86-64-v3 requires an amd64 build host' "CMake rejects x86-64-v3 on non-amd64"
 assert_contains "$ROOT/CMakeLists.txt" 'set(GGML_NATIVE OFF CACHE BOOL "" FORCE)' "portable target disables GGML native tuning"
 assert_contains "$ROOT/CMakeLists.txt" 'set(GGML_AVX2 ON CACHE BOOL "" FORCE)' "portable target enables AVX2"
 assert_contains "$ROOT/CMakeLists.txt" 'set(GGML_FMA ON CACHE BOOL "" FORCE)' "portable target enables FMA"
@@ -387,6 +388,7 @@ assert_contains "$ROOT/debian/control" "debhelper-compat (= 13)" "debhelper comp
 assert_contains "$ROOT/CMakeLists.txt" "DESTINATION \"lib/systemd/user\"" "CMake installs user units where debhelper discovers them"
 assert_contains "$ROOT/debian/rules" 'override_dh_auto_configure:' "Debian overrides CMake configuration"
 assert_contains "$ROOT/debian/rules" '-- -DECHOFLOW_CPU_TARGET=x86-64-v3' "Debian selects deterministic CPU target"
+assert_contains "$ROOT/debian/rules" '-- -DECHOFLOW_CPU_TARGET=native' "Debian selects native target on non-amd64"
 assert_contains "$ROOT/debian/source/format" "3.0 (native)" "debian source format is native"
 assert_contains "$ROOT/.github/workflows/build.yml" "cmake --build build" "build workflow builds CMake tree"
 assert_contains "$ROOT/.github/workflows/build.yml" "ctest --test-dir build --output-on-failure" "build workflow runs tests"
