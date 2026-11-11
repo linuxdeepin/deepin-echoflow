@@ -99,7 +99,7 @@ void TestSelfTest::runtimeChecksReportsMissingCrispModel() {
     c.crispModelPath = "/tmp/echoflow-no-such-crisp-model.gguf";
     auto checks = runtimeChecks(c);
     auto it = std::find_if(checks.begin(), checks.end(),
-                           [](const RuntimeCheck& r) { return r.name == "crisp model available"; });
+                           [](const RuntimeCheck& r) { return r.name == "crisp model file available"; });
     QVERIFY(it != checks.end());
     QVERIFY(!it->passed);
     QVERIFY(it->detail.find("missing:") != std::string::npos);
@@ -110,7 +110,7 @@ void TestSelfTest::runtimeChecksActionableWhenCrispModelPathEmpty() {
     c.crispModelPath.clear();
     auto checks = runtimeChecks(c);
     auto it = std::find_if(checks.begin(), checks.end(),
-                           [](const RuntimeCheck& r) { return r.name == "crisp model available"; });
+                           [](const RuntimeCheck& r) { return r.name == "crisp model file available"; });
     QVERIFY(it != checks.end());
     QVERIFY(!it->passed);
     QVERIFY(it->detail.find("not set") != std::string::npos);
@@ -124,9 +124,15 @@ void TestSelfTest::runtimeChecksPassesWhenCrispModelExists() {
     c.crispModelPath = modelPath.string();
     auto checks = runtimeChecks(c);
     auto it = std::find_if(checks.begin(), checks.end(),
-                           [](const RuntimeCheck& r) { return r.name == "crisp model available"; });
+                           [](const RuntimeCheck& r) { return r.name == "crisp model file available"; });
     QVERIFY(it != checks.end());
     QVERIFY(it->passed);
+    const auto loadIt = std::find_if(checks.begin(), checks.end(),
+                                     [](const RuntimeCheck& r) {
+                                         return r.name == "crisp model loadable";
+                                     });
+    QVERIFY(loadIt != checks.end());
+    QVERIFY(!loadIt->passed);
 }
 
 QTEST_GUILESS_MAIN(TestSelfTest)
