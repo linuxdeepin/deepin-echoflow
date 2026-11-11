@@ -150,7 +150,7 @@
               "key": "focus_hint",
               "text": "Show a voice hint when a text field gains focus",
               "type": "checkbox",
-              "default": true
+              "default": false
             }
           ]
         }

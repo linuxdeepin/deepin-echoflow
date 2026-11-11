@@ -217,6 +217,7 @@ assert_contains "$ROOT/ui-host/main.cpp" "Qt::WindowTransparentForInput" "focus 
 assert_contains "$ROOT/fcitx-addon/echoflow.cpp" '"REFOCUS"' "addon gates the hint to one FOCUS per program"
 assert_contains "$ROOT/ui-host/settings-schema.json" '"key": "long_press_to_talk"' "settings schema has long-press option"
 assert_contains "$ROOT/ui-host/settings-schema.json" '"key": "focus_hint"' "settings schema has focus hint option"
+assert_contains "$ROOT/ui-host/settings-schema.json" '"default": false' "focus hint defaults to disabled"
 assert_contains "$ROOT/ui-host/settings-schema.json" '"default": ""' "recognition language defaults to unset system matching"
 assert_contains "$ROOT/ui-host/EchoFlowSettings.cpp" 'QStringList{QString(), QStringLiteral("English")' "system-default language uses an empty stored value"
 assert_contains "$ROOT/ui-host/EchoFlowSettings.cpp" 'tr("System default")' "recognition language exposes system default"
