@@ -6,10 +6,38 @@
 #include "CrispSession.h"
 #include "log.h"
 
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
+
 namespace echoflow {
 
 std::string CrispAsrEngine::languageCode(const std::string& value)
 {
+    if (value.empty()) {
+        const char* locale = nullptr;
+        for (const char* variable : {"LC_ALL", "LC_MESSAGES", "LANG"}) {
+            const char* candidate = std::getenv(variable);
+            if (candidate && candidate[0] != '\0') {
+                locale = candidate;
+                break;
+            }
+        }
+
+        std::string language = locale ? locale : "";
+        const auto separator = language.find_first_of("_.@-");
+        if (separator != std::string::npos) {
+            language.resize(separator);
+        }
+        std::transform(language.begin(), language.end(), language.begin(),
+                       [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+        if (language == "zh") return "zh";
+        if (language == "es") return "es";
+        if (language == "pt") return "pt";
+        if (language == "fr") return "fr";
+        if (language == "it") return "it";
+        return "en";
+    }
     if (value == "Chinese" || value == "chinese" || value == "zh" || value == "cmn") {
         return "zh";
     }

@@ -211,9 +211,14 @@ void EchoFlowSettings::populateComboBoxes() {
                      QStringList{QStringLiteral("hf-mirror"),
                                  QStringLiteral("official")});
     setComboBoxItems(dsettings_, QStringLiteral("basic.recognition.language"),
-                     QStringList{QStringLiteral("English"), QStringLiteral("Chinese"),
-                                  QStringLiteral("Spanish"), QStringLiteral("Portuguese"),
-                                  QStringLiteral("French"), QStringLiteral("Italian")});
+                     QStringList{QString(), QStringLiteral("English"),
+                                  QStringLiteral("Chinese"), QStringLiteral("Spanish"),
+                                  QStringLiteral("Portuguese"), QStringLiteral("French"),
+                                  QStringLiteral("Italian")},
+                     QStringList{tr("System default"), QStringLiteral("English"),
+                                  QStringLiteral("Chinese"), QStringLiteral("Spanish"),
+                                  QStringLiteral("Portuguese"), QStringLiteral("French"),
+                                  QStringLiteral("Italian")});
     QStringList polishKeys;
     QStringList polishValues;
     for (const ModelEntry &e : polishModelCatalog()) {

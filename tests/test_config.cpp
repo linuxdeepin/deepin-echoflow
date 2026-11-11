@@ -39,8 +39,7 @@ void TestConfig::defaultConfigHasExpectedFields() {
     QCOMPARE(QString::fromStdString(c.pwRecord.format), QStringLiteral("s16"));
     QVERIFY(c.pwRecord.source.empty());
     QCOMPARE(c.fcitxCommit, true);
-    QVERIFY(c.language.has_value());
-    QCOMPARE(QString::fromStdString(*c.language), QStringLiteral("English"));
+    QVERIFY(!c.language.has_value());
     QVERIFY(c.modelDir.empty());
     QVERIFY(!c.skipSilence);
     QVERIFY(c.streamTranscription);

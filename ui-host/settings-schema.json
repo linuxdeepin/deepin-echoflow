@@ -60,7 +60,7 @@
               "key": "language",
               "name": "Recognition Language",
               "type": "combobox",
-              "default": "English"
+              "default": ""
             },
             {
               "key": "stream_transcription",
