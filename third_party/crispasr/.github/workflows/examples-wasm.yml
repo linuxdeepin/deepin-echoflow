@@ -1,0 +1,109 @@
+name: Examples WASM
+on:
+  # NOTE: push trigger intentionally absent. The whole job's purpose is
+  # to deploy the WASM examples as a GitHub Pages site, and Pages is
+  # not currently enabled on this repo. Re-add `push: branches: [main]`
+  # together with enabling Pages (Settings → Pages → "GitHub Actions"
+  # source) when there's a need for a hosted demo.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  deploy-wasm-github-pages:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Setup Pages
+        # enablement:true auto-provisions the Pages site on first run instead of
+        # failing with "Get Pages site failed … Pages not enabled" (the stale-red
+        # cause). Keeps the workflow dispatch-only (Pages stays dormant until a
+        # maintainer manually runs it — see the on: note above).
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - name: Setup emsdk
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 6.0.2  # 6.0.3 regressed WASM ISel (voxtral_tts crash); pin last-good
+
+      - name: Build WASM Examples
+        # Enable for real build later in whisper.cpp
+        run: |
+          mkdir -p build-em && cd build-em
+          emcmake cmake .. -DCMAKE_BUILD_TYPE=Release
+          make -j
+
+      - name: Create staging directory
+        run: mkdir -p staging
+
+      - name: Create .nojekyll file in staging directory
+        run: touch staging/.nojekyll
+
+      - name: Copy application files
+        run: |
+          build_dir=build-em/bin
+
+          ls ${build_dir}
+
+          # command.wasm
+          target_dir=staging/command.wasm
+          mkdir -p ${target_dir}
+          cp ${build_dir}/command.wasm/{index.html,command.js,helpers.js} ${target_dir}
+          cp ${build_dir}/libcommand.js ${target_dir}
+
+          # bench.wasm
+          target_dir=staging/bench.wasm
+          mkdir -p ${target_dir}
+          cp ${build_dir}/bench.wasm/{index.html,bench.js,helpers.js} ${target_dir}
+          cp ${build_dir}/libbench.js ${target_dir}
+
+          # stream.wasm
+          target_dir=staging/stream.wasm
+          mkdir -p ${target_dir}
+          cp ${build_dir}/stream.wasm/{index.html,stream.js,helpers.js} ${target_dir}
+          cp ${build_dir}/libstream.js ${target_dir}
+
+          # wchess.wasm
+          target_dir=staging/wchess.wasm
+          mkdir -p ${target_dir}
+          cp -r ${build_dir}/wchess.wasm/{index.html,css,img,js} ${target_dir}
+          cp ${build_dir}/wchess.wasm.js ${target_dir}
+
+          # crispasr.wasm (this will be the main example page)
+          target_dir=staging
+          mkdir -p ${target_dir}
+          cp ${build_dir}/crispasr.wasm/{index.html,main.js,helpers.js} ${target_dir}
+          cp ${build_dir}/libmain.js ${target_dir}
+
+          # Copy Cross-Origin Isolation service worker
+          cp -v examples/coi-serviceworker.js staging/
+
+      - name: List files in staging directory (for debugging)
+        run: |
+          echo "Files in staging directory:"
+          find staging -type f | sort
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: ./staging
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

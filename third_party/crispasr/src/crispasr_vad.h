@@ -1,0 +1,239 @@
+// crispasr_vad.h — shared VAD segmentation + stitching helpers.
+//
+// Consumed by both the CLI (`examples/cli/`) and the C-ABI wrapper
+// `crispasr_session_transcribe_vad` in crispasr_c_api.cpp. The Silero
+// VAD pipeline from crispasr is the underlying engine; this header
+// adds the downstream gluing every ASR pipeline ends up needing:
+//
+//   - compute slices at speech boundaries
+//   - merge short/close slices into usable chunks (ASR needs context)
+//   - split overlong slices to bound encoder O(T^2) cost
+//   - stitch the retained slices into one contiguous PCM buffer with
+//     0.1s silence gaps (crispasr-style), so any backend can be
+//     driven by a single transcribe() call
+//   - remap resulting timestamps from stitched-buffer space back to
+//     original-audio positions via linear interpolation
+//
+// The intent of living in `src/` rather than `examples/cli/` is DRY:
+// Dart/Python/Rust wrappers reach this through the C-ABI without
+// re-implementing segmentation or stitching in each binding.
+
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <vector>
+
+struct crispasr_audio_slice {
+    int start, end;       // sample indices into the full PCM buffer
+    int64_t t0_cs, t1_cs; // centiseconds, absolute start/end of the slice
+};
+
+// Stitched VAD result: VAD segments concatenated into a single buffer
+// with 0.1s silence gaps (matching crispasr's approach). The mapping
+// table allows remapping timestamps from stitched-buffer positions back
+// to original-audio positions.
+struct crispasr_vad_mapping {
+    int64_t stitched_cs; // position in the stitched buffer (centiseconds)
+    int64_t original_cs; // corresponding position in the original audio
+};
+
+struct crispasr_stitched_audio {
+    std::vector<float> samples;                // stitched PCM buffer
+    std::vector<crispasr_vad_mapping> mapping; // timestamp remapping table
+    int64_t total_duration_cs = 0;             // total duration in centiseconds
+};
+
+enum class crispasr_vad_post_merge_policy {
+    offline = 0,
+    streaming_json = 1,
+};
+
+// Plain options struct: no CLI dependency. Mirrors the VAD tunables plus the
+// chunk fallback used by long-audio encoders.
+struct crispasr_vad_options {
+    // whisper_vad_params
+    float threshold = 0.5f;
+    int min_speech_duration_ms = 250;
+    int min_silence_duration_ms = 100;
+    int speech_pad_ms = 30;
+    // Post-VAD clean-up
+    int chunk_seconds = 30; // split any merged slice longer than this; 0 = no split
+    int n_threads = 4;      // VAD inference threads
+    crispasr_vad_post_merge_policy post_merge_policy = crispasr_vad_post_merge_policy::offline;
+    int stream_close_gap_ms = 250;
+    int stream_final_silence_ms = 0;
+    // Issue #83 follow-up: distinguish "user passed -vt explicitly" from
+    // "default 0.5 was inherited." VAD models with non-Silero probability
+    // calibration (currently whisper-vad-encdec) use this to auto-lower
+    // the threshold so the default config produces useful slices instead
+    // of dropping most speech. Set true when the CLI/binding propagates a
+    // user-supplied `-vt`/`--vad-threshold`; library callers leave it false
+    // to opt into per-model auto-tuning.
+    bool threshold_explicit = false;
+};
+
+inline int crispasr_stream_vad_effective_merge_gap_ms(int configured_gap_ms, int final_silence_ms) {
+    if (configured_gap_ms <= 0)
+        return 0;
+    if (final_silence_ms <= 0)
+        return configured_gap_ms;
+    const int hard_max = final_silence_ms - 1;
+    if (hard_max <= 0)
+        return 0;
+    return configured_gap_ms < hard_max ? configured_gap_ms : hard_max;
+}
+
+inline std::vector<crispasr_audio_slice> crispasr_post_merge_vad_slices(const std::vector<crispasr_audio_slice>& slices,
+                                                                        int sample_rate,
+                                                                        const crispasr_vad_options& opts) {
+    if (slices.size() <= 1 || sample_rate <= 0)
+        return slices;
+
+    std::vector<crispasr_audio_slice> merged;
+    merged.push_back(slices[0]);
+
+    if (opts.post_merge_policy == crispasr_vad_post_merge_policy::streaming_json) {
+        const int effective_gap_ms =
+            crispasr_stream_vad_effective_merge_gap_ms(opts.stream_close_gap_ms, opts.stream_final_silence_ms);
+        if (effective_gap_ms <= 0)
+            return slices;
+        for (std::size_t i = 1; i < slices.size(); i++) {
+            auto& prev = merged.back();
+            const int gap = slices[i].start - prev.end;
+            if ((int64_t)gap * 1000 < (int64_t)effective_gap_ms * sample_rate) {
+                prev.end = slices[i].end;
+                prev.t1_cs = slices[i].t1_cs;
+            } else {
+                merged.push_back(slices[i]);
+            }
+        }
+        return merged;
+    }
+
+    const int min_dur_samples = 3 * sample_rate;
+    const int merge_gap_samples = 1 * sample_rate;
+    for (std::size_t i = 1; i < slices.size(); i++) {
+        auto& prev = merged.back();
+        const int gap = slices[i].start - prev.end;
+        const int prev_dur = prev.end - prev.start;
+        if (gap < merge_gap_samples || prev_dur < min_dur_samples) {
+            prev.end = slices[i].end;
+            prev.t1_cs = slices[i].t1_cs;
+        } else {
+            merged.push_back(slices[i]);
+        }
+    }
+    return merged;
+}
+
+// Load Silero VAD, emit one slice per speech segment, then merge
+// short/adjacent slices and split overlong ones. Returns an empty
+// vector if no speech is detected or the VAD model fails to load.
+//
+// `vad_model_path` must be a concrete file path; auto-download /
+// cache resolution is the caller's responsibility (CLI handles it
+// via crispasr_cache; wrappers can ship the GGUF as an asset).
+//
+// An empty result is ambiguous — no speech vs. the model failing to load.
+// When `out_load_failed` is non-null it is set to `true` iff the model
+// could not be loaded (silero/marblenet/whisper-vad returned no context),
+// and `false` otherwise (including a successful run that found no speech).
+// This lets a caller (issue #311 --strict-pipeline) distinguish "VAD ran,
+// no speech" from "VAD model unloadable". webrtc (no model) and firered are
+// reported as loaded. Detection is best-effort — it never false-positives.
+std::vector<crispasr_audio_slice> crispasr_compute_vad_slices(const float* samples, int n_samples, int sample_rate,
+                                                              const char* vad_model_path,
+                                                              const crispasr_vad_options& opts,
+                                                              bool* out_load_failed = nullptr);
+
+// Incremental VAD for a live stream (Silero only). Each call scores only the
+// complete 32 ms frames that arrived since the previous call, continuing the
+// detector's recurrent state, instead of re-scoring the whole window from a
+// reset state; segments are then cut from the cached probabilities over
+// [max(from_sample, window_start), end of scored audio). `window` holds the
+// absolute samples [window_start, window_start + n_window_samples); slices
+// come back relative to it, as crispasr_compute_vad_slices over the window
+// would return them. Returns false when this VAD model is not Silero or
+// cannot be loaded — the caller then uses crispasr_compute_vad_slices.
+struct crispasr_stream_vad;
+crispasr_stream_vad* crispasr_stream_vad_new();
+void crispasr_stream_vad_free(crispasr_stream_vad* st);
+bool crispasr_stream_vad_slices(crispasr_stream_vad* st, const float* window, int n_window_samples,
+                                int64_t window_start, int64_t from_sample, int sample_rate, const char* vad_model_path,
+                                const crispasr_vad_options& opts, std::vector<crispasr_audio_slice>& out);
+
+// Same shape as above but without VAD: returns fixed `chunk_seconds` windows
+// (one slice covering the whole buffer when it's shorter than a chunk).
+// Useful as a fallback when no VAD model is available.
+std::vector<crispasr_audio_slice> crispasr_fixed_chunk_slices(int n_samples, int sample_rate, int chunk_seconds);
+
+// Re-chunk existing slices to `chunk_seconds`, splitting any segment that
+// exceeds it at energy minima (issue #89 policy). Used when transcribing and
+// when importing a RAW-VAD-segment export (issue #227): the same speech
+// segments can be re-chunked to whatever length the importing run needs, so a
+// raw export is genuinely chunk-length-independent. Segments already within the
+// limit pass through unchanged; chunk_seconds <= 0 returns the input as-is.
+std::vector<crispasr_audio_slice> crispasr_rechunk_slices(const std::vector<crispasr_audio_slice>& in,
+                                                          const float* samples, int n_samples, int sample_rate,
+                                                          int chunk_seconds);
+
+// Like `crispasr_fixed_chunk_slices` but cuts each window at the
+// lowest-RMS 100 ms inside the last `search_window_seconds` of a
+// `chunk_seconds` running window — avoids slicing mid-word at fixed
+// time boundaries. Pass `search_window_seconds <= 0` to fall back to a
+// fixed cut. Used as the VAD-free fallback in
+// `crispasr_compute_audio_slices`. Ported from
+// nano-cohere-transcribe's `_find_split_point_energy`.
+std::vector<crispasr_audio_slice> crispasr_energy_chunk_slices(const float* samples, int n_samples, int sample_rate,
+                                                               int chunk_seconds, float search_window_seconds = 5.0f);
+
+// Stitch VAD slices into one contiguous buffer with 0.1s silence gaps.
+// Produces a mapping table for timestamp remapping. The stitched buffer
+// is shorter than the original audio (silence removed), allowing backends
+// to process longer recordings without OOM.
+crispasr_stitched_audio crispasr_stitch_vad_slices(const float* samples, int n_samples, int sample_rate,
+                                                   const std::vector<crispasr_audio_slice>& slices);
+
+// Remap a centisecond timestamp from stitched-buffer space back to
+// original-audio space using linear interpolation between mapping points.
+int64_t crispasr_vad_remap_timestamp(const std::vector<crispasr_vad_mapping>& mapping, int64_t stitched_cs);
+
+// Free the internally cached Silero VAD context (if any). Call on
+// shutdown or when the VAD model is no longer needed. The cache is
+// automatically invalidated when the model path changes.
+void crispasr_vad_free_cache();
+
+// ---- VAD segment boundary export / import (issue #227) ----
+//
+// Serialize a slice list to a small JSON document so it can be persisted
+// and reused across ASR runs (e.g. transcribe the same audio with several
+// backends without re-running VAD each time). The format is:
+//
+//   { "crispasr_vad": { "version": 1, "sample_rate": 16000,
+//       "num_slices": N,
+//       "slices": [ { "start": <sample>, "end": <sample>,
+//                     "t0_cs": <centisec>, "t1_cs": <centisec> }, ... ] } }
+//
+// `start`/`end` are sample indices into the full PCM buffer at
+// `sample_rate`; `t0_cs`/`t1_cs` are absolute centisecond timestamps.
+std::string crispasr_serialize_vad_slices(const std::vector<crispasr_audio_slice>& slices, int sample_rate,
+                                          float chunk_seconds, bool is_raw_segments = false);
+
+// Parse a document produced by crispasr_serialize_vad_slices back into a
+// slice list. Tolerant of whitespace and field ordering. Returns false on
+// malformed input (in which case `out` is left empty). When `sample_rate_out`
+// is non-null it receives the serialized sample rate (0 if absent).
+bool crispasr_parse_vad_slices(const std::string& text, std::vector<crispasr_audio_slice>& out, int* sample_rate_out,
+                               float* chunk_seconds_out, bool* is_raw_segments_out = nullptr);
+
+// Issue #227: should a --vad-import be rejected/warned because its chunk length
+// differs from the run's? Shared by the CLI and the server so the two cannot
+// drift (the multi-surface-dispatch rule). Returns true when the run should
+// treat it as a mismatch. `imported_chunk` <= 0 means the file predates the
+// chunk_cs field ("unknown"), which is NEVER a mismatch. `requested_chunk` is
+// the run's REQUESTED chunk length (0 -> the 30 s default), not the effective
+// one -- the exporter runs before backend init and cannot know the effective
+// value.
+bool crispasr_vad_chunk_mismatch(float imported_chunk, float requested_chunk);

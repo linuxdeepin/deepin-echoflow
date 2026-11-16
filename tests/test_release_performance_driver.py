@@ -217,6 +217,35 @@ class ReleasePerformanceDriverTest(unittest.TestCase):
                 (destination / "ggml" / "CMakeLists.txt").read_text(encoding="utf-8"),
                 "nested")
 
+    def test_initialize_submodule_skips_vendored_source(self):
+        def git(cwd, *args):
+            return subprocess.run(
+                ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", *args],
+                cwd=cwd, check=True, text=True, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL).stdout.strip()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repo"
+            repository.mkdir()
+            git(repository, "init", "-q")
+            vendored = repository / "third_party" / "crispasr"
+            vendored.mkdir(parents=True)
+            (vendored / "asr.cpp").write_text("vendored", encoding="utf-8")
+            git(repository, "add", "third_party/crispasr/asr.cpp")
+            git(repository, "commit", "-q", "-m", "vendored")
+
+            tree = root / "worktree"
+            tree.mkdir()
+            (tree / "third_party" / "crispasr").mkdir(parents=True)
+            (tree / "third_party" / "crispasr" / "asr.cpp").write_text("vendored",
+                                                                       encoding="utf-8")
+
+            driver._initialize_submodule(repository, tree, "HEAD")
+
+            self.assertTrue((tree / "third_party" / "crispasr" / "asr.cpp").is_file())
+            self.assertFalse((tree / "third_party" / "crispasr" / ".git").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

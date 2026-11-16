@@ -1,0 +1,15 @@
+{
+  "id": "${KAGGLE_ACCOUNT}/crispasr-voxcpm2-vk-profile",
+  "title": "CrispASR voxcpm2 vk profile",
+  "code_file": "voxcpm2_vk_profile.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_internet": "true",
+  "dataset_sources": [
+    "${KAGGLE_ACCOUNT}/crispasr-hf-token"
+  ],
+  "competition_sources": [],
+  "kernel_sources": []
+}

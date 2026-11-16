@@ -1,0 +1,539 @@
+#
+# crispasr — unified ASR CLI (formerly crispasr).
+#
+# Drives all model backends in src/ (crispasr, parakeet, canary, cohere,
+# qwen3, voxtral, voxtral4b, granite) from a single binary via the
+# --backend flag. When --backend is omitted or set to "whisper" the
+# historical crispasr code path is used unchanged.
+#
+# The CMake target is named `crispasr-cli`, but the shipped binary stays
+# `crispasr` via OUTPUT_NAME for user-facing compatibility.
+
+set(TARGET crispasr-cli)
+
+# The CLI records consent hashes even when C2PA signing is disabled.  Its
+# header therefore uses the shared SHA-256 shim independently of
+# crispasr_enable_c2pa(), which only configures the optional signing library.
+set(_crispasr_c2pa_audio_include "${CMAKE_SOURCE_DIR}/third_party/c2pa-audio/src")
+if (NOT EXISTS "${_crispasr_c2pa_audio_include}/sha256.h")
+    message(FATAL_ERROR
+        "The c2pa-audio submodule is required by the CLI consent record "
+        "(missing ${_crispasr_c2pa_audio_include}/sha256.h). Initialize submodules with: "
+        "git submodule update --init --recursive")
+endif()
+
+add_executable(${TARGET}
+    cli.cpp
+    crispasr_backend.cpp
+    crispasr_backend_crispasr.cpp
+    crispasr_backend_nemotron.cpp
+    crispasr_backend_gigaam.cpp
+    crispasr_backend_dolphin.cpp
+    crispasr_backend_xasr.cpp
+    crispasr_backend_parakeet.cpp
+    crispasr_backend_canary.cpp
+    crispasr_backend_canary_qwen.cpp
+    crispasr_backend_index_echo.cpp
+    crispasr_backend_lfm2_audio.cpp
+    crispasr_backend_mini_omni2.cpp
+    crispasr_backend_cohere.cpp
+    crispasr_backend_granite.cpp
+    crispasr_backend_granite_nle.cpp
+    crispasr_backend_voxtral.cpp
+    crispasr_backend_voxtral4b.cpp
+    crispasr_backend_voxtral_tts.cpp
+    crispasr_backend_higgs_stt.cpp
+    crispasr_backend_qwen3.cpp
+    crispasr_backend_fastconformer_ctc.cpp
+    crispasr_backend_wav2vec2.cpp
+    crispasr_backend_vibevoice.cpp
+    crispasr_backend_kugelaudio.cpp
+    crispasr_backend_qwen3_tts.cpp
+    crispasr_backend_omnivoice.cpp
+    crispasr_backend_orpheus.cpp
+    crispasr_backend_chatterbox.cpp
+    crispasr_backend_tada.cpp
+    crispasr_backend_indextts.cpp
+    crispasr_backend_f5_tts.cpp
+    crispasr_backend_irodori_tts.cpp
+    crispasr_backend_supertonic.cpp
+    crispasr_backend_pocket_tts.cpp
+    crispasr_backend_csm.cpp
+    crispasr_backend_parler.cpp
+    crispasr_backend_fastpitch.cpp
+    crispasr_backend_bananamind_tts.cpp
+    crispasr_backend_bark.cpp
+    crispasr_backend_dia.cpp
+    crispasr_backend_dots_tts.cpp
+    crispasr_backend_fireredtts3.cpp
+    crispasr_backend_confucius4_tts.cpp
+    crispasr_backend_voxcpm2_tts.cpp
+    crispasr_backend_voxcpm2_vae.cpp
+    crispasr_backend_cosyvoice3.cpp
+    crispasr_backend_kokoro.cpp
+    crispasr_backend_piper.cpp
+    crispasr_backend_melotts.cpp
+    crispasr_backend_m2m100.cpp
+    crispasr_backend_hikari.cpp
+    crispasr_backend_marian.cpp
+    crispasr_backend_t5.cpp
+    crispasr_backend_glm_asr.cpp
+    crispasr_backend_htdemucs.cpp
+    crispasr_backend_crepe.cpp
+    crispasr_backend_btc.cpp
+    crispasr_backend_rvc.cpp
+    crispasr_piano_cli.cpp
+    crispasr_backend_beat_this.cpp
+    crispasr_backend_mel_band_roformer.cpp
+    crispasr_backend_kyutai_stt.cpp
+    crispasr_backend_firered_asr.cpp
+    crispasr_backend_moonshine.cpp
+    crispasr_backend_moonshine_streaming.cpp
+    crispasr_backend_gemma4_e2b.cpp
+    crispasr_backend_omniasr.cpp
+    crispasr_backend_mimo_asr.cpp
+    crispasr_backend_ark_asr.cpp
+    crispasr_backend_miotts.cpp
+    crispasr_backend_bt2_tts.cpp
+    crispasr_backend_piano_transcription.cpp
+    crispasr_backend_basic_pitch.cpp
+    crispasr_backend_onsets_and_frames.cpp
+    crispasr_backend_hft_transformer.cpp
+    crispasr_backend_mt3.cpp
+    crispasr_backend_moss_audio.cpp
+    crispasr_backend_moss_tts.cpp
+    crispasr_backend_moss_tts_local.cpp
+    crispasr_backend_hojo_asr.cpp
+    crispasr_backend_moss_transcribe.cpp
+    crispasr_backend_moss_transcribe_diarize.cpp
+    crispasr_backend_funasr.cpp
+    crispasr_backend_paraformer.cpp
+    crispasr_backend_sensevoice.cpp
+    crispasr_backend_sidon.cpp
+    crispasr_backend_speecht5.cpp
+    crispasr_backend_zonos.cpp
+    crispasr_aligner_cli.cpp
+    crispasr_vad_cli.cpp
+    crispasr_separate_cli.cpp
+    crispasr_beats_cli.cpp
+    crispasr_chords_cli.cpp
+    crispasr_tab_cli.cpp
+    crispasr_backend_tabcnn.cpp
+    crispasr_pitch_cli.cpp
+    crispasr_lid_cli.cpp
+    crispasr_diarize_cli.cpp
+    crispasr_output.cpp
+    crispasr_model_mgr_cli.cpp
+    crispasr_diagnostics.cpp
+    crispasr_run.cpp
+    crispasr_server.cpp
+    crispasr_tts_chunking.cpp
+    # Real-time WebSocket ASR streaming, shared with the standalone server
+    # (examples/server). Wired into `crispasr --server` via --ws-port.
+    ${CMAKE_CURRENT_SOURCE_DIR}/../server/ws_stream.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../server/realtime_server.cpp
+    # Wyoming protocol TCP server (issue #172) — Home Assistant Assist STT+TTS.
+    wyoming.cpp
+)
+
+# ---------------------------------------------------------------------------
+# Build-info macros surfaced to crispasr_diagnostics.cpp. Together they
+# answer "what exact bits am I running?" — important for bug reports
+# from prebuilt Docker tags where the user has no source tree handy.
+#
+# `git-vars.cmake` populates GIT_SHA1 / GIT_DATE / GIT_COMMIT_SUBJECT.
+# Re-include defensively in case a downstream consumer of this file
+# imports it without the top-level CMakeLists having run yet.
+# ---------------------------------------------------------------------------
+if (NOT DEFINED GIT_SHA1)
+    include(${CMAKE_SOURCE_DIR}/cmake/git-vars.cmake)
+endif()
+string(TIMESTAMP CRISPASR_BUILD_DATE_STR "%Y-%m-%dT%H:%M:%SZ" UTC)
+target_compile_definitions(${TARGET} PRIVATE
+    CRISPASR_VERSION_STR="${PROJECT_VERSION}"
+    CRISPASR_GIT_SHA1="${GIT_SHA1}"
+    CRISPASR_GIT_DATE="${GIT_DATE}"
+    CRISPASR_GIT_SUBJECT="${GIT_COMMIT_SUBJECT}"
+    CRISPASR_BUILD_DATE="${CRISPASR_BUILD_DATE_STR}"
+    CRISPASR_BUILD_TYPE="${CMAKE_BUILD_TYPE}"
+)
+if (GGML_CUDA)
+    # ggml discovers CUDA in its own add_subdirectory() scope. CMake's
+    # CUDAToolkit_VERSION normal variable does not propagate back up to this
+    # sibling directory, so diagnostics previously compiled an empty version
+    # string even in the shipped CUDA packages (#400). Discover it in the CLI
+    # scope too and fail the build rather than ship an unidentifiable binary.
+    find_package(CUDAToolkit REQUIRED)
+    if (NOT CUDAToolkit_VERSION)
+        message(FATAL_ERROR "CUDA is enabled but CUDAToolkit_VERSION is unavailable")
+    endif()
+    string(REGEX MATCH "^[0-9]+" CRISPASR_CUDA_RUNTIME_MAJOR "${CUDAToolkit_VERSION}")
+    # CMAKE_CUDA_ARCHITECTURES is a CMake list ("75-real;86-real;..."). When
+    # fed into target_compile_definitions, CMake's command-line generator
+    # treats list items as SEPARATE arguments — the cl.exe line ends up as
+    # `-DCRISPASR_CUDA_ARCHS="75-real -D86-real -D120-virtual"` which has
+    # an unbalanced quote and then leftover `-D120-virtual"` confuses
+    # link.exe into trying to open random tokens as .obj files
+    # ("LNK1181: cannot open input file 'GIT_DATE.obj'"). Convert the
+    # separator to "," before embedding so it remains a single token.
+    string(REPLACE ";" "," CRISPASR_CUDA_ARCHS_STR "${CMAKE_CUDA_ARCHITECTURES}")
+    target_compile_definitions(${TARGET} PRIVATE
+        CRISPASR_HAVE_CUDA=1
+        CRISPASR_CUDA_VERSION="${CUDAToolkit_VERSION}"
+        CRISPASR_CUDA_RUNTIME_MAJOR="${CRISPASR_CUDA_RUNTIME_MAJOR}"
+        CRISPASR_CUDA_ARCHS="${CRISPASR_CUDA_ARCHS_STR}"
+    )
+endif()
+if (GGML_METAL)
+    target_compile_definitions(${TARGET} PRIVATE CRISPASR_HAVE_METAL=1)
+endif()
+if (GGML_VULKAN)
+    target_compile_definitions(${TARGET} PRIVATE CRISPASR_HAVE_VULKAN=1)
+endif()
+if (GGML_HIP)
+    target_compile_definitions(${TARGET} PRIVATE CRISPASR_HAVE_HIP=1)
+endif()
+if (GGML_SYCL)
+    target_compile_definitions(${TARGET} PRIVATE CRISPASR_HAVE_SYCL=1)
+endif()
+if (GGML_OPENCL)
+    target_compile_definitions(${TARGET} PRIVATE CRISPASR_HAVE_OPENCL=1)
+endif()
+if (GGML_BLAS)
+    target_compile_definitions(${TARGET} PRIVATE CRISPASR_HAVE_BLAS=1)
+endif()
+if (GGML_MUSA)
+    target_compile_definitions(${TARGET} PRIVATE CRISPASR_HAVE_MUSA=1)
+endif()
+
+# ---------------------------------------------------------------------------
+# crispasr-diff-lib — shared ground-truth diff harness (companion to
+# tools/dump_reference.py).
+#
+# Exposed as a small static library so both the `crispasr-diff` binary
+# and the older differential-test drivers under
+# examples/{qwen3,voxtral}-test-*/ can link it without re-compiling the
+# same sources. The library has no per-model dependencies — it only
+# needs core_gguf from crispasr-core and the ggml CPU backend for its
+# tensor loader.
+# ---------------------------------------------------------------------------
+add_library(crispasr-diff-lib STATIC
+    crispasr_diff.cpp
+    crispasr_diff.h
+)
+target_include_directories(crispasr-diff-lib PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_link_libraries(crispasr-diff-lib PUBLIC
+    crispasr-core
+    ggml
+ btc-chords
+    tabcnn
+    rvc-svc
+    beatrice-pitch)
+set_target_properties(crispasr-diff-lib PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# ---------------------------------------------------------------------------
+# crispasr-diff — the CLI wrapper binary. Separate target so downstream
+# users who don't care about differential testing don't pay the extra
+# link time.
+# ---------------------------------------------------------------------------
+add_executable(crispasr-diff
+    crispasr_diff_main.cpp
+)
+target_link_libraries(crispasr-diff PRIVATE
+    common
+    crispasr-lib
+    parakeet
+    wespeaker
+    gigaam
+    dolphin
+    xasr
+    canary
+    cohere
+    granite_speech
+    granite_nle
+    voxtral
+    voxtral4b
+    voxtral_tts
+    higgs_stt
+    qwen3_asr
+    qwen3_tts
+    omnivoice
+    orpheus
+    kokoro
+    chatterbox
+    tada-tts
+    tada-encoder
+    indextts
+    m2m100
+    hikari
+    gemma4_e2b
+    mimo_tokenizer
+    mimo_asr
+    ark_asr
+    moss_audio
+    moss_tts
+    moss_tts_local
+    hojo_asr
+    moss_transcribe
+    moss_transcribe_diarize
+    voxcpm2_tts
+    funasr
+    paraformer
+    sensevoice
+    sidon
+    cosyvoice3_tts
+    csm-tts
+    parler-tts
+    mini-omni2
+    dots-tts
+    supertonic-tts
+    fireredtts3
+    confucius4-tts
+    miotts
+    miocodec
+    breeze_tts_2
+    crepe
+    omniasr
+    wav2vec2-ggml
+    canary_ctc
+    crispasr-diff-lib
+    ${FFMPEG_LIBRARIES}
+    ${CMAKE_THREAD_LIBS_INIT}
+)
+install(TARGETS crispasr-diff RUNTIME BUNDLE DESTINATION bin)
+
+# ---------------------------------------------------------------------------
+# crispasr-lid — standalone text language identification.
+# Auto-routes between fastText (GlotLID-V3, LID-176) and Google CLD3 by
+# peeking the GGUF's general.architecture key at load time. One binary
+# for any text-LID GGUF.
+#
+# Link order: text-lid-dispatch BEFORE crispasr-lib because the dispatch
+# static library has unresolved references to crispasr_registry_lookup
+# / crispasr_cache::ensure_cached_file (in crispasr_model_registry.cpp
+# / crispasr_cache.cpp inside the main `crispasr-lib` library), and MinGW's
+# GNU ld processes static libraries strictly left-to-right — listing
+# the consumer first lets ld pick up the missing definitions when it
+# subsequently scans `crispasr-lib`. Without this, msys2 UCRT64 build.yml
+# fails with `undefined reference to crispasr_registry_lookup` etc.
+# (Windows MSVC and Linux gcc are forgiving here; only MinGW UCRT64
+# enforces order strictly enough to surface the bug.)
+#
+# Windows networking libs match crispasr-cli's set: winhttp for
+# auto-download (text-lid GGUFs come from HF over HTTPS), ws2_32 +
+# crypt32 because httplib.h's #pragma comment line auto-links them on
+# MSVC but MinGW silently ignores those pragmas.
+# ---------------------------------------------------------------------------
+add_executable(crispasr-lid crispasr_lid_main.cpp)
+if(TARGET crisp_lid)
+    target_link_libraries(crispasr-lid PRIVATE crisp_lid crispasr-lib)
+else()
+    target_link_libraries(crispasr-lid PRIVATE text-lid-dispatch crispasr-lib)
+endif()
+target_link_libraries(crispasr-lid PRIVATE
+    ${CMAKE_THREAD_LIBS_INIT}
+    $<$<BOOL:${WIN32}>:winhttp>
+    $<$<BOOL:${WIN32}>:ws2_32>
+    $<$<BOOL:${WIN32}>:crypt32>
+)
+install(TARGETS crispasr-lid RUNTIME BUNDLE DESTINATION bin)
+
+# ---------------------------------------------------------------------------
+# mimo-tokenizer-smoke — finiteness/magnitude smoke test for the MiMo
+# tokenizer encoder forward path. Used during PLAN #51 step 2 development
+# while the upstream safetensors download is in flight.
+# ---------------------------------------------------------------------------
+add_executable(mimo-tokenizer-smoke mimo_tokenizer_smoke.cpp)
+target_link_libraries(mimo-tokenizer-smoke PRIVATE
+    common
+    crispasr-lib
+    mimo_tokenizer
+    ${FFMPEG_LIBRARIES}
+    ${CMAKE_THREAD_LIBS_INIT}
+)
+
+# 4B MossTTSLocal (#249) — P5-lite runtime smoke test (generate_codes end-to-end).
+if (TARGET moss_tts_local)
+    add_executable(moss-tts-local-smoke moss_tts_local_smoke.cpp)
+    target_link_libraries(moss-tts-local-smoke PRIVATE
+        moss_tts_local
+        ${CMAKE_THREAD_LIBS_INIT}
+    )
+endif()
+
+set_target_properties(${TARGET} PROPERTIES OUTPUT_NAME crispasr)
+
+# httplib.h is in the server example directory
+target_include_directories(${TARGET} PRIVATE
+    ${CMAKE_SOURCE_DIR}/examples/server
+    ${_crispasr_c2pa_audio_include}
+)
+
+include(DefaultTargetOptions)
+
+target_link_libraries(${TARGET} PRIVATE
+    common
+    crispasr-lib
+    parakeet
+    wespeaker
+    gigaam
+    dolphin
+    xasr
+    canary
+    cohere
+    granite_speech
+    granite_nle
+    voxtral
+    voxtral4b
+    voxtral_tts
+    higgs_stt
+    qwen3_asr
+    qwen3_tts
+    omnivoice
+    orpheus
+    chatterbox
+    tada-tts
+    tada-encoder
+    indextts
+    kokoro
+    piper-tts
+    speecht5-tts
+    fastpitch-tts
+    bananamind-tts
+    bark-tts
+    dia-tts
+    dots-tts
+    fireredtts3
+    confucius4-tts
+    irodori-tts
+    supertonic-tts
+    pocket-tts
+    csm-tts
+    voxcpm2_tts
+    m2m100
+    hikari
+    t5_translate
+    canary_ctc
+    wav2vec2-ggml
+    vibevoice
+    kugelaudio
+    silero-lid
+    pyannote-seg
+    funasr
+    paraformer
+    sensevoice
+    sidon
+    moss_audio
+    moss_tts
+    moss_tts_local
+    hojo_asr
+    moss_transcribe
+    moss_transcribe_diarize
+    miotts
+    breeze_tts_2
+    ${FFMPEG_LIBRARIES}
+    ${CMAKE_THREAD_LIBS_INIT}
+    $<$<BOOL:${WIN32}>:winhttp>
+    # Winsock + crypto for httplib.h (transitively pulled in by
+    # crispasr_server.cpp). MSVC auto-links these via #pragma comment
+    # but MinGW (msys2 UCRT64 / CLANG64) ignores those pragmas, so the
+    # link fails with __imp_freeaddrinfo / WSASocketW / etc. undefined.
+    # Listing them unconditionally is harmless on MSVC.
+    $<$<BOOL:${WIN32}>:ws2_32>
+    $<$<BOOL:${WIN32}>:crypt32>
+    $<$<BOOL:${WIN32}>:bcrypt>
+    $<$<BOOL:${WIN32}>:iphlpapi>
+    $<$<BOOL:${WIN32}>:shell32>
+    $<$<BOOL:${CRISPASR_CURL}>:CURL::libcurl>
+)
+
+if (CRISPASR_CURL)
+    target_compile_definitions(${TARGET} PRIVATE CRISPASR_USE_LIBCURL)
+endif()
+
+# Optional outetts backend (source files may not be present in all checkouts)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/crispasr_backend_outetts.cpp")
+    target_sources(${TARGET} PRIVATE crispasr_backend_outetts.cpp)
+    target_link_libraries(${TARGET} PRIVATE outetts)
+    target_compile_definitions(${TARGET} PRIVATE CRISPASR_HAVE_OUTETTS=1)
+endif()
+
+# Optional parler-tts backend
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/crispasr_backend_parler.cpp")
+    target_link_libraries(${TARGET} PRIVATE parler-tts)
+endif()
+
+# MP3 output — in-tree glint encoder (glint/), always available.
+target_link_libraries(${TARGET} PRIVATE glint)
+
+# Optional libmp3lame fallback (used if glint fails, or forced with
+# CRISPASR_MP3_ENCODER=lame for A/B comparisons)
+find_library(LAME_LIBRARY NAMES mp3lame)
+find_path(LAME_INCLUDE_DIR lame/lame.h)
+if (LAME_LIBRARY AND LAME_INCLUDE_DIR)
+    target_link_libraries(${TARGET} PRIVATE ${LAME_LIBRARY})
+    target_include_directories(${TARGET} PRIVATE ${LAME_INCLUDE_DIR})
+    target_compile_definitions(${TARGET} PRIVATE CRISPASR_HAVE_LAME=1)
+    message(STATUS "MP3 output: glint + libmp3lame fallback")
+else()
+    message(STATUS "MP3 output: glint (libmp3lame fallback not found)")
+endif()
+
+# Optional Opus output (libopus + libogg for OGG container)
+find_library(OPUS_LIBRARY NAMES opus)
+find_path(OPUS_INCLUDE_DIR opus/opus.h)
+if (OPUS_LIBRARY AND OPUS_INCLUDE_DIR)
+    target_link_libraries(${TARGET} PRIVATE ${OPUS_LIBRARY})
+    target_include_directories(${TARGET} PRIVATE ${OPUS_INCLUDE_DIR})
+    target_compile_definitions(${TARGET} PRIVATE CRISPASR_HAVE_OPUS=1)
+    message(STATUS "Opus output enabled (libopus)")
+else()
+    message(STATUS "Opus output disabled (libopus-dev not found)")
+endif()
+
+# C2PA (Content Credentials) signing — shared logic in cmake/CrispasrC2pa.cmake.
+crispasr_enable_c2pa(${TARGET})
+
+install(TARGETS ${TARGET} RUNTIME BUNDLE DESTINATION bin)
+
+# ---------------------------------------------------------------------------
+# crispasr-chat — minimal reference CLI for the crispasr_chat_* C ABI.
+#
+# Pure stdin → stdout chat loop. Streaming by default (one-shot when
+# stdin is a pipe). Demonstrates the smallest downstream-binding shape
+# and doubles as a smoke test for the chat surface against any GGUF
+# chat model on disk. No SDL2 dep — text-only.
+# ---------------------------------------------------------------------------
+add_executable(crispasr-chat
+    crispasr_chat_main.cpp
+)
+target_include_directories(crispasr-chat PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(crispasr-chat PRIVATE
+    crispasr-lib
+    ${CMAKE_THREAD_LIBS_INIT}
+)
+include(DefaultTargetOptions)
+install(TARGETS crispasr-chat RUNTIME BUNDLE DESTINATION bin)
+
+add_executable(crispasr-f0-eval crispasr_f0_eval.cpp)
+target_link_libraries(crispasr-f0-eval PRIVATE crispasr-lib crepe beatrice-pitch)
+target_include_directories(crispasr-f0-eval PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+# crispasr-repack-probe — does ggml's CPU repack extra buffer type make
+# quantised MUL_MAT faster on this host? See docs/ggml-optimisation-playbook.md
+# §4. Links ggml directly (no crispasr-lib) so it stays cheap to build and
+# runnable anywhere ggml builds, including a Kaggle worker.
+# Under GGML_BACKEND_DL ggml-cpu is a loadable MODULE, which CMake refuses to
+# link, and the probe calls the CPU backend directly — so it is not built there.
+if (NOT GGML_BACKEND_DL)
+    add_executable(crispasr-repack-probe crispasr_repack_probe.cpp)
+    target_link_libraries(crispasr-repack-probe PRIVATE ggml ggml-base ggml-cpu)
+endif()
+include(DefaultTargetOptions)
+
+if(TARGET moonshine_onnx)
+    target_sources(${TARGET} PRIVATE crispasr_backend_moonshine_onnx.cpp)
+    target_link_libraries(${TARGET} PRIVATE moonshine_onnx)
+endif()

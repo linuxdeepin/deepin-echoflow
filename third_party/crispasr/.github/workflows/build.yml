@@ -1,0 +1,1414 @@
+name: CI
+
+# This is the upstream llama.cpp/ggml CI matrix, carried in-tree because ggml
+# is de-vendored into the `ggml/` submodule (CrispStrobe/ggml) — which already
+# runs this same matrix in its OWN repo. In CrispASR we only want it to fire
+# when the ggml submodule itself moves, so we DON'T:
+#   * re-run the whole 40-leg matrix on every `src/**` C++ edit — the upstream
+#     `**/*.cpp` / `**/*.h` globs matched our entire tree, so a one-line format
+#     fix spun up the full ggml CI (issue #231 triage surfaced this);
+#   * fire on our release `v*` tags — release.yml owns tags, and build.yml's own
+#     `release:` job (`if: startsWith(github.ref, 'refs/tags/v')`) would race it
+#     and attach ggml artifacts to our GitHub release.
+# CrispASR's own cross-platform build lives in ci.yml; this matrix is a safety
+# net for ggml-submodule bumps only. Use `workflow_dispatch` to run it manually.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'ggml'          # the submodule gitlink itself (a bump changes this path)
+      - 'ggml/**'
+      - '.gitmodules'
+      - '.github/workflows/build.yml'
+
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'ggml'
+      - 'ggml/**'
+      - '.gitmodules'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Create new release'
+        required: true
+        type: boolean
+      pre_release_tag:
+        description: 'Pre-release tag name'
+        required: false
+        type: string
+      run_type:
+        description: 'Workflow type to run'
+        required: true
+        type: choice
+        options:
+          - full-ci
+          - release-only
+
+# On main pushes the previous concurrency rule expanded to
+# `CI-${{ github.run_id }}` (run_id is unique per workflow run), so
+# every run landed in its own group → cancel-in-progress never fired
+# → queued runs stacked up faster than the GitHub-hosted pool could
+# service them. Use a literal file-specific prefix instead of
+# `${{ github.workflow }}` because BOTH this file and ci.yml carry
+# `name: CI`, so a `workflow + ref` group would have collided ci.yml
+# and build.yml runs into one bucket where each new push cancelled
+# the other's still-running job. The literal prefix keeps the two
+# workflows independent while still deduplicating to one in-flight
+# run of THIS workflow per ref.
+concurrency:
+  group: build-yml-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write  # for creating release
+
+env:
+  BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+  ubuntu_image: "ubuntu:22.04"
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+
+jobs:
+  determine-tag:
+    runs-on: ubuntu-latest
+    outputs:
+      tag_name: ${{ steps.tag.outputs.name }}
+      should_release: ${{ steps.tag.outputs.should_release }}
+
+    steps:
+      - name: Checkout with full history
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Determine tag name
+        id: tag
+        shell: bash
+        run: |
+          BUILD_NUMBER=$(git rev-list --count HEAD)
+          SHORT_HASH=$(git rev-parse --short=7 HEAD)
+          CUSTOM_TAG="${{ github.event.inputs.pre_release_tag }}"
+          SHOULD_RELEASE="false"
+
+          echo "Raw values:"
+          echo "BUILD_NUMBER: $BUILD_NUMBER"
+          echo "SHORT_HASH: $SHORT_HASH"
+          echo "BRANCH_NAME: ${{ env.BRANCH_NAME }}"
+          echo "CUSTOM_TAG: $CUSTOM_TAG"
+
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            echo "Using pushed tag name"
+            TAG_NAME="${{ github.ref_name }}"
+            SHOULD_RELEASE="true"
+          elif [[ -n "$CUSTOM_TAG" ]]; then
+            echo "Using custom tag"
+            TAG_NAME="${CUSTOM_TAG}"
+            SHOULD_RELEASE="true"
+          elif [[ "${{ github.event.inputs.create_release }}" == "true" ]]; then
+            echo "Manual release requested"
+            SHOULD_RELEASE="true"
+            TAG_NAME="b${BUILD_NUMBER}"
+          elif [[ "${{ env.BRANCH_NAME }}" == "master" ]]; then
+            echo "Using master branch format"
+            TAG_NAME="b${BUILD_NUMBER}"
+            SHOULD_RELEASE="false"
+          else
+            echo "Using non-master branch format"
+            SAFE_NAME=$(echo "${{ env.BRANCH_NAME }}" | tr '/' '-')
+            TAG_NAME="${SAFE_NAME}-b${BUILD_NUMBER}-${SHORT_HASH}"
+            SHOULD_RELEASE="false"
+          fi
+
+          echo "Final tag name: $TAG_NAME"
+          echo "Should release: $SHOULD_RELEASE"
+          echo "name=$TAG_NAME" >> $GITHUB_OUTPUT
+          echo "should_release=$SHOULD_RELEASE" >> $GITHUB_OUTPUT
+
+
+  ubuntu-22:
+    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' ||
+            github.event.inputs.run_type == 'full-ci' }}
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libsdl2-dev cmake git
+
+      - name: Build
+        run: |
+          cmake -B build
+          cmake --build build --config Release -j $(nproc)
+
+  ubuntu-22-arm64:
+    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' ||
+            github.event.inputs.run_type == 'full-ci' }}
+    runs-on: ubuntu-22.04-arm
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libsdl2-dev cmake git
+
+      - name: Build
+        run: |
+          cmake -B build -DGGML_NATIVE=OFF -DGGML_CPU_ARM_ARCH=armv8-a
+          cmake --build build --config Release -j $(nproc)
+
+  macOS-latest:
+    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' ||
+            github.event.inputs.run_type == 'full-ci' }}
+    runs-on: macOS-latest
+
+    strategy:
+      matrix:
+        destination: ['generic/platform=macOS', 'generic/platform=iOS', 'generic/platform=tvOS']
+
+    steps:
+      - name: Clone
+        id: checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2.16
+        with:
+          key: macOS-latest-swift
+          evict-old-files: 1d
+
+      - name: Dependencies
+        run: |
+          brew update
+          cmake --version
+          brew install sdl2
+
+      - name: Build
+        run: |
+          sysctl -a
+          cmake -B build -G Xcode \
+            -DGGML_METAL_USE_BF16=ON \
+            -DGGML_METAL_EMBED_LIBRARY=ON \
+            -DCRISPASR_BUILD_EXAMPLES=OFF \
+            -DCRISPASR_BUILD_TESTS=OFF \
+            -DCRISPASR_BUILD_SERVER=OFF \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+          cmake --build build --config Release -j $(sysctl -n hw.logicalcpu)
+
+
+#  freeBSD-latest:
+#    runs-on: macos-13
+#
+#    steps:
+#      - name: Clone
+#        uses: actions/checkout@v6
+#
+#      - name: Build
+#        uses: cross-platform-actions/action@v0.27.0
+#        with:
+#          operating_system: freebsd
+#          version: '14.2'
+#          run: |
+#            sudo pkg update
+#            sudo pkg install -y gmake sdl2 cmake git
+#            cmake -B build
+#            cmake --build build --config Release
+
+  ubuntu-22-gcc:
+    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' ||
+            github.event.inputs.run_type == 'full-ci' }}
+    runs-on: ubuntu-22.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        build: [Debug, Release]
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake libsdl2-dev git
+
+      - name: Build
+        run: |
+          cmake . -DCRISPASR_SDL2=ON -DCMAKE_BUILD_TYPE=${{ matrix.build }}
+          make
+          # -L "gh|unit": this job already BUILDS all 192 test targets, so running the
+          # unit tier costs seconds. CI used to execute 1 of 162 unit tests (found
+          # while checking whether the test added for #322 actually ran; it did not).
+          ctest -L "gh|unit" -E live --output-on-failure --timeout 300
+
+  ubuntu-22-gcc-arm64:
+    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' ||
+            github.event.inputs.run_type == 'full-ci' }}
+    runs-on: ubuntu-22.04-arm
+
+    strategy:
+      fail-fast: false
+      matrix:
+        build: [Debug, Release]
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake libsdl2-dev git
+
+      - name: Build
+        run: |
+          cmake . -DCRISPASR_SDL2=ON -DCMAKE_BUILD_TYPE=${{ matrix.build }} -DGGML_NATIVE=OFF -DGGML_CPU_ARM_ARCH=armv8-a
+          make
+          # -L "gh|unit": this job already BUILDS all 192 test targets, so running the
+          # unit tier costs seconds. CI used to execute 1 of 162 unit tests (found
+          # while checking whether the test added for #322 actually ran; it did not).
+          ctest -L "gh|unit" -E live --output-on-failure --timeout 300
+
+  ubuntu-22-clang:
+    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' ||
+            github.event.inputs.run_type == 'full-ci' }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        build: [Debug, Release]
+        # `arch` MUST be a real matrix dimension. It used to be two bare `include:`
+        # entries with no key shared with `build:`, which GitHub merges into every
+        # combination — so the LAST one won and every "ubuntu-22-clang" job silently
+        # ran on ubuntu-22.04-arm. clang-on-x86 was therefore never tested, and the
+        # arm64 runs were mislabelled, which is what sent the core_adaln
+        # investigation chasing "clang" and then AVX-512 on x86 for three rounds
+        # (the real cause was aarch64 SVE). `include:` here now only MAPS arch ->
+        # runner, which is what it is for.
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang build-essential cmake libsdl2-dev git
+
+      - name: Build
+        run: |
+          cmake . -DCRISPASR_SDL2=ON -DCMAKE_BUILD_TYPE=${{ matrix.build }} -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang
+          make
+          # -L "gh|unit": this job already BUILDS all 192 test targets, so running the
+          # unit tier costs seconds. CI used to execute 1 of 162 unit tests (found
+          # while checking whether the test added for #322 actually ran; it did not).
+          ctest -L "gh|unit" -E live --output-on-failure --timeout 300
+
+  ubuntu-22-gcc-sanitized:
+    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' ||
+            github.event.inputs.run_type == 'full-ci' }}
+    runs-on: ubuntu-22.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [ADDRESS, THREAD, UNDEFINED]
+        arch: [linux/amd64]
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Build ${{ matrix.arch }}
+        run: |
+          docker run --platform ${{ matrix.arch }} --rm \
+            -v ${{ github.workspace }}:/workspace \
+            -w /workspace ${{ env.ubuntu_image }} /bin/sh -c '
+            set -e
+            export DEBIAN_FRONTEND=noninteractive
+            sed -i "s|archive.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
+            sed -i "s|security.ubuntu.com|azure.archive.ubuntu.com|g" /etc/apt/sources.list
+            for i in 1 2 3 4 5; do apt update && break || sleep 10; done
+            # python3: test-release-workflow is a python test and this container
+            # (unlike the runner) had none, so it failed with "/usr/bin/env:
+            # 'python3': No such file or directory" the moment the unit tier
+            # started running here.
+            apt install -y build-essential cmake git curl python3
+            cmake . -DCMAKE_BUILD_TYPE=Debug \
+              -DCRISPASR_SANITIZE_${{ matrix.sanitizer }}=ON \
+              -DGGML_OPENMP=OFF
+            make
+            # -L "gh|unit": this job already BUILDS all 192 test targets, so running the
+            # unit tier costs seconds. CI used to execute 1 of 162 unit tests (found
+            # while checking whether the test added for #322 actually ran; it did not).
+            ctest -L "gh|unit" -E live --output-on-failure --timeout 300'
+
+  windows-msys2:
+    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' ||
+            github.event.inputs.run_type == 'full-ci' }}
+    runs-on: windows-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { sys: UCRT64,  env: ucrt-x86_64,  build: Release }
+          - { sys: CLANG64, env: clang-x86_64, build: Release }
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Setup ${{ matrix.sys }}
+        uses: msys2/setup-msys2@v2
+        with:
+          update: true
+          msystem: ${{matrix.sys}}
+          install: >-
+            base-devel
+            git
+            mingw-w64-${{matrix.env}}-toolchain
+            mingw-w64-${{matrix.env}}-cmake
+            mingw-w64-${{matrix.env}}-SDL2
+            mingw-w64-${{matrix.env}}-openblas
+
+      - name: Build using CMake
+        shell: msys2 {0}
+        run: |
+            cmake -B build -DCRISPASR_SDL2=ON
+            cmake --build build --config ${{ matrix.build }} -j $(nproc)
+
+      - name: Clean after building using CMake
+        shell: msys2 {0}
+        run: |
+            rm -rf build
+
+      - name: Build using CMake w/ OpenBLAS
+        shell: msys2 {0}
+        run: |
+            cmake -B build -DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS
+            cmake --build build --config ${{ matrix.build }} -j $(nproc)
+
+  windows:
+    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' ||
+            github.event.inputs.run_type == 'full-ci' }}
+    runs-on: windows-latest
+    needs: determine-tag
+
+    strategy:
+      matrix:
+        build: [Release]
+        arch: [Win32, x64]
+        sdl2: [ON]
+        include:
+          - arch: Win32
+            s2arc: x86
+            jnaPath: win32-x86
+          - arch: x64
+            s2arc: x64
+            jnaPath: win32-x86-64
+          - sdl2: ON
+            s2ver: 2.28.5
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Add msbuild to PATH
+        uses: microsoft/setup-msbuild@v3
+
+      - name: Fetch SDL2 and set SDL2_DIR
+        if: matrix.sdl2 == 'ON'
+        run: |
+          C:/msys64/usr/bin/wget.exe -qO sdl2.zip https://github.com/libsdl-org/SDL/releases/download/release-${{ matrix.s2ver }}/SDL2-devel-${{ matrix.s2ver }}-VC.zip
+          7z x sdl2.zip
+          echo "SDL2_DIR=$env:GITHUB_WORKSPACE/SDL2-${{ matrix.s2ver }}/cmake" >> $env:GITHUB_ENV
+
+      - name: Configure
+        run: >
+          cmake -S . -B ./build -A ${{ matrix.arch }}
+          -DCMAKE_BUILD_TYPE=${{ matrix.build }}
+          -DBUILD_SHARED_LIBS=ON
+          -DCRISPASR_BUILD_TESTS=OFF
+          -DCRISPASR_SDL2=${{ matrix.sdl2 }}
+
+      - name: Build
+        run: |
+          cd ./build
+          msbuild ALL_BUILD.vcxproj -t:build -p:configuration=${{ matrix.build }} -p:platform=${{ matrix.arch }}
+
+      - name: Copy SDL2.dll
+        if: matrix.sdl2 == 'ON'
+        run: copy "$env:SDL2_DIR/../lib/${{ matrix.s2arc }}/SDL2.dll" build/bin/${{ matrix.build }}
+
+      - name: Upload SDL2.dll
+        if: matrix.sdl2 == 'ON'
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.s2arc }}_SDL2.dll
+          path: build/bin/${{ matrix.build }}/SDL2.dll
+
+      - name: Upload crispasr dll
+        uses: actions/upload-artifact@v6
+        with:
+          name: crispasr_${{ matrix.arch }}.dll
+          path: build/bin/${{ matrix.build }}/whisper.dll
+
+      - name: Upload ggml dll
+        uses: actions/upload-artifact@v6
+        with:
+          name: ggml_${{ matrix.arch }}.dll
+          path: build/bin/${{ matrix.build }}/ggml.dll
+          if-no-files-found: warn
+
+      - name: Upload ggml base dll
+        uses: actions/upload-artifact@v6
+        with:
+          name: ggml_base_${{ matrix.arch }}.dll
+          path: build/bin/${{ matrix.build }}/ggml-base.dll
+          if-no-files-found: warn
+
+      - name: Upload ggml cpu dll
+        uses: actions/upload-artifact@v6
+        with:
+          name: ggml_cpu_${{ matrix.arch }}.dll
+          path: build/bin/${{ matrix.build }}/ggml-cpu.dll
+          if-no-files-found: warn
+
+      - name: Pack bin artifacts
+        shell: pwsh
+        run: |
+              Compress-Archive -Path "build/bin/${{ matrix.build }}" -DestinationPath "crispasr-bin-${{ matrix.arch }}.zip"
+
+      - name: Upload binaries
+        if: matrix.sdl2 == 'ON' && ${{ needs.determine-tag.outputs.should_release }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: crispasr-bin-${{ matrix.arch }}.zip
+          path: crispasr-bin-${{ matrix.arch }}.zip
+
+  windows-blas:
+    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' ||
+            github.event.inputs.run_type == 'full-ci' }}
+    runs-on: windows-latest
+
+    strategy:
+      matrix:
+        build: [Release]
+        arch: [Win32, x64]
+        blas: [ON]
+        sdl2: [ON]
+        blasver: [0.3.29]
+        include:
+          - arch: Win32
+            s2arc: x86
+            blasfile: x86
+          - arch: x64
+            s2arc: x64
+            blasfile: x64_64
+          - sdl2: ON
+            s2ver: 2.28.5
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Export GitHub Actions cache environment variables
+        uses: actions/github-script@v8
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Add msbuild to PATH
+        uses: microsoft/setup-msbuild@v3
+
+      - name: Install OpenBLAS and pkg-config
+        if: matrix.blas == 'ON'
+        run: |
+          Invoke-WebRequest "https://github.com/OpenMathLib/OpenBLAS/releases/download/v${{matrix.blasver}}/OpenBLAS-${{matrix.blasver}}_${{matrix.blasfile}}.zip" -OutFile "OpenBLAS-${{matrix.blasver}}.zip"
+          Expand-Archive "OpenBLAS-${{matrix.blasver}}.zip" -DestinationPath "OpenBLAS-${{matrix.blasver}}"
+          # pkgconfiglite downloads from SourceForge which fails on windows-2025 (TLS mismatch)
+          # Use MSYS2 pkgconf which is pre-installed on all GitHub Windows runners
+          C:\msys64\usr\bin\pacman.exe --noconfirm -Sy msys/pkgconf
+          echo "C:\msys64\usr\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Fetch SDL2 and set SDL2_DIR
+        if: matrix.sdl2 == 'ON'
+        run: |
+          C:/msys64/usr/bin/wget.exe -qO sdl2.zip https://github.com/libsdl-org/SDL/releases/download/release-${{ matrix.s2ver }}/SDL2-devel-${{ matrix.s2ver }}-VC.zip
+          7z x sdl2.zip
+          echo "SDL2_DIR=$env:GITHUB_WORKSPACE/SDL2-${{ matrix.s2ver }}/cmake" >> $env:GITHUB_ENV
+
+      - name: Configure
+        run: >
+          cmake -S . -B ./build -A ${{ matrix.arch }}
+          -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          -DCMAKE_BUILD_TYPE=${{ matrix.build }}
+          -DGGML_BLAS=${{ matrix.blas }}
+          -DGGML_BLAS_VENDOR=OpenBLAS
+          -DBLAS_LIBRARIES="$env:GITHUB_WORKSPACE/OpenBLAS-${{matrix.blasver}}/lib/libopenblas.lib"
+          -DBLAS_INCLUDE_DIRS="$env:GITHUB_WORKSPACE/OpenBLAS-${{matrix.blasver}}/include"
+          -DCRISPASR_BUILD_TESTS=OFF
+          -DCRISPASR_SDL2=${{ matrix.sdl2 }}
+
+      - name: Build
+        run: |
+          cd ./build
+          msbuild ALL_BUILD.vcxproj -t:build -p:configuration=${{ matrix.build }} -p:platform=${{ matrix.arch }}
+
+      - name: Copy openblas.dll
+        if: matrix.blas == 'ON'
+        run: copy "$env:GITHUB_WORKSPACE/OpenBLAS-${{matrix.blasver}}/bin/libopenblas.dll" build/bin/${{ matrix.build }}
+
+      - name: Copy SDL2.dll
+        if: matrix.sdl2 == 'ON'
+        run: copy "$env:SDL2_DIR/../lib/${{ matrix.s2arc }}/SDL2.dll" build/bin/${{ matrix.build }}
+
+      - name: Pack bin artifacts
+        shell: pwsh
+        run: |
+              Compress-Archive -Path "build/bin/${{ matrix.build }}" -DestinationPath "crispasr-blas-bin-${{ matrix.arch }}.zip"
+
+      - name: Upload binaries
+        if: matrix.blas == 'ON' && matrix.sdl2 == 'ON' && ${{ needs.determine-tag.outputs.should_release }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: crispasr-blas-bin-${{ matrix.arch }}.zip
+          path: crispasr-blas-bin-${{ matrix.arch }}.zip
+
+  windows-cublas:
+    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' ||
+            github.event.inputs.run_type == 'full-ci' }}
+    runs-on: windows-2022
+    needs: determine-tag
+    strategy:
+      fail-fast: false
+      matrix:
+        build: [Release]
+        arch: [x64]
+        cublas: [ON]
+        sdl2: [ON]
+        cuda-toolkit: [12.4.0, 11.8.0]
+        include:
+          - arch: x64
+            sdl2: ON
+            sdl2_ver: 2.28.5
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install Ninja
+        id: install_ninja
+        run: |
+          choco install ninja
+
+      - name: Install ccache
+        uses: hendrikmuhs/ccache-action@v1.2.16
+        with:
+          key: ${{ github.job }}-${{ matrix.cuda-toolkit }}-${{ matrix.build }}
+          variant: sccache
+          evict-old-files: 5d
+
+      - name: Install Cuda Toolkit 11.8.0
+        if: ${{ matrix.cuda-toolkit == '11.8.0' }}
+        run: |
+          $CUDA_VERSION = ${{ matrix.cuda-toolkit }}
+          $CUDA_TOOLKIT_DIR = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v$CUDA_VERSION"
+          $CUDA_DOWNLOAD = "https://developer.download.nvidia.com/compute/cuda/redist"
+
+          # Components versions
+          $CUDART_VER = "11.8.89"
+          $NVCC_VER   = "11.8.89"
+          $NVRTC_VER  = "11.8.89"
+          $CUBLAS_VER = "11.8.1.74"
+          $NVTX_VER   = "11.8.86"
+          $VS_VER     = "11.8.86"
+          $NVPROF_VER = "11.8.87"
+          $CCCL_VER   = "11.8.89"
+
+          # Create the directory where the CUDA Toolkit will be installed
+          mkdir -p $CUDA_TOOLKIT_DIR
+
+          # Install unzip to extract the downloaded files
+          choco install unzip -y
+
+          # Download all the required components
+          curl -O "$CUDA_DOWNLOAD/cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-${CUDART_VER}-archive.zip"
+          curl -O "$CUDA_DOWNLOAD/cuda_nvcc/windows-x86_64/cuda_nvcc-windows-x86_64-${NVCC_VER}-archive.zip"
+          curl -O "$CUDA_DOWNLOAD/cuda_nvrtc/windows-x86_64/cuda_nvrtc-windows-x86_64-${NVRTC_VER}-archive.zip"
+          curl -O "$CUDA_DOWNLOAD/libcublas/windows-x86_64/libcublas-windows-x86_64-${CUBLAS_VER}-archive.zip"
+          curl -O "$CUDA_DOWNLOAD/cuda_nvtx/windows-x86_64/cuda_nvtx-windows-x86_64-${NVTX_VER}-archive.zip"
+          curl -O "$CUDA_DOWNLOAD/visual_studio_integration/windows-x86_64/visual_studio_integration-windows-x86_64-${VS_VER}-archive.zip"
+          curl -O "$CUDA_DOWNLOAD/cuda_nvprof/windows-x86_64/cuda_nvprof-windows-x86_64-${NVPROF_VER}-archive.zip"
+          curl -O "$CUDA_DOWNLOAD/cuda_cccl/windows-x86_64/cuda_cccl-windows-x86_64-${CCCL_VER}-archive.zip"
+
+          # Extract all the downloaded files to the CUDA Toolkit directory
+          unzip '*.zip' -d $CUDA_TOOLKIT_DIR
+
+          # Copy all the extracted files to the main CUDA Toolkit directory
+          xcopy "$CUDA_TOOLKIT_DIR\cuda_cudart-windows-x86_64-${CUDART_VER}-archive\*" "$CUDA_TOOLKIT_DIR" /E /I /H /Y
+          xcopy "$CUDA_TOOLKIT_DIR\cuda_nvcc-windows-x86_64-${NVCC_VER}-archive\*" "$CUDA_TOOLKIT_DIR" /E /I /H /Y
+          xcopy "$CUDA_TOOLKIT_DIR\cuda_nvrtc-windows-x86_64-${NVRTC_VER}-archive\*" "$CUDA_TOOLKIT_DIR" /E /I /H /Y
+          xcopy "$CUDA_TOOLKIT_DIR\libcublas-windows-x86_64-${CUBLAS_VER}-archive\*" "$CUDA_TOOLKIT_DIR" /E /I /H /Y
+          xcopy "$CUDA_TOOLKIT_DIR\cuda_nvtx-windows-x86_64-${NVTX_VER}-archive\*" "$CUDA_TOOLKIT_DIR" /E /I /H /Y
+          xcopy "$CUDA_TOOLKIT_DIR\cuda_nvprof-windows-x86_64-${NVPROF_VER}-archive\*" "$CUDA_TOOLKIT_DIR" /E /I /H /Y
+          xcopy "$CUDA_TOOLKIT_DIR\cuda_cccl-windows-x86_64-${CCCL_VER}-archive\*" "$CUDA_TOOLKIT_DIR" /E /I /H /Y
+          xcopy "$CUDA_TOOLKIT_DIR\visual_studio_integration-windows-x86_64-${VS_VER}-archive\*" "$CUDA_TOOLKIT_DIR" /E /I /H /Y
+
+          # Visual Studio integration
+          xcopy "$CUDA_TOOLKIT_DIR\visual_studio_integration-windows-x86_64-${VS_VER}-archive\visual_studio_integration\MSBuildExtensions\*" "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Microsoft\VC\v170\BuildCustomizations" /E /I /H /Y
+
+          # Set environment variables
+          echo "$CUDA_TOOLKIT_DIR\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          echo "$CUDA_TOOLKIT_DIR\libnvvp" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          echo "CUDA_PATH=$CUDA_TOOLKIT_DIR" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          echo "CUDA_PATH_V11_8=$CUDA_TOOLKIT_DIR" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Install Cuda Toolkit 12.4.0
+        if: ${{ matrix.cuda-toolkit == '12.4.0' }}
+        run: |
+          $CUDA_VERSION = ${{ matrix.cuda-toolkit }}
+          $CUDA_TOOLKIT_DIR = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v$CUDA_VERSION"
+          $CUDA_DOWNLOAD = "https://developer.download.nvidia.com/compute/cuda/redist"
+
+          # Components versions
+          $CUDART_VER   = "12.4.127"
+          $NVCC_VER     = "12.4.131"
+          $NVRTC_VER    = "12.4.127"
+          $CUBLAS_VER   = "12.4.5.8"
+          $NVTX_VER     = "12.4.127"
+          $PROFILER_VER = "12.4.127"
+          $VS_VER       = "12.4.127"
+          $NVPROF_VER   = "12.4.128"
+          $CCCL_VER     = "12.4.127"
+
+          # Create the directory where the CUDA Toolkit will be installed
+          mkdir -p $CUDA_TOOLKIT_DIR
+
+          # Install unzip to extract the downloaded files
+          choco install unzip -y
+
+          # Download all the required components
+          curl -O "$CUDA_DOWNLOAD/cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-${CUDART_VER}-archive.zip"
+          curl -O "$CUDA_DOWNLOAD/cuda_nvcc/windows-x86_64/cuda_nvcc-windows-x86_64-${NVCC_VER}-archive.zip"
+          curl -O "$CUDA_DOWNLOAD/cuda_nvrtc/windows-x86_64/cuda_nvrtc-windows-x86_64-${NVRTC_VER}-archive.zip"
+          curl -O "$CUDA_DOWNLOAD/libcublas/windows-x86_64/libcublas-windows-x86_64-${CUBLAS_VER}-archive.zip"
+          curl -O "$CUDA_DOWNLOAD/cuda_nvtx/windows-x86_64/cuda_nvtx-windows-x86_64-${NVTX_VER}-archive.zip"
+          curl -O "$CUDA_DOWNLOAD/cuda_profiler_api/windows-x86_64/cuda_profiler_api-windows-x86_64-${PROFILER_VER}-archive.zip"
+          curl -O "$CUDA_DOWNLOAD/visual_studio_integration/windows-x86_64/visual_studio_integration-windows-x86_64-${VS_VER}-archive.zip"
+          curl -O "$CUDA_DOWNLOAD/cuda_nvprof/windows-x86_64/cuda_nvprof-windows-x86_64-${NVPROF_VER}-archive.zip"
+          curl -O "$CUDA_DOWNLOAD/cuda_cccl/windows-x86_64/cuda_cccl-windows-x86_64-${CCCL_VER}-archive.zip"
+
+          # Extract all the downloaded files to the CUDA Toolkit directory
+          unzip -q '*.zip' -d $CUDA_TOOLKIT_DIR
+
+          # Copy all the extracted files to the main CUDA Toolkit directory
+          xcopy "$CUDA_TOOLKIT_DIR\cuda_cudart-windows-x86_64-${CUDART_VER}-archive\*" "$CUDA_TOOLKIT_DIR" /E /I /H /Y
+          xcopy "$CUDA_TOOLKIT_DIR\cuda_nvcc-windows-x86_64-${NVCC_VER}-archive\*"     "$CUDA_TOOLKIT_DIR" /E /I /H /Y
+          xcopy "$CUDA_TOOLKIT_DIR\cuda_nvrtc-windows-x86_64-${NVRTC_VER}-archive\*"   "$CUDA_TOOLKIT_DIR" /E /I /H /Y
+          xcopy "$CUDA_TOOLKIT_DIR\libcublas-windows-x86_64-${CUBLAS_VER}-archive\*"   "$CUDA_TOOLKIT_DIR" /E /I /H /Y
+          xcopy "$CUDA_TOOLKIT_DIR\cuda_nvtx-windows-x86_64-${NVTX_VER}-archive\*"     "$CUDA_TOOLKIT_DIR" /E /I /H /Y
+          xcopy "$CUDA_TOOLKIT_DIR\cuda_nvprof-windows-x86_64-${NVPROF_VER}-archive\*" "$CUDA_TOOLKIT_DIR" /E /I /H /Y
+          xcopy "$CUDA_TOOLKIT_DIR\cuda_cccl-windows-x86_64-${CCCL_VER}-archive\*" "$CUDA_TOOLKIT_DIR" /E /I /H /Y
+          xcopy "$CUDA_TOOLKIT_DIR\cuda_profiler_api-windows-x86_64-${PROFILER_VER}-archive\*" "$CUDA_TOOLKIT_DIR" /E /I /H /Y
+          xcopy "$CUDA_TOOLKIT_DIR\visual_studio_integration-windows-x86_64-${VS_VER}-archive\*" "$CUDA_TOOLKIT_DIR" /E /I /H /Y
+
+          # Visual Studio integration
+          xcopy "$CUDA_TOOLKIT_DIR\visual_studio_integration-windows-x86_64-${VS_VER}-archive\visual_studio_integration\MSBuildExtensions\*" "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Microsoft\VC\v170\BuildCustomizations" /E /I /H /Y
+
+          # Set environment variables
+          echo "$CUDA_TOOLKIT_DIR\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          echo "$CUDA_TOOLKIT_DIR\libnvvp" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          echo "CUDA_PATH=$CUDA_TOOLKIT_DIR" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          echo "CUDA_PATH_V12_2=$CUDA_TOOLKIT_DIR" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Add msbuild to PATH
+        uses: microsoft/setup-msbuild@v3
+
+      - name: Install 7-Zip
+        run: choco install 7zip -y
+
+      - name: Fetch SDL2 and set SDL2_DIR
+        if: matrix.sdl2 == 'ON'
+        run: |
+          Invoke-WebRequest -Uri https://github.com/libsdl-org/SDL/releases/download/release-${{ matrix.sdl2_ver }}/SDL2-devel-${{ matrix.sdl2_ver }}-VC.zip -OutFile sdl2.zip
+          7z x sdl2.zip
+          echo "SDL2_DIR=${{ github.workspace }}\SDL2-${{ matrix.sdl2_ver }}\cmake" | Out-File -FilePath $env:GITHUB_ENV -Append
+          echo "${{ github.workspace }}\SDL2-${{ matrix.sdl2_ver }}\cmake" > SDL2_PATH.txt
+
+      - name: Install cmake
+        run: choco install cmake
+
+      - name: Build Project
+        shell: cmd
+        run: |
+          for /f "tokens=*" %%i in ('"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath') do set VSINSTALL=%%i
+          call "%VSINSTALL%\VC\Auxiliary\Build\vcvars64.bat"
+          cmake --version
+          where cmake
+          if "${{ matrix.cuda-toolkit }}" == "11.8.0" (
+            set CUDA_FLAGS=-allow-unsupported-compiler -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH -D_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR
+          ) else (
+            set CUDA_FLAGS=
+          )
+          cmake -S . -B build -G "Ninja Multi-Config" ^
+            -DCMAKE_BUILD_TYPE=${{ matrix.build }} ^
+            -DGGML_CUDA=${{ matrix.cublas }} ^
+            -DCRISPASR_BUILD_TESTS=OFF ^
+            -DCRISPASR_SDL2=${{ matrix.sdl2 }} ^
+            -DSDL2_DIR="%SDL2_DIR%" ^
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 ^
+            -DCMAKE_CUDA_FLAGS="%CUDA_FLAGS%"
+          set /A NINJA_JOBS=%NUMBER_OF_PROCESSORS%-1
+          cmake --build build --config ${{ matrix.build }} -j %NUMBER_OF_PROCESSORS%
+
+      - name: Check sccache status after build
+        run: |
+          sccache --show-stats
+
+      - name: Copy CUDA DLLs
+        run: |
+          Get-ChildItem "$env:CUDA_PATH\bin\" -Filter "*.dll" |
+          Copy-Item -Destination "build/bin/${{ matrix.build }}"
+
+      - name: Copy SDL2.dll
+        if: matrix.sdl2 == 'ON'
+        run: copy "$env:SDL2_DIR/../lib/${{ matrix.arch }}/SDL2.dll" build/bin/${{ matrix.build }}
+
+      - name: Pack bin artifacts
+        shell: pwsh
+        run: |
+              Compress-Archive -Path "build/bin/${{ matrix.build }}" -DestinationPath "crispasr-cublas-${{ matrix.cuda-toolkit }}-bin-${{ matrix.arch }}.zip"
+
+      - name: Upload binaries
+        if: ${{ needs.determine-tag.outputs.should_release }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: crispasr-cublas-${{ matrix.cuda-toolkit }}-bin-${{ matrix.arch }}.zip
+          path: crispasr-cublas-${{ matrix.cuda-toolkit }}-bin-${{ matrix.arch }}.zip
+
+  emscripten:
+    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' ||
+            github.event.inputs.run_type == 'full-ci' }}
+    runs-on: ubuntu-22.04
+
+    strategy:
+      matrix:
+        build: [Release]
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Setup emsdk
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 6.0.2  # 6.0.3 regressed WASM ISel (voxtral_tts crash); pin last-good
+
+      - name: Verify
+        run: emcc -v
+
+      - name: Build
+        run: |
+          emcmake cmake . -DCMAKE_BUILD_TYPE=${{ matrix.build }}
+          make
+
+  ios-xcode-build:
+    runs-on: macos-latest
+    needs: determine-tag
+
+    strategy:
+      matrix:
+        build: [Release]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Configure
+        run: |
+          cp models/for-tests-ggml-base.en.bin models/ggml-base.en.bin
+          mkdir models/ggml-base.en-encoder.mlmodelc
+
+      - name: Build
+        id: cmake_build
+        run: |
+          sysctl -a
+          mkdir build
+          cd build
+          cmake -G Xcode .. \
+            -DGGML_METAL_USE_BF16=ON \
+            -DGGML_METAL_EMBED_LIBRARY=ON \
+            -DCRISPASR_BUILD_EXAMPLES=OFF \
+            -DCRISPASR_BUILD_TESTS=OFF \
+            -DCRISPASR_BUILD_SERVER=OFF \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
+            -DCMAKE_XCODE_ATTRIBUTE_DEVELOPMENT_TEAM=ggml
+          cmake --build . --config Release -j $(sysctl -n hw.logicalcpu) -- CODE_SIGNING_ALLOWED=NO
+
+      - name: xcodebuild for swift package
+        id: xcodebuild
+        run: |
+          ./build-xcframework.sh
+
+      - name: Build objc example
+        run: xcodebuild -project examples/crispasr.objc/crispasr.objc.xcodeproj -scheme crispasr.objc -configuration ${{ matrix.build }} -sdk iphoneos CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO FRAMEWORK_FOLDER_PATH=./build-ios build
+
+      - name: Build swiftui example
+        run: xcodebuild -project examples/crispasr.swiftui/crispasr.swiftui.xcodeproj -scheme CrispASRDemo -configuration ${{ matrix.build }} -sdk iphoneos CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= -destination 'generic/platform=iOS' FRAMEWORK_FOLDER_PATH=./build-ios build
+
+      - name: Pack artifacts
+        id: pack_artifacts
+        run: |
+          zip --symlinks -r crispasr-${{ needs.determine-tag.outputs.tag_name }}-xcframework.zip build-apple/crispasr.xcframework
+
+      - name: Upload artifacts
+        if: ${{ needs.determine-tag.outputs.should_release }}
+        uses: actions/upload-artifact@v6
+        with:
+          path: crispasr-${{ needs.determine-tag.outputs.tag_name }}-xcframework.zip
+          name: crispasr-${{ needs.determine-tag.outputs.tag_name }}-xcframework.zip
+
+      # Attach the xcframework to the GitHub Release on tag pushes. release.yml
+      # has no iOS job, so this is the only place the Apple xcframework reaches
+      # the release page (prior releases shipped it as a CI artifact only).
+      - name: Attach xcframework to release
+        if: ${{ github.ref_type == 'tag' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.determine-tag.outputs.tag_name }}
+          files: crispasr-${{ needs.determine-tag.outputs.tag_name }}-xcframework.zip
+          fail_on_unmatched_files: true
+
+  android:
+    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' ||
+            github.event.inputs.run_type == 'full-ci' }}
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          path: crispasr
+
+      - name: Install Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: zulu
+          java-version: 21
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Build
+        run: |
+          cd crispasr/examples/crispasr.android
+          ./gradlew assembleRelease --no-daemon
+
+      - name: Build with external ggml
+        run: |
+          export PATH_TO_GGML=$PWD/ggml
+          cd crispasr/examples/crispasr.android
+          ./gradlew assembleRelease --no-daemon
+
+  android_java:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: set up JDK 11
+        uses: actions/setup-java@v5
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          cmdline-tools-version: 9.0
+
+      - name: Build
+        run: |
+          cd examples/crispasr.android.java
+          chmod +x ./gradlew
+          ./gradlew assembleRelease
+
+  bindings-java:
+    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' ||
+            github.event.inputs.run_type == 'full-ci' }}
+    needs: ['windows']
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: zulu
+          java-version: 20
+
+      - name: Download CrispASR Windows lib
+        uses: actions/download-artifact@v7
+        with:
+          name: crispasr_x64.dll
+
+      - name: Download GGML Windows lib
+        uses: actions/download-artifact@v7
+        with:
+          name: ggml_x64.dll
+
+      - name: Download GGML Base Windows lib
+        uses: actions/download-artifact@v7
+        with:
+          name: ggml_base_x64.dll
+
+      - name: Download GGML CPU Windows lib
+        uses: actions/download-artifact@v7
+        with:
+          name: ggml_cpu_x64.dll
+
+      - name: Download SDL2.dll
+        uses: actions/download-artifact@v7
+        with:
+          name: x64_SDL2.dll
+
+      - name: List downloaded files
+        shell: pwsh
+        run: |
+          Get-ChildItem -Path "." -Recurse -Filter "*.dll"
+
+      - name: Move DLL to correct location
+        shell: pwsh
+        run: |
+          New-Item -Path "build\bin\Release" -ItemType Directory -Force
+
+          Copy-Item -Path "whisper.dll" -Destination "build\bin\Release\whisper.dll" -Force
+          Copy-Item -Path "whisper.dll" -Destination "build\bin\Release\crispasr.dll" -Force
+          Write-Host "Copied whisper.dll to build\bin\Release\ as whisper.dll + crispasr.dll"
+
+          Copy-Item -Path "ggml.dll" -Destination "build\bin\Release\ggml.dll" -Force
+          Write-Host "Copied ggml.dll to build\bin\Release\ggml.dll directory"
+
+          Copy-Item -Path "ggml-base.dll" -Destination "build\bin\Release\ggml-base.dll" -Force
+          Write-Host "Copied ggml-base.dll to build\bin\Release\ggml-base.dll directory"
+
+          Copy-Item -Path "ggml-cpu.dll" -Destination "build\bin\Release\ggml-cpu.dll" -Force
+          Write-Host "Copied ggml-cpu.dll to build\bin\Release\ggml-cpu.dll directory"
+
+          Copy-Item -Path "SDL2.dll" -Destination "build\bin\Release\SDL2.dll" -Force
+          Write-Host "Copied SDL2.dll to build\bin\Release\SDL2.dll directory"
+
+      - name: List build release files
+        shell: pwsh
+        run: |
+          Get-ChildItem -Path "build\Release" -Recurse -Filter "*.dll"
+
+      - name: Build
+        continue-on-error: true  # JNA struct alignment on Win64 (#143)
+        run: |
+          models\download-ggml-model.cmd tiny.en models/
+          cd bindings/java
+          chmod +x ./gradlew
+          ./gradlew build --info
+
+      - name: Pack jar artifacts
+        shell: pwsh
+        run: |
+              Compress-Archive -Path "bindings/java/build/libs/whispercpp-*.jar" -DestinationPath "whispercpp.jar.zip"
+
+      - name: Upload jar
+        uses: actions/upload-artifact@v6
+        with:
+          name: whispercpp.jar.zip
+          path: whispercpp.jar.zip
+
+#      - name: Publish package
+#        if: ${{ github.ref == 'refs/heads/master' }}
+#        uses: gradle/gradle-build-action@v2.4.2
+#        with:
+#          arguments: publish
+#          build-root-directory: bindings/java
+#        env:
+#          MAVEN_USERNAME: ${{ secrets.JIRA_USER }}
+#          MAVEN_PASSWORD: ${{ secrets.JIRA_PASS }}
+#          PGP_SECRET: ${{ secrets.GPG_PRIVATE_KEY }}
+#          PGP_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+
+  quantize:
+    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' ||
+            github.event.inputs.run_type == 'full-ci' }}
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Test quantize
+        run: |
+          ./models/download-ggml-model.sh tiny.en
+          cmake -B build
+          cmake --build build --config Release
+          ./build/bin/crispasr-legacy-quantize models/ggml-tiny.en.bin models/ggml-tiny.en-q4_0.bin q4_0
+
+  release:
+    if: ${{ github.event.inputs.create_release == 'true' || github.event.inputs.pre_release_tag != '' || startsWith(github.ref, 'refs/tags/v') }}
+
+    runs-on: ubuntu-latest
+
+    needs:
+      - determine-tag
+      - ios-xcode-build
+      - windows
+      - windows-blas
+      - windows-cublas
+
+    steps:
+      - name: Clone
+        id: checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2.16
+        with:
+          key: release
+          evict-old-files: 1d
+
+      # Downloads all the artifacts from the previous jobs
+      - name: Download artifacts
+        id: download-artifact
+        uses: actions/download-artifact@v7
+        with:
+          path: ./artifact
+
+      - name: Move artifacts
+        id: move_artifacts
+        run: mkdir -p ./artifact/release && mv ./artifact/*/*.zip ./artifact/release
+
+      - name: Create release
+        id: create_release
+        uses: ggml-org/action-create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ needs.determine-tag.outputs.tag_name }}
+          prerelease: ${{ github.event.inputs.pre_release_tag != '' }}
+          draft: true
+
+      - name: Upload release
+        id: upload_release
+        uses: actions/github-script@v3
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
+          script: |
+            const path = require('path');
+            const fs = require('fs');
+            const release_id = '${{ steps.create_release.outputs.id }}';
+            for (let file of await fs.readdirSync('./artifact/release')) {
+              if (path.extname(file) === '.zip') {
+                console.log('uploadReleaseAsset', file);
+                await github.repos.uploadReleaseAsset({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  release_id: release_id,
+                  name: file,
+                  data: await fs.readFileSync(`./artifact/release/${file}`)
+                });
+              }
+            }
+
+  coreml-base-en:
+    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/master') ||
+            github.event.inputs.create_release == 'true' ||
+            github.event.inputs.pre_release_tag != '' ||
+            startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: macos-latest
+    needs: determine-tag
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Set environment variables
+        id: set_vars
+        run: |
+          echo "MODEL_NAME=base.en" >> $GITHUB_ENV
+          echo "GEN_MODEL_NAME=whisper-${{ needs.determine-tag.outputs.tag_name }}-ggml-base.en-encoder.mlmodelc" >> $GITHUB_ENV
+
+      - name: Download model
+        run: |
+          ./models/download-ggml-model.sh ${{ env.MODEL_NAME }}
+
+      - name: Generate CoreML model
+        run: |
+          python3.11 -m venv venv
+          source venv/bin/activate
+          pip install ane_transformers openai-whisper coremltools
+          ./models/generate-coreml-model.sh ${{ env.MODEL_NAME }}
+
+  vad:
+    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' ||
+            github.event.inputs.run_type == 'full-ci' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Build
+        shell: bash
+        run: |
+          cmake -B build
+          cmake --build build --config Release
+
+      - name: Test
+        shell: bash
+        run: |
+          ctest -R ^test-vad$ --test-dir build --output-on-failure -VV
+
+# ---------------------------------------------------------------------------
+# ggml regression coverage on GitHub-hosted CPU runners.
+#
+# CrispASR carries CrispASR-specific ggml patches (see tools/upstream-prs/
+# 01-12) across CPU, CUDA, Metal, and ggml-backend-sched. The github-hosted
+# CPU jobs below run upstream ggml's ./ci/run.sh script on our patched ggml
+# tree — they catch CPU-side regressions our patches might introduce.
+#
+# Self-hosted CUDA / Vulkan / Metal ggml-ci jobs from the original whisper.cpp
+# build.yml were removed because they target ggml-org's self-hosted runners
+# (which CrispASR doesn't provision), so they'd sit queued indefinitely on
+# every push. Re-add as workflow_dispatch-only if/when we own equivalent
+# self-hosted infra.
+# ---------------------------------------------------------------------------
+
+  ggml-ci-x64-cpu-low-perf:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Clone
+        id: checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Prewarm apt (retry through transient mirror flake)
+        if: runner.os == 'Linux'
+        run: |
+          for i in 1 2 3 4 5; do sudo apt-get update -y && break || sleep 10; done || true
+
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.21
+        with:
+          key: ggml-ci-x64-cpu-low-perf
+          evict-old-files: 1d
+
+      - name: Dependencies
+        id: depends
+        run: |
+          sudo apt-get update
+          sudo apt-get install build-essential libcurl4-openssl-dev
+
+      - name: Test
+        id: ggml-ci
+        run: |
+          LLAMA_ARG_THREADS=$(nproc) GG_BUILD_LOW_PERF=1 bash ./ci/run.sh ./tmp/results ./tmp/mnt
+
+  ggml-ci-arm64-cpu-low-perf:
+    runs-on: ubuntu-22.04-arm
+
+    steps:
+      - name: Clone
+        id: checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Prewarm apt (retry through transient mirror flake)
+        if: runner.os == 'Linux'
+        run: |
+          for i in 1 2 3 4 5; do sudo apt-get update -y && break || sleep 10; done || true
+
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.21
+        with:
+          key: ggml-ci-arm64-cpu-low-perf
+          evict-old-files: 1d
+
+      - name: Dependencies
+        id: depends
+        run: |
+          sudo apt-get update
+          sudo apt-get install build-essential libcurl4-openssl-dev
+
+      - name: Test
+        id: ggml-ci
+        run: |
+          LLAMA_ARG_THREADS=$(nproc) GG_BUILD_LOW_PERF=1 bash ./ci/run.sh ./tmp/results ./tmp/mnt
+
+  # GitHub Actions assigns this job to runners from a heterogeneous CPU pool
+  # — some machines have AVX512 / AVX512_VNNI / AVX512_VBMI, some don't.
+  # Without GG_BUILD_NO_AVX512 the build picks up whatever the build host
+  # has, then the binary SIGILLs if a later step (whisper-bench in
+  # particular) runs on a different VM in the pool without those features.
+  # GG_BUILD_NO_AVX512=1 (added in ci/run.sh) pins an AVX2 + FMA baseline
+  # every x86_64 runner can execute.
+  ggml-ci-x64-cpu-high-perf:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Clone
+        id: checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Prewarm apt (retry through transient mirror flake)
+        if: runner.os == 'Linux'
+        run: |
+          for i in 1 2 3 4 5; do sudo apt-get update -y && break || sleep 10; done || true
+
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.21
+        with:
+          key: ggml-ci-x64-cpu-high-perf
+          evict-old-files: 1d
+
+      - name: Dependencies
+        id: depends
+        run: |
+          sudo apt-get update
+          sudo apt-get install build-essential libcurl4-openssl-dev
+
+      - name: Test
+        id: ggml-ci
+        run: |
+          LLAMA_ARG_THREADS=$(nproc) GG_BUILD_NO_AVX512=1 bash ./ci/run.sh ./tmp/results ./tmp/mnt
+
+  ggml-ci-arm64-cpu-high-perf:
+    runs-on: ubuntu-22.04-arm
+
+    steps:
+      - name: Clone
+        id: checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Prewarm apt (retry through transient mirror flake)
+        if: runner.os == 'Linux'
+        run: |
+          for i in 1 2 3 4 5; do sudo apt-get update -y && break || sleep 10; done || true
+
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.21
+        with:
+          key: ggml-ci-arm64-cpu-high-perf
+          evict-old-files: 1d
+
+      - name: Dependencies
+        id: depends
+        run: |
+          sudo apt-get update
+          sudo apt-get install build-essential libcurl4-openssl-dev
+
+      - name: Test
+        id: ggml-ci
+        run: |
+          LLAMA_ARG_THREADS=$(nproc) GG_BUILD_NO_SVE=1 GG_BUILD_NO_BF16=1 GG_BUILD_EXTRA_TESTS_0=1 bash ./ci/run.sh ./tmp/results ./tmp/mnt
+
+  ggml-ci-arm64-cpu-high-perf-sve:
+    runs-on: ubuntu-22.04-arm
+
+    steps:
+      - name: Clone
+        id: checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Prewarm apt (retry through transient mirror flake)
+        if: runner.os == 'Linux'
+        run: |
+          for i in 1 2 3 4 5; do sudo apt-get update -y && break || sleep 10; done || true
+
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.21
+        with:
+          key: ggml-ci-arm64-cpu-high-perf-sve
+          evict-old-files: 1d
+
+      - name: Dependencies
+        id: depends
+        run: |
+          sudo apt-get update
+          sudo apt-get install build-essential libcurl4-openssl-dev
+
+      - name: Test
+        id: ggml-ci
+        run: |
+          LLAMA_ARG_THREADS=$(nproc) GG_BUILD_NO_BF16=1 GG_BUILD_EXTRA_TESTS_0=1 bash ./ci/run.sh ./tmp/results ./tmp/mnt

@@ -1,0 +1,4 @@
+{
+ "bic": "tune     n= 40  DER  33.06%  |  count exact 18/40 (45%)  within1 34/40  under 15  over 7  [1 unwinnable at max-speakers=8]",
+ "nme-sc": "tune     n= 40  DER  39.26%  |  count exact 17/40 (42%)  within1 31/40  under 11  over 12  [1 unwinnable at max-speakers=8]"
+}

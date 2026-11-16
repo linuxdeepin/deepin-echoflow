@@ -1,0 +1,224 @@
+# Proves docs/windows-illegal-instruction-dumps.md end-to-end on a real Windows
+# host (#403). A tiny crashme.exe + ggml-cpu.dll pair raises a deterministic
+# STATUS_ILLEGAL_INSTRUCTION (0xC000001D) via the __ud2() intrinsic — unlike a
+# real AVX-512-on-AVX2 repro, this faults on any runner CPU. The workflow then
+# runs the doc's exact ProcDump capture command and its exact WinDbg command
+# sequence (via cdb, the console front end of the same engine) and asserts the
+# log contains what the doc promises: the ud2 disassembly at @rip and the
+# ggml_cpu+0x… module label resolved through .exepath, with no PDBs present.
+# A control pass without .exepath shows the failure mode .exepath fixes, and the
+# WER LocalDumps registry fallback is exercised as a soft check.
+name: Windows Dump Doc Verify
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - docs/windows-illegal-instruction-dumps.md
+      - .github/workflows/win-dump-doc-verify.yml
+
+# One run per workflow per branch: a newer push cancels the older run. On
+# main nothing is cancelled (every main commit keeps its verdict).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  # Cheap gate: on a branch push, run the heavy job only when the BRANCH ITSELF
+  # changes a watched path (vs its merge-base with main). A rebase onto a main
+  # that touched CMakeLists.txt no longer queues one heavy run per branch.
+  # main, pull requests and manual dispatch always run. See the script's header.
+  scope:
+    runs-on: ubuntu-latest
+    outputs:
+      relevant: ${{ steps.scope.outputs.relevant }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: scope
+        run: |
+          if [ "${{ github.event_name }}" != "push" ] || [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          else
+            git fetch --no-tags origin main || true   # no base -> script answers true
+            python3 .github/scripts/branch_touches_paths.py "$GITHUB_WORKFLOW_REF_PATH" origin/main >> "$GITHUB_OUTPUT" \
+              || echo "relevant=true" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GITHUB_WORKFLOW_REF_PATH: .github/workflows/win-dump-doc-verify.yml
+
+  win-dump-doc-verify:
+    needs: scope
+    if: needs.scope.outputs.relevant == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - name: Build no-PDB crash pair (crashme.exe + ggml-cpu.dll)
+        shell: cmd
+        run: |
+          mkdir C:\crispasr-repro\app
+          mkdir C:\crispasr-dumps
+          cd /d C:\crispasr-repro\app
+          echo #include ^<intrin.h^> > ggml-cpu.c
+          echo __declspec(dllexport) void ggml_fake_kernel(void) { __ud2(); } >> ggml-cpu.c
+          echo #include ^<windows.h^> > crashme.c
+          echo __declspec(dllimport) void ggml_fake_kernel(void); >> crashme.c
+          rem the sleep mimics crispasr's model-loading startup: procdump -w
+          rem polls by name about once a second and must attach BEFORE the
+          rem fault — an instant fault races WER's process-snapshot clone and
+          rem -w dies with "Multiple processes match the specified name"
+          echo int main(void) { Sleep(10000); ggml_fake_kernel(); return 0; } >> crashme.c
+          for /f "tokens=*" %%i in ('"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath') do set VSINSTALL=%%i
+          call "%VSINSTALL%\VC\Auxiliary\Build\vcvars64.bat"
+          rem no /Zi: release zips ship no PDBs, and the doc's claim is that
+          rem .exepath alone is enough — prove it under the same conditions
+          cl /nologo /O2 /LD ggml-cpu.c /Fe:ggml-cpu.dll || exit /b 1
+          cl /nologo /O2 crashme.c ggml-cpu.lib || exit /b 1
+          del *.obj *.lib *.exp
+          dir
+          if exist *.pdb (echo PDBs present - test invalid & exit /b 1)
+
+      - name: Doc step 2 - ProcDump capture of the crash
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri https://download.sysinternals.com/files/Procdump.zip -OutFile C:\crispasr-repro\Procdump.zip
+          Expand-Archive C:\crispasr-repro\Procdump.zip -DestinationPath C:\crispasr-repro\procdump
+          # The doc's exact command, with crispasr.exe -> crashme.exe and its
+          # dump FILE (not directory) final argument (#403 correction 1).
+          $pd = Start-Process -FilePath C:\crispasr-repro\procdump\procdump64.exe `
+            -ArgumentList '-accepteula','-mt','-e','1','-w','crashme.exe','C:\crispasr-dumps\crispasr_dump' `
+            -RedirectStandardOutput C:\crispasr-dumps\procdump-out.txt `
+            -RedirectStandardError C:\crispasr-dumps\procdump-err.txt -PassThru
+          Start-Sleep -Seconds 5
+          $p = Start-Process -FilePath C:\crispasr-repro\app\crashme.exe -Wait -PassThru
+          Write-Host "crashme.exe exit code: $($p.ExitCode)"
+          # The doc's opening claim: the process dies with -1073741795 / 0xC000001D
+          if ($p.ExitCode -ne -1073741795) { throw "expected exit -1073741795 (0xC000001D), got $($p.ExitCode)" }
+          $deadline = (Get-Date).AddSeconds(60)
+          while (-not (Test-Path C:\crispasr-dumps\crispasr_dump.dmp) -and (Get-Date) -lt $deadline) { Start-Sleep 2 }
+          Get-Content C:\crispasr-dumps\procdump-out.txt, C:\crispasr-dumps\procdump-err.txt -ErrorAction SilentlyContinue
+          if (-not (Test-Path C:\crispasr-dumps\crispasr_dump.dmp)) { throw "ProcDump wrote no crispasr_dump.dmp" }
+          # The doc says ProcDump appends .dmp itself — the exact name must match
+          Get-ChildItem C:\crispasr-dumps\*.dmp
+          if ($pd -and -not $pd.HasExited) { Stop-Process -Id $pd.Id -Force -ErrorAction SilentlyContinue }
+
+      - name: Doc fallback - WER LocalDumps registry key (soft check)
+        shell: pwsh
+        run: |
+          $key = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\crashme.exe'
+          New-Item -Path $key -Force | Out-Null
+          New-ItemProperty -Path $key -Name DumpFolder -Value 'C:\crispasr-dumps\wer' -PropertyType ExpandString -Force | Out-Null
+          New-ItemProperty -Path $key -Name DumpType -Value 1 -PropertyType DWord -Force | Out-Null
+          New-Item -ItemType Directory -Path C:\crispasr-dumps\wer -Force | Out-Null
+          $p = Start-Process -FilePath C:\crispasr-repro\app\crashme.exe -Wait -PassThru
+          Write-Host "crashme.exe exit code: $($p.ExitCode)"
+          $deadline = (Get-Date).AddSeconds(60)
+          while (-not (Get-ChildItem C:\crispasr-dumps\wer\*.dmp -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep 2 }
+          $wer = Get-ChildItem C:\crispasr-dumps\wer\*.dmp -ErrorAction SilentlyContinue
+          Remove-Item -Path $key -Recurse -Force
+          if ($wer) { Write-Host "WER LocalDumps fallback produced: $($wer.Name)" }
+          else { Write-Host '::warning::WER LocalDumps produced no dump on this runner (doc fallback section unverified here)' }
+
+      - name: Locate or install cdb (Debugging Tools for Windows)
+        shell: pwsh
+        run: |
+          $cdb = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\*\Debuggers\x64\cdb.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $cdb) {
+            Write-Host 'cdb not preinstalled - installing Debugging Tools via chocolatey'
+            choco install windbg -y --no-progress
+            $cdb = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\*\Debuggers\x64\cdb.exe' | Select-Object -First 1
+          }
+          Write-Host "cdb: $($cdb.FullName)"
+          "CDB=$($cdb.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Control pass - open dump WITHOUT .exepath
+        shell: pwsh
+        run: |
+          # What a user sees if they skip the doc's path setup: the triage dump
+          # carries no module images, so the debugger cannot map ggml-cpu.dll.
+          @'
+          .ecxr
+          r
+          u @rip L10
+          lm
+          qd
+          '@ | Set-Content C:\crispasr-dumps\control.script -Encoding ascii
+          & $env:CDB -z C:\crispasr-dumps\crispasr_dump.dmp -cf C:\crispasr-dumps\control.script > C:\crispasr-dumps\control-log.txt 2>&1
+          Write-Host "cdb exit: $LASTEXITCODE"; cmd /c exit 0
+          Get-Content C:\crispasr-dumps\control-log.txt
+
+      - name: Doc pass - the exact WinDbg sequence from the doc
+        shell: pwsh
+        run: |
+          # Verbatim from "Extract the useful address locally", paths filled in;
+          # qd appended because cdb needs an explicit quit in batch mode.
+          @'
+          .logopen /t C:\crispasr-dumps\crispasr-illegal-instruction.txt
+          .sympath C:\crispasr-repro\app
+          .exepath+ C:\crispasr-repro\app
+          .reload
+          .ecxr
+          r
+          u @rip L10
+          db @rip L20
+          lm
+          k
+          .logclose
+          qd
+          '@ | Set-Content C:\crispasr-dumps\doc.script -Encoding ascii
+          $sw = [System.Diagnostics.Stopwatch]::StartNew()
+          & $env:CDB -z C:\crispasr-dumps\crispasr_dump.dmp -cf C:\crispasr-dumps\doc.script > C:\crispasr-dumps\doc-console.txt 2>&1
+          Write-Host "cdb exit: $LASTEXITCODE"; cmd /c exit 0
+          $sw.Stop()
+          Write-Host "doc sequence wall time: $($sw.Elapsed.TotalSeconds)s (must not spiral into symbol downloads)"
+          $log = Get-ChildItem C:\crispasr-dumps\crispasr-illegal-instruction*.txt | Select-Object -First 1
+          if (-not $log) { Get-Content C:\crispasr-dumps\doc-console.txt; throw '.logopen /t produced no log file' }
+          Get-Content $log.FullName
+
+      - name: Second pass - .exr -1 and !analyze -v (doc's optional step)
+        shell: pwsh
+        run: |
+          @'
+          .sympath C:\crispasr-repro\app
+          .exepath+ C:\crispasr-repro\app
+          .reload
+          .exr -1
+          !analyze -v
+          qd
+          '@ | Set-Content C:\crispasr-dumps\analyze.script -Encoding ascii
+          $sw = [System.Diagnostics.Stopwatch]::StartNew()
+          & $env:CDB -z C:\crispasr-dumps\crispasr_dump.dmp -cf C:\crispasr-dumps\analyze.script > C:\crispasr-dumps\analyze-log.txt 2>&1
+          Write-Host "cdb exit: $LASTEXITCODE"; cmd /c exit 0
+          $sw.Stop()
+          Write-Host "analyze pass wall time: $($sw.Elapsed.TotalSeconds)s"
+          Get-Content C:\crispasr-dumps\analyze-log.txt
+
+      - name: Assert the doc's promised output
+        shell: pwsh
+        run: |
+          $doc = Get-Content (Get-ChildItem C:\crispasr-dumps\crispasr-illegal-instruction*.txt | Select-Object -First 1).FullName -Raw
+          $analyze = Get-Content C:\crispasr-dumps\analyze-log.txt -Raw
+          $fail = @()
+          # the disassembly must label the address inside the module: with the
+          # image mapped via .exepath the DLL's export table yields
+          # ggml_cpu!<export>; unmapped it degrades to bare ggml_cpu+0x
+          if ($doc -notmatch 'ggml_cpu(!|\+0x)') { $fail += 'doc pass: no ggml_cpu label at @rip — module not resolved' }
+          # "The instruction at RIP" — here the deterministic ud2
+          if ($doc -notmatch '(?i)\bud2\b') { $fail += 'doc pass: u @rip did not disassemble the ud2 instruction' }
+          # lm must list the module the doc tells users to look for
+          if ($doc -notmatch '(?i)ggml[_-]cpu') { $fail += 'doc pass: lm did not list ggml-cpu' }
+          # exception code surfaced by .exr -1 / !analyze -v
+          if ($analyze -notmatch '(?i)c000001d') { $fail += 'analyze pass: exception code c000001d not reported' }
+          if ($analyze -notmatch '(?i)ILLEGAL_INSTRUCTION') { $fail += 'analyze pass: !analyze -v did not bucket as ILLEGAL_INSTRUCTION' }
+          if ($fail) { $fail | ForEach-Object { Write-Host "::error::$_" }; throw 'doc verification failed' }
+          Write-Host '=== WIN_DUMP_DOC_VERIFY_OK: the documented ProcDump + WinDbg workflow reproduces on a clean Windows host ==='
+
+      - name: Upload logs and dump
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: win-dump-doc-verify-logs
+          path: |
+            C:\crispasr-dumps\*.txt
+            C:\crispasr-dumps\*.dmp

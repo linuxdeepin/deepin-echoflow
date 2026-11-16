@@ -1,0 +1,71 @@
+{
+  "baseline_run": 36879830550,
+  "index_echo_run": 36959052416,
+  "toolchain": "emscripten 6.0.2",
+  "baseline_sha": "bbe3d5a5725c16705e83f4b336da8ae3b1bacce5",
+  "parent_sha": "c3fe1a6e3cd43c2a20bb782a4f82b02b10f7bea7",
+  "port_sha": "cf8bcf098a1de983f81e3b12cd6abfcc35ff8ac6",
+  "baseline_parent_compilation_source_diff": "empty: root CMakeLists.txt, examples, ggml, crisp_audio, src, bindings/javascript, build-wasm.sh",
+  "wasm_budget_bytes": 12582912,
+  "js_budget_bytes": 204800,
+  "variants": {
+    "default": {
+      "baseline_bytes": 10127138,
+      "index_echo_bytes": 11295495,
+      "increase_bytes": 1168357,
+      "increase_percent": 11.536892259195046,
+      "artifacts": {
+        "libwhisper.wasm": {
+          "bytes": 11295495,
+          "sha256": "85e7e103925df1d53cd6586559e4c0db2b6590ba86c04762a362c4c45dec10cd"
+        },
+        "libwhisper.js": {
+          "bytes": 109706,
+          "sha256": "658b5c0b026630b7f039a328195f4528fd5482d7e160a47faad52a1a60658c6d"
+        }
+      }
+    },
+    "proxy-to-pthread": {
+      "baseline_bytes": 10127779,
+      "index_echo_bytes": 11296245,
+      "increase_bytes": 1168466,
+      "increase_percent": 11.537238322439698,
+      "artifacts": {
+        "libwhisper.wasm": {
+          "bytes": 11296245,
+          "sha256": "c4222146a2440addc27c7f330bf6e936eaf966408c58fecd660651e7ccfbfb24"
+        },
+        "libwhisper.js": {
+          "bytes": 110543,
+          "sha256": "9b5e40e0fc35867271b3d04f480557e4519438c9cce88d2e1e7cb8e669d751f7"
+        }
+      }
+    },
+    "single-thread": {
+      "baseline_bytes": 10045300,
+      "index_echo_bytes": 11211244,
+      "increase_bytes": 1165944,
+      "increase_percent": 11.606860920032254,
+      "artifacts": {
+        "libwhisper.wasm": {
+          "bytes": 11211244,
+          "sha256": "dfd0fbe897cda0838cb023af49d851151053eb36bb3462c080780debcd7ba8a4"
+        },
+        "libwhisper.js": {
+          "bytes": 91829,
+          "sha256": "c839006d538677ac8cfc3e5ca177cc2c99ee1b0d8574d3f8342bf25c3e1ae378"
+        }
+      }
+    }
+  },
+  "retry_run": 36960265387,
+  "retry_status": "success",
+  "retry_sha": "691ef6108944079b8935784f2789e734b19e36f1",
+  "exports_verified": [
+    "asrOpen (all variants)",
+    "ttsSynthesizeAsync (proxy-to-pthread)"
+  ],
+  "main_ci_run": 36959052427,
+  "main_lint_run": 36959052406,
+  "main_nightly_run": 36959052457
+}

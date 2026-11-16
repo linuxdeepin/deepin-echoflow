@@ -1,0 +1,218 @@
+name: Phonon-2 encoder FFN CPU A/B
+
+on:
+  workflow_dispatch:
+    inputs:
+      sweep:
+        description: Full thread/repack sweep or scoped BLAS versus the default
+        type: choice
+        options: [full, blas]
+        default: full
+
+permissions:
+  contents: read
+
+jobs:
+  profile:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      OMP_NUM_THREADS: '4'
+      OPENBLAS_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '4'
+      HF_HUB_DISABLE_SYMLINKS_WARNING: '1'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            sudo apt-get update
+            sudo apt-get install -y ninja-build ccache libopenblas-dev libcurl4-openssl-dev libespeak-ng-dev
+          else
+            brew install ninja ccache
+          fi
+          python -m pip install numpy gguf huggingface_hub zstandard
+      - name: Build shared runtime and CLI
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            blas=(-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS)
+          else
+            blas=(-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=Apple)
+          fi
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DBUILD_SHARED_LIBS=ON -DCRISPASR_BUILD_TESTS=OFF \
+            -DGGML_CUDA=OFF -DGGML_VULKAN=OFF -DCRISPASR_OPUS=OFF -DCRISPASR_AMR=OFF \
+            "${blas[@]}"
+          cmake --build build --target crispasr-cli crispasr-lib crispasr-diff crispasr-repack-probe -j4
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            echo "PHONON2_LIB=$PWD/build/src/libcrispasr.so" >> "$GITHUB_ENV"
+          else
+            echo "PHONON2_LIB=$PWD/build/src/libcrispasr.dylib" >> "$GITHUB_ENV"
+          fi
+      - name: Exact FFN matrix shapes and kernel thread sweep
+        shell: bash
+        run: |
+          mkdir -p results
+          for threads in 1 2 4; do
+            for type in f16 f32 q8_0 q4_K; do
+              build/bin/crispasr-repack-probe --arm default --type "$type" --threads "$threads" --reps 15 \
+                --shape 1024,4096,138 --shape 4096,1024,138 \
+                --shape 1024,4096,688 --shape 4096,1024,688 \
+                > "results/kernel-cpu-$type-t$threads.txt"
+            done
+            for type in q8_0 q4_K; do
+              build/bin/crispasr-repack-probe --arm repack --type "$type" --threads "$threads" --reps 15 \
+                --shape 1024,4096,138 --shape 4096,1024,138 \
+                --shape 1024,4096,688 --shape 4096,1024,688 \
+                > "results/kernel-repack-$type-t$threads.txt"
+            done
+            build/bin/crispasr-repack-probe --backend BLAS --arm default --type f32 --threads "$threads" --reps 15 \
+              --shape 1024,4096,138 --shape 4096,1024,138 \
+              --shape 1024,4096,688 --shape 4096,1024,688 \
+              > "results/kernel-blas-f32-t$threads.txt"
+          done
+      - name: Fetch pinned artifacts and verify checksums
+        shell: bash
+        run: |
+          mkdir -p results models-live
+          python - <<'PY'
+          import hashlib, pathlib, shutil
+          from huggingface_hub import hf_hub_download
+          repo = 'cstr/phonon2-GGUF'
+          revision = '3ed3e6ad6e7ce63affffeede37328ff756efaa2f'
+          checks = hf_hub_download(repo, 'SHA256SUMS.txt', revision=revision)
+          shutil.copyfile(checks, 'results/SHA256SUMS.txt')
+          for line in pathlib.Path(checks).read_text().splitlines():
+              expected, name = line.split()
+              path = pathlib.Path(hf_hub_download(repo, name, revision=revision))
+              digest = hashlib.sha256()
+              with path.open('rb') as fh:
+                  for block in iter(lambda: fh.read(1024 * 1024), b''):
+                      digest.update(block)
+              assert digest.hexdigest() == expected, name
+              shutil.copyfile(path, pathlib.Path('models-live') / name)
+          fixture = hf_hub_download('cstr/crispasr-regression-fixtures', 'phonon2/jfk/ref.gguf',
+                                    revision='cf16f4594149db53b2eb3fff6e772ff83384a356')
+          shutil.copyfile(fixture, 'results/jfk-ref.gguf')
+          PY
+      - name: Integration audit and live guard before profiling
+        shell: bash
+        env:
+          CRISPASR_MODEL_PHONON2: models-live/phonon2-q8_0.gguf
+        run: |
+          python tools/gen-feature-matrix.py --crispasr build/bin/crispasr
+          python tools/gen-backend-caps-table.py --crispasr build/bin/crispasr
+          cmake --build build --target crispasr-lib -j4
+          python tools/check-backend-wiring.py --crispasr build/bin/crispasr --lib "$PHONON2_LIB" --require-lib > results/wiring.txt
+          python tests/test_phonon2_live.py --cli build/bin/crispasr --lib "$PHONON2_LIB" --require-live > results/live.txt 2>&1
+          build/bin/crispasr-diff phonon2 models-live/phonon2-f16.gguf results/jfk-ref.gguf samples/jfk.wav > results/parity.txt 2>&1
+          if grep -q '\[FAIL\]' results/parity.txt; then
+            cat results/parity.txt
+            exit 1
+          fi
+      - name: Independent CPU Python benchmark on the same runner
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          python -m pip install 'torch==2.7.0' --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install 'transformers @ https://github.com/huggingface/transformers/archive/41fc5b47f6ac7ce1220fbaf673eeec21761c4ae0.tar.gz' librosa soundfile pyyaml safetensors sentencepiece
+          python - <<'PY'
+          from huggingface_hub import snapshot_download
+          snapshot_download('FermionResearch/Phonon-2', revision='9c7fef3584499a88fe8d394427f45851bbb8b446',
+                            allow_patterns=['config.json', 'phonon-2.bps.tar.zst'], local_dir='phonon2-source')
+          PY
+          python tools/profile_phonon2.py --engine reference --model phonon2-source \
+            --output results/reference-cpu.json > results/reference-cpu.log 2>&1
+      - name: Independent decoder and encoder stage reference
+        shell: bash
+        run: |
+          python tools/dump_reference.py --backend phonon2 --model-dir phonon2-source \
+            --audio samples/jfk.wav --output results/full-ref.gguf > results/reference-stages.log 2>&1
+      - name: FFN reference gates, same-quant diagnostics, warmed inference, load and RSS
+        shell: bash
+        run: |
+          export CRISPASR_PARAKEET_ENCODER_BLAS=0
+          configs="ggml-t4 ggml-t1 ggml-t2 repack-t1 repack-t2 repack-t4 blas-t1 blas-t2 blas-t4"
+          if [[ "${{ inputs.sweep }}" == blas ]]; then
+            configs="ggml-t4 blas-t1 blas-t2 blas-t4"
+          fi
+          for config in $configs; do
+            export CRISPASR_PARAKEET_FFN=ggml OPENBLAS_NUM_THREADS=1
+            export CRISPASR_PARAKEET_FFN_BLAS_THREADS=1
+            threads="${config##*-t}"
+            quants="f16 q8_0 q4_k"
+            case "$config" in
+              repack-*) export CRISPASR_PARAKEET_FFN=repack; quants=q4_k ;;
+              blas-*) export CRISPASR_PARAKEET_FFN=blas CRISPASR_PARAKEET_FFN_BLAS_THREADS="$threads"; threads=4 ;;
+            esac
+            export CRISPASR_PARAKEET_DIFF_THREADS="$threads"
+            build/bin/crispasr-diff phonon2 models-live/phonon2-f16.gguf results/full-ref.gguf samples/jfk.wav \
+              > "results/parity-$config.txt" 2>&1
+            python tools/check_phonon2_parity.py --reference results/full-ref.gguf \
+              --log "results/parity-$config.txt" --output "results/parity-$config.json"
+            for quant in $quants; do
+              baseline=()
+              if [[ "$config" != ggml-t4 ]]; then
+                baseline=(--baseline "results/stages-ggml-t4-$quant.npz")
+              fi
+              python tools/check_phonon2_ffn_stages.py --lib "$PHONON2_LIB" \
+                --model "models-live/phonon2-$quant.gguf" --reference results/full-ref.gguf \
+                --mode "$CRISPASR_PARAKEET_FFN" --threads "$threads" --report-only \
+                --output "results/stages-$config-$quant.npz" "${baseline[@]}" \
+                > "results/stages-$config-$quant.log" 2>&1
+              python tools/profile_phonon2.py --engine runtime --threads "$threads" --lib "$PHONON2_LIB" \
+                --model "models-live/phonon2-$quant.gguf" --output "results/runtime-$config-$quant.json" \
+                > "results/runtime-$config-$quant.log" 2>&1
+            done
+            trace_quant=q8_0
+            if [[ "$config" == repack-* ]]; then trace_quant=q4_k; fi
+            CRISPASR_SCHED_PROFILE=1 CRISPASR_PARAKEET_BENCH=1 CRISPASR_PARAKEET_FFN_TRACE=1 \
+              python tools/profile_phonon2.py --engine runtime --threads "$threads" --trace --lib "$PHONON2_LIB" \
+                --model "models-live/phonon2-$trace_quant.gguf" --output "results/trace-$config.json" \
+                > "results/trace-$config.log" 2>&1
+            # Prove the intended FFN path was exercised; a fallback is no win.
+            if [[ "$config" == repack-* ]]; then
+              grep -q "extra buffer type 'CPU_REPACK'.*(96 tensors)" "results/trace-$config.log"
+              grep -q 'extra=yes backend=CPU' "results/trace-$config.log"
+            elif [[ "$config" == blas-* ]]; then
+              grep -q 'cached 96 F32 matmul weights' "results/trace-$config.log"
+              grep -q 'backend=BLAS count=48' "results/trace-$config.log"
+            else
+              grep -q 'extra=no backend=CPU' "results/trace-$config.log"
+            fi
+          done
+      - name: Host and dependency receipt
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p results
+          uname -a > results/host.txt
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            lscpu >> results/host.txt
+          else
+            system_profiler SPHardwareDataType SPDisplaysDataType >> results/host.txt
+          fi
+          python -m pip freeze > results/python-packages.txt
+          git rev-parse HEAD > results/commit.txt
+          git diff > results/generated-diff.patch
+          cp docs/feature-matrix.md docs/feature-matrix.html src/core/backend_caps_table.h results/
+      - name: Summarize timings and transcript agreement
+        shell: bash
+        run: python tools/summarize_phonon2_ffn_ab.py results --output results/summary.json
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: phonon2-ffn-ab-${{ matrix.os }}
+          path: results/

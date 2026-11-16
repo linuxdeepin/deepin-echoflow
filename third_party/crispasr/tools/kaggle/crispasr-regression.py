@@ -1,0 +1,1186 @@
+# ─────────────────────────── cell 0 (markdown) ───────────────────────────
+# # CrispASR — full-suite regression / re-bake (Kaggle)
+#
+# Two modes, picked by a flag at the top of cell 1:
+#
+# **`MODE = "validate"`** (default) — same contract as the nightly
+# GitHub Actions workflow, but for every backend in one run on faster
+# infra. For each `tests/regression/manifest.json` entry:
+#   1. Download the GGUF under test at the pinned HF revision.
+#   2. Download the reference dump from
+#      `cstr/crispasr-regression-fixtures` at the pinned revision.
+#   3. Run `crispasr` and assert the transcript matches
+#      `expected_transcript` byte-for-byte.
+#   4. Run `crispasr-diff` and assert per-stage `cos_min ≥ threshold`.
+# Use this to confirm a release branch before tagging, or to validate
+# any backend that's too heavy for the nightly GH Actions runner
+# (vibevoice 7 GB, voxtral4b 4 GB, …).
+#
+# **`MODE = "rebake"`** — regenerates the reference dumps from the
+# real Python source models (NeMo / transformers / torch) for every
+# backend. Stages them locally, optionally uploads to HF. The new
+# `cstr/crispasr-regression-fixtures` commit SHA is printed at the
+# end; the maintainer pastes it into `manifest.json`'s
+# `fixtures.revision`. Run this whenever:
+#   - A reference module changes (`tools/reference_backends/...`).
+#   - A new backend is added.
+#   - Upstream PyTorch / NeMo / transformers bumps with a known
+#     numerical effect we want to accept as the new baseline.
+# Re-bake is intentional, never silent — the upload step is gated
+# on `UPLOAD=True` and prints the manifest patch for review.
+#
+# Why Kaggle, not GitHub Actions:
+#   - Real ML stack (NeMo, transformers, torch) totals 5-10 GB; ten
+#     minutes to install per nightly run is unaffordable on GH free.
+#   - ~1 Gbit pipe + GPU vs ~250 Mbit on GH Actions makes the long
+#     downloads tolerable.
+#   - 20 GB scratch fits the heavy backends that don't fit on GH.
+#
+# Requirements:
+# - Kaggle accelerator: any (CPU works; GPU only matters if you
+#   want to validate the CUDA path of CrispASR).
+# - Internet ON (model downloads + optional HF upload).
+# - Optional Kaggle secrets:
+#     `HF_TOKEN` — required for `MODE="rebake"` + `UPLOAD=True`.
+#                  Read-only token is fine for `MODE="validate"`
+#                  (only public HF repos are read).
+#     `GH_TOKEN` — to post a summary as a comment on the latest
+#                  main commit. Optional.
+
+# ─────────────────────────── cell 1 (code) ───────────────────────────
+# ── Configuration ──────────────────────────────────────────────────────────
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+# ── Unbuffered I/O + step checkpointing ──────────────────────────────
+# Kaggle persists logs only at cell/process end, so a hang past stdout
+# buffer fill is invisible until the kernel actually terminates. Force
+# line-buffered stdout/stderr and write a per-step JSONL checkpoint to
+# /kaggle/working/progress.jsonl. Even when a run hangs, fetching the
+# tiny progress.jsonl via `kaggle kernels output --file-pattern
+# 'progress.jsonl'` shows the last completed step.
+os.environ["PYTHONUNBUFFERED"] = "1"
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except (AttributeError, ValueError):
+    pass
+
+_PROGRESS_PATH = Path("/kaggle/working/progress.jsonl")
+_T0 = time.time()
+
+# Live progress push to HF — `kaggle kernels output` gates
+# /kaggle/working/ access until the run terminates, so a stuck run is
+# only diagnosable via the browser UI's websocket. To get
+# *programmatic* mid-run visibility, every step() also rolls the
+# local JSONL file up to a fixed path in a dedicated public HF
+# dataset (`cstr/crispasr-kaggle-progress`). Anyone with HF read
+# access can poll `huggingface.co/datasets/cstr/crispasr-kaggle-progress`
+# and see live progress, including after the kernel hangs / crashes.
+#
+# Rate-limited to one HF push every 30 s (or on the first step
+# after that interval) so a fast script doesn't spam 50 commits.
+# Skips silently if HF_TOKEN isn't available (batch-mode kernels
+# without secret access just rely on the local JSONL post-mortem
+# fallback — same as before this change).
+_HF_PROGRESS_REPO = "cstr/crispasr-kaggle-progress"
+_HF_PROGRESS_PATH = (
+    f"runs/{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    f"-{os.environ.get('KAGGLE_KERNEL_RUN_TYPE', 'local').lower()}"
+    f"-{os.environ.get('KAGGLE_KERNEL_REF', 'unknown').split('/')[-1] or 'unknown'}"
+    f".jsonl"
+)
+_HF_PUSH_INTERVAL_S = 30.0
+_HF_LAST_PUSH = 0.0
+
+
+def _push_progress_to_hf(force: bool = False) -> None:
+    """Best-effort upload of the local progress.jsonl to HF. Returns
+    silently on any failure — we never want progress reporting to
+    crash the run itself."""
+    global _HF_LAST_PUSH
+    now = time.time()
+    if not force and (now - _HF_LAST_PUSH) < _HF_PUSH_INTERVAL_S:
+        return
+    if not os.environ.get("HF_TOKEN"):
+        return
+    if not _PROGRESS_PATH.exists():
+        return
+    try:
+        from huggingface_hub import HfApi
+        HfApi(token=os.environ["HF_TOKEN"]).upload_file(
+            path_or_fileobj=str(_PROGRESS_PATH),
+            path_in_repo=_HF_PROGRESS_PATH,
+            repo_id=_HF_PROGRESS_REPO,
+            repo_type="dataset",
+            commit_message=f"progress @ {now - _T0:.0f}s",
+        )
+        _HF_LAST_PUSH = now
+    except Exception:
+        # network flake, transient 429, anything — ignore
+        pass
+
+
+def step(name: str, **extra) -> None:
+    """Append one progress checkpoint to the local JSONL AND push the
+    rolling file to HF (rate-limited). Cheap on the local side
+    (single JSONL write); HF push runs at most once every
+    _HF_PUSH_INTERVAL_S seconds and is best-effort."""
+    rec = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "elapsed_s": round(time.time() - _T0, 2),
+        "step": name,
+        **extra,
+    }
+    try:
+        _PROGRESS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with _PROGRESS_PATH.open("a") as f:
+            f.write(json.dumps(rec) + "\n")
+    except Exception:
+        pass
+    print(f"[step {rec['elapsed_s']:>7.1f}s] {name}" +
+          (f"  {extra}" if extra else ""), flush=True)
+    _push_progress_to_hf()
+
+
+# Build-step heartbeat + Popen-based line streamer. Kaggle's log
+# capture buffers parent stdout heavily, and the C++ build's
+# subprocess.check_call lets ninja/g++ output flow through that
+# buffered pipe — fine when the build is fast, invisible when slow.
+# Same pattern as ${KAGGLE_ACCOUNT}/qwen3-export (which ran fluently): Popen
+# the child with stdout=PIPE, iterate line-by-line in Python, print
+# each line with explicit flush. The heartbeat thread runs in
+# parallel and writes step("<label>.heartbeat") every 30 s including
+# the latest ninja [X/N] + last TU it observed from the streamed
+# output. So each tick says "compile 208/360 t5_translate.cpp"
+# instead of just an elapsed counter, turning what looked like
+# noise into actual build progress.
+import contextlib
+import re
+import threading
+
+
+_BUILD_PROGRESS: dict = {
+    "last_ninja": None,   # "208/360" once ninja starts emitting
+    "last_tu": None,      # "t5_translate.cpp" — last TU name seen
+    "lines": 0,           # total output lines (loose liveness signal)
+}
+_NINJA_RE = re.compile(r"^\[(\d+)/(\d+)\]")
+_TU_RE = re.compile(r"(\S+\.(?:cpp|cc|cxx|c|cu))(?::|\s|$)")
+
+
+def sh_with_progress(cmd: str, cwd: Path | None = None) -> None:
+    """Like sh() but Popens the command, pipes stdout/stderr, and
+    updates _BUILD_PROGRESS as ninja emits lines. Forwards every
+    line to the parent stdout (with explicit flush) so Kaggle's
+    log capture sees the full build log in near-real-time.
+    Pattern lifted from ${KAGGLE_ACCOUNT}/qwen3-export which uses the same
+    Popen+iter approach and runs fluently."""
+    print(f"$ {cmd}", flush=True)
+    proc = subprocess.Popen(
+        cmd, shell=True, cwd=str(cwd) if cwd else None,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        bufsize=1, text=True,
+    )
+    assert proc.stdout is not None
+    try:
+        for line in proc.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            _BUILD_PROGRESS["lines"] += 1
+            m = _NINJA_RE.match(line)
+            if m:
+                _BUILD_PROGRESS["last_ninja"] = f"{m.group(1)}/{m.group(2)}"
+            m = _TU_RE.search(line)
+            if m:
+                # Take just the basename so the heartbeat stays short.
+                _BUILD_PROGRESS["last_tu"] = m.group(1).rsplit("/", 1)[-1]
+    finally:
+        rc = proc.wait()
+    if rc != 0:
+        raise subprocess.CalledProcessError(rc, cmd)
+
+
+@contextlib.contextmanager
+def build_heartbeat(label: str, interval_s: float = 30.0):
+    """Context manager that emits step("<label>.heartbeat") every
+    interval_s seconds until the block exits. Use around long
+    subprocess.check_call calls (cmake configure/build, pip install
+    of NeMo, etc.) so progress.jsonl + the HF mirror keep advancing
+    even when the child is silent. If sh_with_progress() is running
+    inside the block, the ticker pulls ninja's [X/N] + last TU from
+    _BUILD_PROGRESS so each tick reports concrete build progress."""
+    t_start = time.time()
+    stop_event = threading.Event()
+
+    def _ticker():
+        # First tick after one interval — the calling site already
+        # printed the command, no need to duplicate at t=0.
+        while not stop_event.wait(interval_s):
+            extra: dict = {"elapsed_in_block_s":
+                           round(time.time() - t_start, 1)}
+            if _BUILD_PROGRESS["last_ninja"]:
+                extra["ninja"] = _BUILD_PROGRESS["last_ninja"]
+                extra["tu"] = _BUILD_PROGRESS["last_tu"]
+                extra["lines"] = _BUILD_PROGRESS["lines"]
+            step(f"{label}.heartbeat", **extra)
+
+    thread = threading.Thread(target=_ticker, daemon=True,
+                              name=f"hb-{label}")
+    thread.start()
+    try:
+        yield
+    finally:
+        stop_event.set()
+        thread.join(timeout=1.0)
+
+
+step("script.start")
+
+MODE = os.environ.get("CRISPASR_REGRESSION_MODE", "validate")  # or "rebake"
+
+# Only consulted in rebake mode.
+UPLOAD = os.environ.get("CRISPASR_REGRESSION_UPLOAD", "0") == "1"
+
+# Restrict to a subset of backends (comma-separated names). Empty == all.
+BACKEND_FILTER = os.environ.get("CRISPASR_REGRESSION_BACKENDS", "").strip()
+
+# Build flags. Default to CPU; flip to "cuda" to test the GPU path.
+BUILD_FLAVOUR = os.environ.get("CRISPASR_REGRESSION_BUILD", "cpu")  # cpu | cuda
+
+# CrispASR commit to test. Default to main; pin a SHA to bisect.
+CRISPASR_REF = os.environ.get("CRISPASR_REF", "main")
+
+# ── Workspace layout ──────────────────────────────────────────────────────
+WORK = Path("/kaggle/working")
+REPO = WORK / "CrispASR"
+BUILD = WORK / "build"
+HF_CACHE = WORK / "hf_cache"
+RESULTS = WORK / "results"
+REBAKE_STAGE = WORK / "rebake-stage"
+
+for d in (HF_CACHE, RESULTS, REBAKE_STAGE):
+    d.mkdir(parents=True, exist_ok=True)
+
+# Funnel all HF downloads into the same cache so validate-after-rebake
+# in the same notebook session is a free re-read.
+os.environ["HF_HOME"] = str(HF_CACHE)
+os.environ["HUGGINGFACE_HUB_CACHE"] = str(HF_CACHE)
+
+print(f"crispasr-regression {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+print(f"  MODE             = {MODE}")
+print(f"  BUILD_FLAVOUR    = {BUILD_FLAVOUR}")
+print(f"  CRISPASR_REF     = {CRISPASR_REF}")
+print(f"  BACKEND_FILTER   = {BACKEND_FILTER or '(all)'}")
+print(f"  UPLOAD           = {UPLOAD}")
+
+# ─────────────────────────── cell 2 (code) ───────────────────────────
+step("cell_2_begin")
+# ── Wire HF auth, install Python deps ─────────────────────────────────────
+def kaggle_secret(name: str, retries: int = 3, backoff_s: float = 5.0) -> str | None:
+    """Pull a Kaggle secret if available, with verbose diagnostics if
+    not. The previous silent fall-back to anonymous made a missing
+    secret look identical to a missing-attach-toggle, which burned us
+    on ${KAGGLE_ACCOUNT}/crispasr-auto-rebake-refs.
+
+    Kaggle injects `KAGGLE_USER_SECRETS_TOKEN` (a JWT) into the runtime
+    ONLY when at least one secret is attached to the kernel. So if
+    that env var is absent, no secret can possibly be read regardless
+    of what the account dashboard says — the kernel-side "Add-ons →
+    Secrets" Attach toggle is the gate that controls injection.
+
+    Retries: the Secrets service has flaked on this kernel
+    (`ConnectionError: Connection error trying to communicate with
+    service.` on v11). Retry with backoff so a transient flake doesn't
+    drop UPLOAD to False for the rest of the run. If the API is truly
+    unreachable after retries, kaggle_token_from_dataset() is the
+    proper fallback path.
+    """
+    try:
+        from kaggle_secrets import UserSecretsClient
+    except ImportError as exc:
+        print(f"kaggle_secret({name!r}): kaggle_secrets module unimportable "
+              f"({type(exc).__name__}: {exc}). Are we actually inside a "
+              f"Kaggle kernel?", flush=True)
+        return None
+    has_jwt = bool(os.environ.get("KAGGLE_USER_SECRETS_TOKEN"))
+    if not has_jwt:
+        print(f"kaggle_secret({name!r}): KAGGLE_USER_SECRETS_TOKEN env var is "
+              f"MISSING. Kaggle only injects it when at least one secret is "
+              f"ATTACHED to the kernel (Add-ons → Secrets → Attach toggle). "
+              f"You probably added the secret on your account settings page "
+              f"but didn't open the kernel's per-notebook Secrets pane and "
+              f"toggle Attach for {name!r}.", flush=True)
+        return None
+    last_exc: BaseException | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            return UserSecretsClient().get_secret(name)
+        except Exception as exc:
+            last_exc = exc
+            if attempt < retries:
+                print(f"kaggle_secret({name!r}): attempt {attempt}/{retries} "
+                      f"failed ({type(exc).__name__}: {exc}); retrying in "
+                      f"{backoff_s}s", flush=True)
+                time.sleep(backoff_s)
+    print(f"kaggle_secret({name!r}): all {retries} attempts failed "
+          f"({type(last_exc).__name__}: {last_exc}). Secrets API "
+          f"unreachable; falling back to kaggle_token_from_dataset().",
+          flush=True)
+    return None
+
+
+def kaggle_token_from_dataset(filename: str = "hf_token.txt") -> str | None:
+    """Read an HF token from a private Kaggle Dataset mounted via
+    kernel-metadata.json `dataset_sources`. Bypasses the flaky Kaggle
+    Secrets API entirely — datasets are filesystem-mounted at
+    `/kaggle/input/<dataset-slug>/<files>` before the script runs.
+
+    Expected dataset: `${KAGGLE_ACCOUNT}/crispasr-hf-token` (private) containing
+    a single file `hf_token.txt` with the write-scoped HF token.
+    Mounted via `tools/kaggle/rebake/kernel-metadata.json:
+    dataset_sources: ["${KAGGLE_ACCOUNT}/crispasr-hf-token"]`.
+
+    Note: Kaggle's UI has NO "Add-ons → Variables" option — only
+    Secrets, Internet, Accelerator, Data Sources. The previous
+    comment recommending Variables was wrong. The Dataset path is
+    the only reliable non-Secrets workaround.
+    """
+    candidates = [
+        Path("/kaggle/input/crispasr-hf-token") / filename,
+    ]
+    input_root = Path("/kaggle/input")
+    if input_root.exists():
+        # Classic mounts (/kaggle/input/<slug>/) AND the newer nested layout
+        # (/kaggle/input/datasets/<owner>/<slug>/). This inline copy only knew
+        # the classic one, so on current workers every run printed "HF auth:
+        # anonymous" and a rebake could not upload (2026-09-27). Probe the
+        # file in every dataset dir, like kaggle_harness.kaggle_token_from_dataset.
+        dirs = sorted(d for d in input_root.iterdir() if d.is_dir() and d.name != "datasets")
+        nested = input_root / "datasets"
+        if nested.is_dir():
+            dirs += sorted(d for o in nested.iterdir() if o.is_dir() for d in o.iterdir() if d.is_dir())
+        for sub in dirs:
+            p = sub / filename
+            if p not in candidates:
+                candidates.append(p)
+    for p in candidates:
+        if p.exists():
+            try:
+                tok = p.read_text().strip()
+                if tok:
+                    print(f"HF auth: HF_TOKEN read from {p} "
+                          f"(Kaggle Dataset fallback).", flush=True)
+                    return tok
+            except Exception as exc:
+                print(f"HF auth: failed to read {p} "
+                      f"({type(exc).__name__}: {exc})", flush=True)
+    return None
+
+
+# Dump Kaggle-injected env keys (no values) so we can see what auth /
+# secret machinery the runtime actually has. Helps distinguish a
+# missing Attach toggle from a Kaggle-side service flake.
+_kaggle_env_keys = sorted(k for k in os.environ if k.startswith("KAGGLE"))
+print(f"Kaggle env keys present: {_kaggle_env_keys}", flush=True)
+
+# Token sources, tried in order:
+#   1. HF_TOKEN env var (e.g. shell, .env file in test, or a future
+#      Kaggle env-var mechanism if they ever add one). Always free.
+#   2. Kaggle Secret via UserSecretsClient (with retry-with-backoff —
+#      the API flakes on batch-mode kernels with ConnectionError).
+#   3. /kaggle/input/crispasr-hf-token/hf_token.txt — a private Kaggle
+#      Dataset mounted via kernel-metadata.json:dataset_sources.
+#      Bypasses the Secrets API entirely; reliable.
+#
+# Kaggle's UI has NO "Add-ons → Variables" option despite this
+# script's earlier comment. Source 3 is the proper escape hatch.
+env_hf = os.environ.get("HF_TOKEN")
+if env_hf:
+    print("HF auth: HF_TOKEN read from env var (shell/.env/CI). "
+          "Skipping UserSecretsClient.", flush=True)
+    hf_token = env_hf
+else:
+    hf_token = kaggle_secret("HF_TOKEN")
+    if not hf_token:
+        hf_token = kaggle_token_from_dataset()
+if hf_token:
+    os.environ["HF_TOKEN"] = hf_token
+    os.environ["HUGGING_FACE_HUB_TOKEN"] = hf_token
+    print("HF auth: token present (will verify next)", flush=True)
+else:
+    print("HF auth: anonymous (rebake+upload will fail without HF_TOKEN). "
+          "Ensure the private Kaggle Dataset ${KAGGLE_ACCOUNT}/crispasr-hf-token is "
+          "attached to this kernel (kernel-metadata.json:dataset_sources) "
+          "AND that the file hf_token.txt in it contains a write-scoped "
+          "HuggingFace token. Kaggle's Secrets API is the alternative but "
+          "has flaked with ConnectionError on this kernel's batch runs.",
+          flush=True)
+
+# Need huggingface_hub before we can preflight the token. Pulled here
+# (small, ~MB) even if the token check ends up failing — the cost of
+# the import is negligible against the fail-fast benefit.
+subprocess.check_call([
+    sys.executable, "-m", "pip", "install", "--quiet",
+    "huggingface_hub",
+])
+
+# ── Preflight: prove the token / fixture chain works before we spend
+#    10 minutes building + downloading models we'll never use. Better
+#    to die loudly in cell 2 than 25 minutes later in cell 7. ────────
+def preflight_hf() -> None:
+    from huggingface_hub import HfApi
+    from huggingface_hub.errors import HfHubHTTPError
+
+    api = HfApi(token=hf_token) if hf_token else HfApi()
+
+    # 1. If a token is present, prove it's valid and tell us whose it is.
+    if hf_token:
+        try:
+            info = api.whoami()
+            user = info.get("name") or info.get("fullname") or "?"
+            orgs = [o.get("name") for o in info.get("orgs", []) if o.get("name")]
+            print(f"HF auth: token OK — user={user!r}  orgs={orgs}")
+        except HfHubHTTPError as exc:
+            raise SystemExit(
+                f"HF auth: token REJECTED by /api/whoami-v2 ({exc}).\n"
+                f"  Generate a fresh token at https://huggingface.co/settings/tokens\n"
+                f"  and store it as the Kaggle secret HF_TOKEN (read+write for rebake)."
+            )
+
+    # 2. For rebake+upload, the token must additionally have *write*
+    #    access to the fixtures repo. Probe via repo_info(); HF returns
+    #    a `private`/`gated` flag we can sanity-check, and the call
+    #    itself 401s if the token can't see private repos when needed.
+    #    Writability is harder to introspect cleanly — the cheapest
+    #    proof is the upload step itself — but we can at least confirm
+    #    the repo exists and the user can see it.
+    fixtures_repo = "cstr/crispasr-regression-fixtures"
+    try:
+        info = api.repo_info(repo_id=fixtures_repo, repo_type="model")
+        print(f"HF fixtures: {fixtures_repo} reachable (last_modified={info.last_modified})")
+    except HfHubHTTPError as exc:
+        msg = (
+            f"HF fixtures: cannot reach {fixtures_repo} ({exc}).\n"
+            f"  validate mode CAN'T proceed without the fixtures repo;\n"
+            f"  rebake+upload CAN'T proceed without write access to it."
+        )
+        raise SystemExit(msg)
+
+    # The UPLOAD setting is mutated in-place below if needed so the
+    # subsequent rebake path skips api.upload_folder() gracefully.
+    global UPLOAD
+    if MODE == "rebake" and UPLOAD and not hf_token:
+        # Don't die — let the rebake stage refs anyway so they can be
+        # fetched + uploaded from local (Kaggle Secrets API has been
+        # flaky in batch-trigger runs; we don't want a transient
+        # secrets-API issue to lose the whole compute cycle). The
+        # fetch-and-upload.sh script picks up from /kaggle/working/
+        # rebake-stage/ and publishes from the maintainer's box.
+        print(
+            "WARN: rebake+UPLOAD=1 requested but HF_TOKEN unreadable. "
+            "Downgrading to UPLOAD=0; refs will stage to "
+            "/kaggle/working/rebake-stage/. Pick them up locally with:\n"
+            "  ./tools/kaggle/rebake/fetch-and-upload.sh\n",
+            flush=True,
+        )
+        UPLOAD = False
+        # Best-effort write probe: open a no-op preupload (computes
+        # remote-cas hash for a 1-byte blob; HF returns 401 if we
+        # can't write, OK otherwise). Cheaper than actually committing.
+        try:
+            api.preupload_lfs_files(
+                repo_id=fixtures_repo,
+                repo_type="model",
+                additions=[],  # zero files — just exercises the auth check
+            )
+            print(f"HF fixtures: write access to {fixtures_repo} confirmed")
+        except HfHubHTTPError as exc:
+            raise SystemExit(
+                f"HF fixtures: token can READ {fixtures_repo} but write "
+                f"probe failed ({exc}). Generate a write-scoped token at "
+                f"https://huggingface.co/settings/tokens."
+            )
+        except Exception as exc:
+            # preupload_lfs_files API may shift; fall back to a warning
+            # rather than blocking the rebake. The real upload step
+            # will surface any actual auth error.
+            print(f"HF fixtures: write probe inconclusive ({type(exc).__name__}: "
+                  f"{exc}). Proceeding; real upload will catch it.")
+
+
+preflight_hf()
+if MODE == "rebake":
+    # The heavy ML stack only matters when re-baking. validate mode
+    # never touches NeMo / transformers / torch. Wrap in heartbeat
+    # because `pip install nemo_toolkit[asr]` resolves a 5-10 min
+    # dependency tree with no incremental output.
+    with build_heartbeat("pip.install.rebake_deps"):
+        subprocess.check_call([
+            sys.executable, "-m", "pip", "install", "--quiet",
+            "nemo_toolkit[asr]", "transformers", "torch", "torchaudio",
+            "numpy", "gguf",
+        ])
+
+    # ── Optional per-backend reference deps (2026-09-07) ──────────────────
+    # The list above is the NeMo family's, which is why parakeet-* and
+    # canary-1b-v2 bake and 32 other entries return `dump_reference exit=1`.
+    # The v3 rebake log named every missing import:
+    #     funasr, whisper, qwen_asr, fireredasr, mimo_audio_tokenizer, src
+    # plus a transformers too old for VoxtralRealtimeForConditionalGeneration.
+    #
+    # INSTALLED ONE AT A TIME AND TOLERANTLY, on purpose. The block above is a
+    # check_call, so a single unavailable wheel there would abort the whole
+    # rebake and take the backends that DO work down with it — trading 9 good
+    # dumps for a dependency that only ever mattered to one entry. Each of
+    # these was confirmed to exist on PyPI before being listed; the loop is
+    # belt-and-braces for a yanked release or a resolver conflict on the day.
+    OPTIONAL_REF_DEPS = [
+        "funasr",           # funasr-nano, funasr-mlt-nano, sensevoice, paraformer
+        "openai-whisper",   # imported as `whisper` by several reference dumpers
+        "qwen-asr",         # qwen3-asr-0.6b
+        "fireredasr",       # firered-asr2-aed, firered-lid
+        "modelscope",       # funasr/sensevoice model resolution
+        "zstandard",        # phonon2 transport archive
+    ]
+    for _dep in OPTIONAL_REF_DEPS:
+        with build_heartbeat(f"pip.install.optional.{_dep}"):
+            rc = subprocess.call([sys.executable, "-m", "pip", "install", "--quiet", _dep])
+            if rc == 0:
+                print("  optional ref dep %s: ok" % _dep, flush=True)
+            else:
+                print("  optional ref dep %s: UNAVAILABLE (rc=%d) — its backends will "
+                      "still report dump_reference exit=1" % (_dep, rc), flush=True)
+
+    # Voxtral realtime needs a newer transformers than Kaggle ships; upgrading
+    # is separate from the list above because it MUTATES an existing pin that
+    # the NeMo stack also depends on, so a failure here is worth seeing rather
+    # than silently tolerated alongside the optional installs.
+    # Only when a voxtral entry is in the batch: the upgrade breaks qwen_asr
+    # (TypeError: check_model_inputs() missing 'func' - rebake 2026-09-27), so
+    # an unconditional upgrade trades qwen3-asr for a backend not being baked.
+    _batch = [b.strip() for b in os.environ.get("CRISPASR_REGRESSION_BACKENDS", "").split(",") if b.strip()]
+    if not _batch or any("voxtral" in b for b in _batch):
+        with build_heartbeat("pip.install.transformers_upgrade"):
+            rc = subprocess.call([sys.executable, "-m", "pip", "install", "--quiet",
+                                  "--upgrade", "transformers"])
+            print("  transformers upgrade: %s" % ("ok" if rc == 0 else "FAILED rc=%d" % rc), flush=True)
+    else:
+        print("  transformers upgrade: skipped (no voxtral entry in this batch)", flush=True)
+    # mimo_audio_tokenizer is NOT on PyPI (checked: 404). mimo-asr and
+    # mimo-audio-tokenizer stay unbakeable until their reference module vendors
+    # it or points at a source checkout. Recorded so the gap is a known one.
+
+# ─────────────────────────── cell 3 (code) ───────────────────────────
+step("cell_3_begin")
+# ── Clone + build CrispASR ────────────────────────────────────────────────
+def sh(cmd: str, cwd: Path | None = None) -> None:
+    print(f"$ {cmd}")
+    subprocess.check_call(cmd, shell=True, cwd=str(cwd) if cwd else None)
+
+
+if not REPO.exists():
+    sh(f"git clone --recursive https://github.com/CrispStrobe/CrispASR.git {REPO}")
+sh(f"git fetch origin && git checkout {CRISPASR_REF}", cwd=REPO)
+sh("git submodule update --init --recursive", cwd=REPO)
+
+# ── Switch to the shared harness now that the repo (which carries it)
+#    is on disk. The local step()/sh()/sh_with_progress()/build_heartbeat()
+#    /kaggle_secret()/kaggle_token_from_dataset() defs above are byte-
+#    equivalent to the harness — they exist only so the pre-clone span
+#    (script.start, auth, rebake-deps pip install) works before the
+#    repo is cloned. From here on, rebind to the single shared source so
+#    the build path picks up the harness's CUDA-arch auto-detect. Point
+#    the harness at the same progress.jsonl + HF repo this kernel already
+#    used so the JSONL stream is continuous across the rebind.
+sys.path.insert(0, str(REPO / "tools" / "kaggle"))
+import kaggle_harness as kh  # noqa: E402 — added to path above
+kh.init_progress(progress_path=str(_PROGRESS_PATH),
+                 hf_progress_repo=_HF_PROGRESS_REPO)
+step = kh.step
+sh = kh.sh
+sh_with_progress = kh.sh_with_progress
+build_heartbeat = kh.build_heartbeat
+
+# ── Fast-build toolchain — match the perf-A/B kernel's pattern.
+#    ccache cuts re-build cost from ~5 min to ~30 s on cache-hot runs
+#    (cache survives across notebook re-runs because /kaggle/working/
+#    persists). mold halves link time vs ld. ninja is the build
+#    driver itself. The CCACHE_DIR + CCACHE_MAXSIZE lines are the
+#    exact recipe from tools/kaggle-issue81-cuda-ab.py — both kernels
+#    share that working dir if the user opens them in the same
+#    Kaggle session. ────────────────────────────────────────────
+import shutil as _shutil
+
+print("Installing build toolchain (ninja, ccache, mold)…", flush=True)
+sh("apt-get update -qq && apt-get install -y --no-install-recommends "
+   "cmake ninja-build g++ libopenblas-dev jq ccache mold || true")
+
+HAS_CCACHE = _shutil.which("ccache") is not None
+HAS_MOLD = _shutil.which("mold") is not None
+HAS_NINJA = _shutil.which("ninja") is not None
+
+# Persist ccache across runs in /kaggle/working/.ccache. Kaggle wipes
+# /tmp + /root between runs but keeps /kaggle/working, so this is the
+# only sane location for a cache.
+CCACHE_DIR = WORK / ".ccache"
+CCACHE_DIR.mkdir(exist_ok=True)
+os.environ["CCACHE_DIR"] = str(CCACHE_DIR)
+os.environ["CCACHE_MAXSIZE"] = "5G"
+if HAS_CCACHE:
+    subprocess.run("ccache -M 5G && ccache -z",
+                   shell=True, capture_output=True)
+
+print(f"  ninja={HAS_NINJA}  ccache={HAS_CCACHE}  mold={HAS_MOLD}  "
+      f"CCACHE_DIR={CCACHE_DIR}", flush=True)
+
+build_flags = []
+if BUILD_FLAVOUR == "cuda":
+    # Was a bare `-DGGML_CUDA=ON`. The harness adds the missing pieces a
+    # CUDA build on the ~16 GB Kaggle box needs: a pinned, auto-detected
+    # CMAKE_CUDA_ARCHITECTURES (T4→75, A100→80, L4→89) so nvcc emits one
+    # SASS target instead of ggml's full fat-binary list (≈5× less
+    # compile RAM/time — the difference between fitting and OOMing),
+    # plus GGML_CUDA_NO_VMM, the explicit nvcc path, and the CUDA stubs
+    # on LIBRARY_PATH.
+    build_flags += kh.cuda_build_flags(kh.detect_cuda_arch())
+if HAS_CCACHE:
+    build_flags += [
+        "-DCMAKE_C_COMPILER_LAUNCHER=ccache",
+        "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache",
+        "-DCMAKE_CUDA_COMPILER_LAUNCHER=ccache",
+    ]
+if HAS_MOLD:
+    # `-fuse-ld=mold` on the linker line cuts ~30s off our 320-object
+    # link. CMake's flag plumbing is split between EXE / SHARED / MODULE
+    # link types; set all three so the static archive driver too.
+    for kind in ("EXE", "SHARED", "MODULE"):
+        build_flags.append(f"-DCMAKE_{kind}_LINKER_FLAGS=-fuse-ld=mold")
+
+with build_heartbeat("cmake.configure"):
+    sh(
+        f"cmake -S {REPO} -B {BUILD} -G Ninja "
+        f"-DCMAKE_BUILD_TYPE=Release "
+        f"-DCRISPASR_BUILD_TESTS=OFF "
+        f"-DCRISPASR_BUILD_EXAMPLES=ON "
+        f"-DCRISPASR_BUILD_SERVER=OFF "
+        + " ".join(build_flags)
+    )
+# CMake target `crispasr-cli` produces bin/crispasr (target/output names
+# intentionally diverge per examples/cli/CMakeLists.txt:12). Asking for
+# target `crispasr` here builds only the library, leaving bin/crispasr
+# absent — exactly what burned the GH regression workflow on its first
+# run (commit 08d1872f) and what just burned this Kaggle one.
+#
+# `stdbuf -oL -eL` forces line-buffered stdout/stderr in the cmake
+# child so ninja/g++ output reaches Kaggle's log capture promptly. The
+# heartbeat wrapper covers the case where the child legitimately
+# produces no output for minutes (which happens during long template
+# instantiations and link). The previous run hung between two
+# `t5_translate.cpp` warning lines for 90+ min with no log update.
+with build_heartbeat("cmake.build"):
+    # Switched from sh() to sh_with_progress() so ninja's [X/N] +
+    # last TU show up in each heartbeat tick. stdbuf is still useful
+    # at the child side because ninja itself buffers when stdout
+    # isn't a tty; even though we're now reading line-by-line from
+    # the pipe, ninja's own buffer can delay emission of those lines
+    # by tens of seconds without it.
+    sh_with_progress(f"stdbuf -oL -eL cmake --build {BUILD} "
+                     f"--target crispasr-cli crispasr-diff "
+                     f"-j{kh.safe_build_jobs(gpu=(BUILD_FLAVOUR == 'cuda'))}")
+
+if HAS_CCACHE:
+    print("ccache stats after build:", flush=True)
+    subprocess.run("ccache -s | grep -E 'cache hit|cache miss|files in cache|cache size'",
+                   shell=True)
+
+# ─────────────────────────── cell 4 (code) ───────────────────────────
+step("cell_4_begin")
+# ── Load manifest + backend filter ────────────────────────────────────────
+MANIFEST_PATH = REPO / "tests" / "regression" / "manifest.json"
+with MANIFEST_PATH.open() as f:
+    MANIFEST = json.load(f)
+
+want = set(b.strip() for b in BACKEND_FILTER.split(",") if b.strip())
+BACKENDS = [
+    b for b in MANIFEST["backends"]
+    if not want or b["name"] in want
+]
+if want:
+    missing = want - {b["name"] for b in BACKENDS}
+    if missing:
+        print(f"WARN: requested backends not in manifest: {sorted(missing)}")
+
+print(f"\nProcessing {len(BACKENDS)} backend(s):")
+for b in BACKENDS:
+    size_mb = b["gguf"].get("approx_size_mb", "?")
+    print(f"  - {b['name']:30s} (gguf ~{size_mb} MB)")
+
+
+# ─────────────────────────── cell 5 (code) ───────────────────────────
+step("cell_5_begin")
+# ── VALIDATE mode: download pinned artifacts, run regression ──────────────
+def run_validate() -> list[dict]:
+    """Per-backend validate. Returns one result dict per backend."""
+    sys.path.insert(0, str(REPO / "tests" / "regression"))
+    import run_one  # noqa: E402 — added to path above
+
+    results = []
+    for entry in BACKENDS:
+        name = entry["name"]
+        print(f"\n========== validate :: {name} ==========")
+        t0 = time.time()
+        gguf_local = None  # reset per iteration: the finally-block eviction below
+                           # must never see a stale path from the previous backend
+        try:
+            from huggingface_hub import hf_hub_download
+            gguf_local = Path(hf_hub_download(
+                repo_id=entry["gguf"]["repo"],
+                filename=entry["gguf"]["file"],
+                revision=entry["gguf"]["revision"],
+            ))
+            # `gguf.companion_files` (moonshine's tokenizer.bin, index-echo's
+            # decoder GGUF, …) must sit next to the model. Same repo + revision
+            # lands them in the same snapshot directory. run_one.py has always
+            # fetched them; this script did not, so every backend with a
+            # companion died here with "failed to initialise backend" (exit 13)
+            # — which read as a backend regression and was a missing download.
+            for companion in entry["gguf"].get("companion_files", []):
+                hf_hub_download(
+                    repo_id=entry["gguf"]["repo"],
+                    filename=companion,
+                    revision=entry["gguf"]["revision"],
+                )
+            # `skip_diff: true` entries are transcript-only and carry no
+            # reference dump — 38 of 45 backends. Downloading a fixture for them
+            # raised KeyError: 'fixture_ref_path' and failed the backend before it
+            # ever ran. run_one.py already treats skip_diff this way.
+            skip_diff = bool(entry.get("skip_diff", False))
+            ref_local = None
+            if not skip_diff:
+                ref_local = Path(hf_hub_download(
+                    repo_id=MANIFEST["fixtures"]["repo"],
+                    filename=entry["fixture_ref_path"],
+                    revision=MANIFEST["fixtures"]["revision"],
+                ))
+            if "fixture_sample_path" in entry:
+                sample = Path(hf_hub_download(
+                    repo_id=MANIFEST["fixtures"]["repo"],
+                    filename=entry["fixture_sample_path"],
+                    revision=MANIFEST["fixtures"]["revision"],
+                ))
+            else:
+                sample = REPO / entry["sample"]
+
+            crispasr_bin = BUILD / "bin" / "crispasr"
+            diff_bin = BUILD / "bin" / "crispasr-diff"
+
+            # `transcript_format: srt` (index-echo's bilingual cues): the same
+            # cue-joining run_one.py does. Without it only the last stdout line
+            # was compared and index-echo could never pass here.
+            actual = run_one.run_transcript(crispasr_bin, gguf_local, sample,
+                                            srt=entry.get("transcript_format") == "srt")
+            # Same rule as GH (run_one.transcript_gate): WER-normalised, not
+            # byte-exact, honouring transcript_tolerance.
+            transcript_ok, _tlines = run_one.transcript_gate(entry, actual)
+            for _l in _tlines:
+                print(_l)
+            if skip_diff:
+                stages, passes, fails, missing, extras = {}, [], [], [], {}
+                ok = transcript_ok
+            else:
+                # diff_gguf: full-precision file for the stage diff (run_one.py).
+                # Same repo as the quant by default, so the per-backend
+                # models--* eviction below frees it too.
+                diff_gguf = gguf_local
+                if entry.get("diff_gguf"):
+                    dg = entry["diff_gguf"]
+                    diff_gguf = Path(hf_hub_download(
+                        repo_id=dg.get("repo", entry["gguf"]["repo"]), filename=dg["file"],
+                        revision=dg.get("revision", entry["gguf"]["revision"])))
+                stages = run_one.run_diff(
+                    diff_bin, entry["backend_id"], diff_gguf, ref_local, sample)
+                passes, fails, missing, extras = run_one.evaluate_stage_thresholds(
+                    stages, entry["diff_thresholds"], **run_one.stage_gate_kwargs(entry))
+                # Print every stage: the counts alone ("fails=75") said nothing
+                # about WHICH stage broke first, and the results jsonl is not
+                # always retrievable (kernels output 429s).
+                for _st, _v, _th in sorted(passes + fails, key=lambda x: x[0]):
+                    print(f"    {'PASS' if _v >= _th else 'FAIL'} {_st:32s} cos_min={_v:.6f} (>= {_th})")
+                for _st, _v in extras:
+                    print(f"    INFO {_st:32s} cos_min={_v:.6f}")
+                for _st in missing:
+                    print(f"    MISSING {_st}")
+                ok = transcript_ok and not fails and not missing
+            results.append({
+                "backend": name,
+                "mode": "validate",
+                "ok": ok,
+                "elapsed_s": round(time.time() - t0, 2),
+                "transcript_match": transcript_ok,
+                "transcript_actual": actual if not transcript_ok else None,
+                "stages": {s: stages.get(s) for s in entry.get("diff_thresholds", {})},
+                "extras": dict(extras),
+                "missing": missing,
+            })
+            print(f"  -> ok={ok}  transcript={transcript_ok}  "
+                  f"passes={len(passes)}  fails={len(fails)}  missing={len(missing)}")
+        # SystemExit too: run_one.die() raises it (kyutai: "crispasr-diff produced no
+        # parseable stage lines") and it ended the whole run, skipping every later entry.
+        except (Exception, SystemExit) as exc:
+            results.append({
+                "backend": name,
+                "mode": "validate",
+                "ok": False,
+                "elapsed_s": round(time.time() - t0, 2),
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+            print(f"  -> ERROR  {type(exc).__name__}: {exc}")
+        finally:
+            # Free the model before the next backend. The 45-backend sweep pulls
+            # far more than /kaggle/working holds — the previous run died partway
+            # through with "No space left on device (os error 28)" and every
+            # remaining backend then failed on disk rather than on merit.
+            # Keeping one model at a time is what makes a full sweep possible;
+            # the ASR ground-truth model and fixtures are small and are re-used,
+            # so only the backend under test is evicted.
+            try:
+                import shutil as _sh
+                for _p in (locals().get("gguf_local"),):
+                    if _p is None:
+                        continue
+                    # hf_hub_download returns .../snapshots/<rev>/<file>; drop the
+                    # whole models--* tree so blobs go too, not just the symlink.
+                    _root = Path(_p)
+                    while _root.parent != _root and not _root.name.startswith("models--"):
+                        _root = _root.parent
+                    if _root.name.startswith("models--") and _root.is_dir():
+                        _sh.rmtree(_root, ignore_errors=True)
+                        print(f"  freed {_root.name}", flush=True)
+            except Exception as _e:
+                print(f"  cleanup skipped: {_e}", flush=True)
+
+    return results
+
+
+# ─────────────────────────── cell 6 (code) ───────────────────────────
+step("cell_6_begin")
+# ── REBAKE mode: run real Python references, stage new ref.gguf files ────
+def run_rebake() -> list[dict]:
+    """Per-backend re-bake. Writes new ref.gguf files into REBAKE_STAGE
+    at the manifest's `fixture_ref_path`. Does NOT upload — that's a
+    separate gated step.
+
+    Ordering: process backends WITHOUT an existing ref archive first.
+    The manifest naturally lists already-done entries near the top
+    (they were added earliest), which means if the kernel runs out of
+    time or disk before reaching the never-done entries we get zero
+    new coverage. Sorting by `bool(fixture_ref_path)` ascending puts
+    new entries first and re-bakes existing ones only after, so a
+    partial run still grows the fixtures repo for whatever ran.
+    """
+    ordered = sorted(BACKENDS, key=lambda b: bool(b.get("fixture_ref_path")))
+    if ordered != BACKENDS:
+        n_new = sum(1 for b in ordered if not b.get("fixture_ref_path"))
+        print(f"\nRebake order: {n_new} never-done entries first, "
+              f"then {len(ordered) - n_new} existing.", flush=True)
+
+    results = []
+    for entry in ordered:
+        name = entry["name"]
+        print(f"\n========== rebake :: {name} ==========")
+        t0 = time.time()
+        # `reference_backend` may differ from the runtime backend for HF
+        # variants such as Phonon-2, which runs on Parakeet but is not a .nemo.
+        reference_backend = entry.get("reference_backend", entry["backend_id"])
+        # `fixture_ref_path` is what `manifest.json` says we'll ship.
+        # Default for never-done entries (no fixture_ref_path field yet):
+        # use `<name>/ref.gguf`. When skip_diff flips to false the
+        # manifest must explicitly set fixture_ref_path matching the
+        # path validate will look up; this default exists only so a
+        # first rebake produces SOMETHING upload-able for new entries.
+        rel = entry.get("fixture_ref_path") or f"{name}/ref.gguf"
+        out_path = REBAKE_STAGE / rel
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Source-model spec. Per-backend modules know how to interpret
+        # `--model-dir` (HF id or local path). The manifest carries
+        # `source_model` exactly for re-bake — fall back is a hard
+        # error rather than a guess, because guessing a wrong NeMo
+        # checkpoint silently changes what we baseline against.
+        source = entry.get("source_model")
+        if not source:
+            results.append({
+                "backend": name,
+                "mode": "rebake",
+                "ok": False,
+                "elapsed_s": 0.0,
+                "error": "manifest entry has no `source_model`; "
+                         "add it before re-baking",
+            })
+            print(f"  -> SKIP (no source_model)")
+            continue
+        # For re-bake, the sample WAV must be on disk so the Python
+        # reference can read it. Pull from the fixtures HF repo if the
+        # manifest points there; otherwise expect it in-tree.
+        if "fixture_sample_path" in entry:
+            from huggingface_hub import hf_hub_download
+            sample = Path(hf_hub_download(
+                repo_id=MANIFEST["fixtures"]["repo"],
+                filename=entry["fixture_sample_path"],
+                revision=MANIFEST["fixtures"]["revision"],
+            ))
+        else:
+            sample = REPO / entry["sample"]
+
+        # Several reference modules read files straight from --model-dir
+        # (granite: <dir>/config.json; kyutai: the mimi safetensors next to the
+        # LM) and fail on a bare HF id - rebake 2026-09-27. Hand them a full
+        # local snapshot; an id that is already a path is used as-is.
+        model_dir = source
+        # NeMo-family dumpers take the bare id (from_pretrained / restore_from
+        # on a .nemo) and break on a directory (batch 3: parakeet tarfile
+        # IsADirectoryError, nemotron HFValidationError) - so only these get one.
+        needs_snapshot = entry["backend_id"] in ("granite", "granite-4.1", "kyutai-stt", "mini-omni2")
+        if needs_snapshot and not Path(source).exists() and re.fullmatch(r"[\w.-]+/[\w.-]+", source):
+            # In a FRESH interpreter: the rebake pip installs replace
+            # huggingface_hub after this process imported it, and an in-process
+            # snapshot_download then dies on a half-old module
+            # (AttributeError: ...HF_HUB_ENABLE_HF_TRANSFER, batch 2).
+            with build_heartbeat(f"snapshot.{name}"):
+                _r = subprocess.run(
+                    [sys.executable, "-c",
+                     "import sys; from huggingface_hub import snapshot_download; "
+                     "print('@@' + snapshot_download(repo_id=sys.argv[1]))", source],
+                    capture_output=True, text=True)
+            _m = re.search(r"^@@(.+)$", _r.stdout, re.M)
+            if _m and Path(_m.group(1)).is_dir():
+                model_dir = _m.group(1)
+            else:
+                print(f"  snapshot_download({source}) failed rc={_r.returncode}: "
+                      f"{(_r.stderr or _r.stdout)[-400:]}; passing the id", flush=True)
+        # Per-backend reference prerequisites that are not pip packages.
+        # mini-omni2's reference imports the MODIFIED litgpt vendored in the
+        # upstream repo (post_adapter / whisper_adapter do not exist in PyPI
+        # litgpt): "No module named 'litgpt'" in batch 1.
+        ref_env = dict(os.environ)
+        if entry["backend_id"] == "mini-omni2":
+            mo_dir = WORK / "_mini-omni2"
+            if not mo_dir.exists():
+                subprocess.call(["git", "clone", "--depth", "1", "https://github.com/gpt-omni/mini-omni2.git", str(mo_dir)])
+            ref_env["MINI_OMNI2_REPO"] = str(mo_dir)
+        if entry["backend_id"] == "kyutai-stt":
+            # LM stages import `moshi`; its own torch pin would replace the
+            # stack every other dumper runs on, so code only (batch 3).
+            subprocess.call([sys.executable, "-m", "pip", "install", "--quiet", "--no-deps", "moshi"])
+        cmd = [
+            sys.executable, "-u", str(REPO / "tools" / "dump_reference.py"),
+            "--backend", reference_backend,
+            "--model-dir", model_dir,
+            "--audio", str(sample),
+            "--output", str(out_path),
+        ]
+        try:
+            subprocess.check_call(cmd, cwd=str(REPO), env=ref_env)
+            results.append({
+                "backend": name,
+                "mode": "rebake",
+                "ok": True,
+                "elapsed_s": round(time.time() - t0, 2),
+                "out_path": str(out_path),
+                "out_size_b": out_path.stat().st_size,
+            })
+            print(f"  -> wrote {out_path} ({out_path.stat().st_size / 1024:.1f} KiB)")
+        except subprocess.CalledProcessError as exc:
+            results.append({
+                "backend": name,
+                "mode": "rebake",
+                "ok": False,
+                "elapsed_s": round(time.time() - t0, 2),
+                "error": f"dump_reference exit={exc.returncode}",
+            })
+        finally:
+            # Free source-model weights from disk before the next
+            # backend so cumulative downloads don't exhaust Kaggle's
+            # 20 GB. Without this, after 4 parakeet variants (~2 GB
+            # each) + the ccache + build artifacts (~5 GB) we ran out
+            # of disk mid-download on backend #8 in v10. Trade-off:
+            # loses cache benefit between two backends that share
+            # weights (rare — e.g. two parakeet variants are different
+            # checkpoints with no shared tensors), but caps peak disk
+            # to one backend's worth of source weights.
+            for cache_dir in (HF_CACHE,
+                              Path.home() / ".cache" / "torch",
+                              Path.home() / ".cache" / "huggingface",
+                              Path("/root/.cache/torch"),
+                              Path("/root/.cache/huggingface")):
+                if cache_dir.exists():
+                    try:
+                        shutil.rmtree(cache_dir, ignore_errors=True)
+                    except Exception:
+                        pass
+            HF_CACHE.mkdir(parents=True, exist_ok=True)
+            try:
+                stat = os.statvfs("/kaggle/working")
+                free_gb = (stat.f_bavail * stat.f_frsize) / (1024 ** 3)
+                step("rebake.cleanup",
+                     backend=name,
+                     free_gb_after=round(free_gb, 2))
+            except Exception:
+                pass
+
+    return results
+
+
+# ─────────────────────────── cell 6b (code) ──────────────────────────
+step("cell_6b_begin")
+# ── VALIDATE mode: TTS -> ASR roundtrips ─────────────────────────────────
+#
+# The manifest has carried a `tts_backends` section for a while, but this suite
+# only ever iterated `backends` — so the 21 WER-gated TTS roundtrips were in the
+# manifest and never run by the thing called "the full regression suite".
+# run_one.tts_roundtrip_for already implements one (synthesise the phrase,
+# transcribe it with the pinned ASR backend, assert WER <= wer_max) and returns a
+# failure count, handling `advisory: true` entries internally by reporting and
+# returning 0. Driving it here is what makes the sweep actually full.
+def run_validate_tts() -> list[dict]:
+    sys.path.insert(0, str(REPO / "tests" / "regression"))
+    import run_one  # noqa: E402
+
+    entries = [e for e in MANIFEST.get("tts_backends", [])
+               if not want or e["name"] in want]
+    if not entries:
+        return []
+
+    print(f"\nProcessing {len(entries)} TTS backend(s):")
+    for e in entries:
+        print(f"  - {e['name']:30s} (gguf ~{e['gguf'].get('approx_size_mb','?')} MB)")
+
+    crispasr_bin = BUILD / "bin" / "crispasr"
+    out = []
+    for entry in entries:
+        name = entry["name"]
+        print(f"\n========== tts-roundtrip :: {name} ==========")
+        t0 = time.time()
+        work = Path(tempfile.mkdtemp(prefix=f"tts-{name}-"))
+        try:
+            failures = run_one.tts_roundtrip_for(name, MANIFEST, work, crispasr_bin)
+            out.append({
+                "backend": name,
+                "mode": "validate-tts",
+                "ok": failures == 0,
+                "advisory": bool(entry.get("advisory", False)),
+                "elapsed_s": round(time.time() - t0, 2),
+            })
+            print(f"  -> ok={failures == 0}")
+        # SystemExit too: run_one.die() raises it, and one bad entry must not
+        # abort the remaining backends the way a bare `except Exception` would.
+        except (Exception, SystemExit) as exc:
+            out.append({
+                "backend": name,
+                "mode": "validate-tts",
+                "ok": False,
+                "advisory": bool(entry.get("advisory", False)),
+                "elapsed_s": round(time.time() - t0, 2),
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+            print(f"  -> ERROR  {type(exc).__name__}: {exc}")
+        finally:
+            # Same eviction discipline as the ASR pass: TTS GGUFs are large
+            # (tada 2.2 GB, f5 953 MB) and /kaggle/working does not hold them all.
+            #
+            # Evict THIS entry's repos only. HF_HOME is shared (set in cell 2), so
+            # the per-job work dir holds nothing and a blanket models--* wipe would
+            # also evict the pinned ASR ground-truth model — re-downloading
+            # parakeet for all 21 entries instead of once.
+            shutil.rmtree(work, ignore_errors=True)
+            repos = {entry["gguf"]["repo"]}
+            for key in ("voice", "codec"):
+                if isinstance(entry.get(key), dict) and "repo" in entry[key]:
+                    repos.add(entry[key]["repo"])
+            hub = Path(os.environ["HF_HOME"]) / "hub"
+            for repo in repos:
+                d = hub / ("models--" + repo.replace("/", "--"))
+                if d.is_dir():
+                    shutil.rmtree(d, ignore_errors=True)
+                    print(f"  freed {d.name}", flush=True)
+    return out
+
+
+# ─────────────────────────── cell 7 (code) ───────────────────────────
+step("cell_7_begin")
+# ── Dispatch + upload ─────────────────────────────────────────────────────
+if MODE == "validate":
+    RESULTS_DATA = run_validate()
+    RESULTS_DATA += run_validate_tts()
+elif MODE == "rebake":
+    RESULTS_DATA = run_rebake()
+else:
+    raise SystemExit(f"unknown MODE={MODE!r}; want 'validate' or 'rebake'")
+
+# Write a single JSON Lines artifact for downstream diffing.
+results_jsonl = RESULTS / f"results-{MODE}-{datetime.now().strftime('%Y%m%dT%H%M%S')}.jsonl"
+with results_jsonl.open("w") as f:
+    for r in RESULTS_DATA:
+        f.write(json.dumps(r) + "\n")
+print(f"\nResults: {results_jsonl}")
+
+# Summary line for stdout (so a Kaggle screenshot is self-contained).
+n_ok = sum(1 for r in RESULTS_DATA if r.get("ok"))
+# `advisory: true` entries report but never gate (weak / high-variance models).
+n_fail = sum(1 for r in RESULTS_DATA
+             if not r.get("ok") and not r.get("advisory"))
+n_advisory = sum(1 for r in RESULTS_DATA
+                 if not r.get("ok") and r.get("advisory"))
+print(f"\nSUMMARY  mode={MODE}  ok={n_ok}/{len(RESULTS_DATA)}  fail={n_fail}  advisory={n_advisory}")
+for r in RESULTS_DATA:
+    flag = "✓" if r.get("ok") else "✗"
+    print(f"  {flag} {r['backend']:30s} {r['elapsed_s']:6.1f}s  {r.get('error', '')}")
+
+if MODE == "rebake" and UPLOAD:
+    successful = [r["backend"] for r in RESULTS_DATA if r.get("ok")]
+    failed = [r["backend"] for r in RESULTS_DATA if not r.get("ok")]
+    if not successful:
+        raise SystemExit(
+            "rebake produced zero successful refs; nothing to upload.")
+    # Partial upload is safe by construction: failed entries don't
+    # write to REBAKE_STAGE, so upload_folder() only ships what
+    # actually succeeded. The previous all-or-nothing gate (raise
+    # SystemExit on any failure) was too strict — it blocked v11+v12
+    # from publishing 9 successful ref archives because 14 known-
+    # broken backends (missing pip deps + manifest gaps) also "failed".
+    # The fixtures repo is additive: a successful subset can land
+    # while the broken backends get fixed in follow-up commits.
+    if failed:
+        print(f"\nNOTE: {len(failed)} backend(s) failed; uploading only the "
+              f"{len(successful)} that succeeded. Failed: "
+              f"{', '.join(failed)}", flush=True)
+    from huggingface_hub import HfApi
+    api = HfApi()
+    print(f"\nUploading {REBAKE_STAGE}/ → cstr/crispasr-regression-fixtures")
+    # Use upload_folder so the structure mirrors the staging dir
+    # exactly. delete_patterns kept empty: never silently delete a
+    # ref.gguf that's still in the manifest.
+    commit_info = api.upload_folder(
+        repo_id="cstr/crispasr-regression-fixtures",
+        repo_type="model",
+        folder_path=str(REBAKE_STAGE),
+        commit_message=f"rebake {len(successful)}/{len(RESULTS_DATA)} "
+                       f"backend(s) — crispasr ref {CRISPASR_REF} — "
+                       f"ok: {', '.join(successful)}",
+    )
+    print(f"\nNew fixtures commit: {commit_info.oid}")
+    print(f"  → bump manifest.json's fixtures.revision to {commit_info.oid}")
+    print(f"  → https://huggingface.co/cstr/crispasr-regression-fixtures/commit/{commit_info.oid}")
+
+# Exit non-zero so a Kaggle scheduled run shows up as failed when
+# anything regressed. Without this, Kaggle treats any successful
+# notebook execution as "green" regardless of cell-internal state.
+sys.exit(n_fail)

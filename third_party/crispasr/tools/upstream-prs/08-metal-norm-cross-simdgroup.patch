@@ -1,0 +1,172 @@
+From: <author>
+Subject: [PATCH] metal : fix cross-simdgroup reduction in kernel_norm / kernel_rms_norm / kernel_l2_norm
+
+The two-step reduction pattern
+    if (tiisg == 0) shmem[sgitg] = sumf;
+    threadgroup_barrier(...);
+    sumf = shmem[tiisg];
+    sumf = simd_sum(sumf);
+produces wrong totals on Apple Silicon when the LAST active
+simdgroup had ≤ a few lanes that entered the prior parallel-sum
+loop body. Bisected via the standalone repro in
+tests/test_metal_norm_repro.cpp on shape (T=65, C=512): the row
+output is correct for elements 0..63 but the LAST element
+(written by the single-active-lane simdgroup) is wildly wrong.
+Affected ne00_t values include 33, 65, 66, 97, 129..132, 257 —
+exactly the cases where ne00_t lands just past a power-of-2 nth
+boundary and the trailing simdgroup is sparsely populated.
+
+Cascade impact: kokoro / StyleTTS2 AdaIN1d operates on
+(T_frames, C) = (65, 512) for short utterances, falls in this
+range, gets garbage normalised values, and produces unintelligible
+audio. Long-input GPU and CPU are unaffected.
+
+Replace the cross-simdgroup simd_sum with a serial reduction by
+thread 0 of sg0 that sums the per-sg partials from shmem[0..n_sg-1]
+and broadcasts via shmem[31] (unused by the original kernel —
+initialized to 0 by sg0 and never written by any sg). Same three-
+site fix in kernel_norm_fuse_impl (mean + variance reductions),
+kernel_rms_norm_fuse_impl (mean-square), and kernel_l2_norm_impl
+(squared-sum).
+
+Also adds per-T overloads (crispasr_vec_sum / crispasr_vec_sqsum)
+to replace `dot(scalar, scalar)` calls — `dot()` is not spec-defined
+for scalar types and shouldn't be relied on in the kernel_norm_f32
+(non-_4) instantiation. This is independent of the reduction bug
+(did not fix it on its own) but worth folding in for spec-conformance.
+
+diff --git a/ggml/src/ggml-metal/ggml-metal.metal b/ggml/src/ggml-metal/ggml-metal.metal
+--- a/ggml/src/ggml-metal/ggml-metal.metal
++++ b/ggml/src/ggml-metal/ggml-metal.metal
+@@ -2916,6 +2916,15 @@ kernel void kernel_argmax_f32(
+     dst_i32[tgpig] = arg_val;
+ }
+
++// Explicit per-T sum/sqsum helpers — the kernel_norm_f32 (scalar T)
++// instantiation used to call `dot(scalar, scalar)` which is not
++// defined by the Metal Shading Language Specification. Use these
++// overloads so the scalar path doesn't depend on undefined behavior.
++static inline float crispasr_vec_sum(float v)  { return v; }
++static inline float crispasr_vec_sum(float4 v) { return v.x + v.y + v.z + v.w; }
++static inline float crispasr_vec_sqsum(float v)  { return v * v; }
++static inline float crispasr_vec_sqsum(float4 v) { return v.x*v.x + v.y*v.y + v.z*v.z + v.w*v.w; }
++
+ // F == 1 : norm (no fuse)
+ // F == 2 : norm + mul
+ // F == 3 : norm + mul + add
+@@ -2952,7 +2961,7 @@ kernel void kernel_norm_fuse_impl(
+     for (int i00 = tpitg.x; i00 < args.ne00_t; i00 += ntg.x) {
+         sumft += x[i00];
+     }
+-    sumf = dot(sumft, T(1.0f));
++    sumf = crispasr_vec_sum(sumft);
+     sumf = simd_sum(sumf);
+
+     threadgroup_barrier(mem_flags::mem_threadgroup);
+@@ -2963,8 +2972,18 @@ kernel void kernel_norm_fuse_impl(
+
+     threadgroup_barrier(mem_flags::mem_threadgroup);
+
+-    sumf = shmem_f32[tiisg];
+-    sumf = simd_sum(sumf);
++    // Serial reduction by thread 0 of sg0 — see header.
++    if (sgitg == 0 && tiisg == 0) {
++        const uint n_sg = (ntg.x + 31) / 32;
++        float total = 0.0f;
++        for (uint sg = 0; sg < n_sg; sg++) {
++            total += shmem_f32[sg];
++        }
++        shmem_f32[31] = total;
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++    sumf = shmem_f32[31];
+
+     const float mean = sumf/args.ne00;
+
+@@ -2973,7 +2992,7 @@ kernel void kernel_norm_fuse_impl(
+     sumf = 0.0f;
+     for (int i00 = tpitg.x; i00 < args.ne00_t; i00 += ntg.x) {
+         y[i00] = x[i00] - mean;
+-        sumf += dot(y[i00], y[i00]);
++        sumf += crispasr_vec_sqsum(y[i00]);
+     }
+     sumf = simd_sum(sumf);
+
+@@ -2985,8 +3004,17 @@ kernel void kernel_norm_fuse_impl(
+
+     threadgroup_barrier(mem_flags::mem_threadgroup);
+
+-    sumf = shmem_f32[tiisg];
+-    sumf = simd_sum(sumf);
++    // Serial reduction by thread 0 of sg0 — see header.
++    if (sgitg == 0 && tiisg == 0) {
++        const uint n_sg = (ntg.x + 31) / 32;
++        float total = 0.0f;
++        for (uint sg = 0; sg < n_sg; sg++) {
++            total += shmem_f32[sg];
++        }
++        shmem_f32[31] = total;
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++    sumf = shmem_f32[31];
+
+     const float variance = sumf/args.ne00;
+
+@@ -3046,7 +3074,7 @@ kernel void kernel_rms_norm_fuse_impl(
+
+     // parallel sum
+     for (int i00 = tpitg.x; i00 < args.ne00_t; i00 += ntg.x) {
+-        sumf += dot(x[i00], x[i00]);
++        sumf += crispasr_vec_sqsum(x[i00]);
+     }
+     sumf = simd_sum(sumf);
+
+@@ -3058,8 +3086,17 @@ kernel void kernel_rms_norm_fuse_impl(
+
+     threadgroup_barrier(mem_flags::mem_threadgroup);
+
+-    sumf = shmem_f32[tiisg];
+-    sumf = simd_sum(sumf);
++    // Serial reduction by thread 0 of sg0 — see header.
++    if (sgitg == 0 && tiisg == 0) {
++        const uint n_sg = (ntg.x + 31) / 32;
++        float total = 0.0f;
++        for (uint sg = 0; sg < n_sg; sg++) {
++            total += shmem_f32[sg];
++        }
++        shmem_f32[31] = total;
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++    sumf = shmem_f32[31];
+
+     const float mean  = sumf/args.ne00;
+     const float scale = 1.0f/sqrt(mean + args.eps);
+@@ -3118,7 +3155,7 @@ kernel void kernel_l2_norm_impl(
+
+     // parallel sum
+     for (int i00 = tpitg.x; i00 < args.ne00; i00 += ntg.x) {
+-        sumf += dot(x[i00], x[i00]);
++        sumf += crispasr_vec_sqsum(x[i00]);
+     }
+     sumf = simd_sum(sumf);
+
+@@ -3130,8 +3167,17 @@ kernel void kernel_l2_norm_impl(
+
+     threadgroup_barrier(mem_flags::mem_threadgroup);
+
+-    sumf = shmem_f32[tiisg];
+-    sumf = simd_sum(sumf);
++    // Serial reduction by thread 0 of sg0 — see header.
++    if (sgitg == 0 && tiisg == 0) {
++        const uint n_sg = (ntg.x + 31) / 32;
++        float total = 0.0f;
++        for (uint sg = 0; sg < n_sg; sg++) {
++            total += shmem_f32[sg];
++        }
++        shmem_f32[31] = total;
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++    sumf = shmem_f32[31];
+
+     const float scale = 1.0f/max(sqrt(sumf), args.eps);
+

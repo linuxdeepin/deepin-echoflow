@@ -1,0 +1,50 @@
+# CrispASR .clang-format
+# Based on the existing code style: 4-space indent, 120-col limit,
+# references attached to type ("const std::string & s" style).
+---
+Language:        Cpp
+BasedOnStyle:    LLVM
+
+# Indentation
+IndentWidth:           4
+ContinuationIndentWidth: 4
+TabWidth:              4
+UseTab:                Never
+AccessModifierOffset:  -4
+
+# Column limit — generous to avoid wrapping long ggml API call chains.
+ColumnLimit:     120
+
+# Brace / block style — K&R style (open brace on same line for functions).
+BreakBeforeBraces:    Attach
+
+# Pointer / reference alignment — matches the codebase ("const T & x" style).
+PointerAlignment:     Left
+ReferenceAlignment:   Left
+
+# Namespace / include style
+NamespaceIndentation: None
+SortIncludes:         false    # don't reorder existing carefully-grouped includes
+
+# Function argument / initialiser alignment
+AlignAfterOpenBracket:    Align
+BinPackArguments:         true
+BinPackParameters:        true
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+
+# Trailing whitespace / empty lines
+MaxEmptyLinesToKeep: 2
+KeepEmptyLinesAtTheStartOfBlocks: false
+
+# Comment style
+ReflowComments:  false    # don't reflow hand-written ASCII diagrams / tables
+
+# Penalty tuning — keep long ggml call chains on one line when they fit.
+PenaltyBreakBeforeFirstCallParameter: 19
+PenaltyReturnTypeOnItsOwnLine: 300
+
+# C++17 features present in the codebase
+Standard:  c++17
+...

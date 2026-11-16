@@ -1,0 +1,15 @@
+{
+  "id": "${KAGGLE_ACCOUNT}/crispasr-parakeet-cfg-ab",
+  "title": "CrispASR parakeet cfg ab",
+  "code_file": "parakeet_cfg_ab.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_internet": "true",
+  "dataset_sources": [
+    "${KAGGLE_ACCOUNT}/crispasr-hf-token"
+  ],
+  "competition_sources": [],
+  "kernel_sources": []
+}

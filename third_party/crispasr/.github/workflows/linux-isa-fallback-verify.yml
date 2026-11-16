@@ -1,0 +1,148 @@
+# Proves the #405 fix end-to-end on a real runner, with the reporter's CPU
+# emulated via qemu-user. Issue #405: the CUDA package's single AVX2+FMA+F16C
+# libggml-cpu.so is (correctly) refused by ggml_backend_score() on a pre-2013
+# CPU — but then the registry has NO cpu device, and the process died on a
+# bare GGML_ASSERT(backend)/(device) at the first model load. Two-part fix
+# under test here:
+#
+#   1. GGML_CPU_ALL_VARIANTS packaging: the loader picks the best CPU module
+#      the host supports at runtime (x64 baseline always works). Verified by
+#      running REAL whisper-tiny ASR under `qemu-x86_64 -cpu Nehalem` (SSE4.2,
+#      no AVX — the class of CPU in the report) and asserting the transcript
+#      AND that a pre-AVX variant was the one that loaded.
+#   2. Graceful failure when no CPU module can load at all: with every
+#      libggml-cpu-*.so removed, crispasr must exit 1 with the actionable
+#      "no CPU ggml backend" message — not SIGABRT (exit 134) like the
+#      pre-fix binary the reporter ran.
+#
+# The build flags mirror the release CUDA legs (minus CUDA itself — the CPU
+# variant mechanics are backend-independent and CUDA cannot init on a runner
+# anyway).
+name: Linux ISA Fallback Verify
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/linux-isa-fallback-verify.yml
+      - src/core/ggml_cpu_backend.h
+      - src/core/gguf_loader.cpp
+      - examples/cli/cli.cpp
+      - examples/cli/crispasr_server.cpp
+
+# One run per workflow per branch: a newer push cancels the older run. On
+# main nothing is cancelled (every main commit keeps its verdict).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  # Cheap gate: on a branch push, run the heavy job only when the BRANCH ITSELF
+  # changes a watched path (vs its merge-base with main). A rebase onto a main
+  # that touched CMakeLists.txt no longer queues one heavy run per branch.
+  # main, pull requests and manual dispatch always run. See the script's header.
+  scope:
+    runs-on: ubuntu-latest
+    outputs:
+      relevant: ${{ steps.scope.outputs.relevant }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: scope
+        run: |
+          if [ "${{ github.event_name }}" != "push" ] || [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          else
+            git fetch --no-tags origin main || true   # no base -> script answers true
+            python3 .github/scripts/branch_touches_paths.py "$GITHUB_WORKFLOW_REF_PATH" origin/main >> "$GITHUB_OUTPUT" \
+              || echo "relevant=true" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GITHUB_WORKFLOW_REF_PATH: .github/workflows/linux-isa-fallback-verify.yml
+
+  linux-isa-fallback-verify:
+    needs: scope
+    if: needs.scope.outputs.relevant == 'true'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install deps
+        run: sudo apt-get update && sudo apt-get install -y cmake g++ qemu-user
+
+      - name: Build (GGML_BACKEND_DL + GGML_CPU_ALL_VARIANTS, release-CUDA-leg shape)
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=ON \
+            -DGGML_BACKEND_DL=ON \
+            -DGGML_NATIVE=OFF -DGGML_CPU_ALL_VARIANTS=ON \
+            -DCRISPASR_BUILD_TESTS=OFF \
+            -DCRISPASR_BUILD_EXAMPLES=ON \
+            -DCRISPASR_BUILD_SERVER=OFF \
+            -DCRISPASR_OPUS_FETCH=ON
+          cmake --build build --target crispasr-cli -j $(nproc)
+
+      - name: Assert the CPU variant set shipped (incl. the x64 baseline)
+        run: |
+          ls -la build/bin/libggml-cpu-*.so
+          test -f build/bin/libggml-cpu-x64.so
+          test -f build/bin/libggml-cpu-sse42.so
+          test -f build/bin/libggml-cpu-haswell.so
+
+      - name: Fetch whisper tiny + stage audio
+        run: |
+          curl -sSL -o /tmp/ggml-tiny.bin \
+            https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin
+          ls -la /tmp/ggml-tiny.bin samples/jfk.wav
+
+      - name: 'Arm C (control): native host picks an AVX2+ variant and transcribes'
+        run: |
+          set -o pipefail
+          ./build/bin/crispasr --no-gpu -m /tmp/ggml-tiny.bin -f samples/jfk.wav 2>err.log | tee out.log
+          grep -Eo 'loaded CPU backend from [^ ]*' err.log | tee cpu_variant.log
+          # ubuntu-22.04 runners are AVX2+ — the scorer must NOT pick a pre-AVX
+          # module here, or scoring itself is broken.
+          grep -Eq 'libggml-cpu-(haswell|skylakex|cannonlake|cascadelake|icelake|alderlake|sapphirerapids|cooperlake|zen4)\.so' cpu_variant.log
+          grep -qi 'country' out.log
+
+      - name: 'Arm B (the #405 class of CPU): qemu Nehalem picks a pre-AVX variant and transcribes'
+        run: |
+          set -o pipefail
+          # Nehalem = SSE4.2, no AVX/AVX2/FMA/F16C — below the old package's
+          # floor. Pre-fix packaging left this host with NO cpu backend.
+          qemu-x86_64 -cpu Nehalem ./build/bin/crispasr --no-gpu \
+            -m /tmp/ggml-tiny.bin -f samples/jfk.wav 2>err-nehalem.log | tee out-nehalem.log
+          grep -Eo 'loaded CPU backend from [^ ]*' err-nehalem.log | tee cpu_variant_nehalem.log
+          grep -Eq 'libggml-cpu-(x64|sse42)\.so' cpu_variant_nehalem.log
+          grep -qi 'country' out-nehalem.log
+
+      - name: 'Arm A (no CPU module at all): clean actionable error, not an abort'
+        run: |
+          rm build/bin/libggml-cpu-*.so
+          set +e
+          qemu-x86_64 -cpu Nehalem ./build/bin/crispasr --no-gpu \
+            -m /tmp/ggml-tiny.bin -f samples/jfk.wav >out-nocpu.log 2>err-nocpu.log
+          rc=$?
+          set -e
+          cat err-nocpu.log
+          # Pre-fix: SIGABRT (rc 134) from GGML_ASSERT(backend). Post-fix: a
+          # deliberate exit 1 after the "no CPU ggml backend" diagnosis.
+          test "$rc" -eq 1
+          grep -q 'no CPU ggml backend' err-nocpu.log
+          grep -q 'cpu-legacy' err-nocpu.log
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-isa-fallback-verify-logs
+          path: |
+            out*.log
+            err*.log
+            cpu_variant*.log
+          if-no-files-found: ignore

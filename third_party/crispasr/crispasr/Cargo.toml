@@ -1,0 +1,69 @@
+[package]
+name = "crispasr"
+version = "0.8.42"
+edition = "2021"
+description = "Safe Rust wrapper for CrispASR — lightweight on-device speech recognition (Whisper, Qwen3-ASR, FastConformer, and more)."
+license = "MIT"
+repository = "https://github.com/CrispStrobe/CrispASR"
+homepage = "https://github.com/CrispStrobe/CrispASR"
+documentation = "https://docs.rs/crispasr"
+readme = "README.md"
+keywords = ["asr", "speech-recognition", "whisper", "ggml", "speech-to-text"]
+categories = ["multimedia::audio", "api-bindings"]
+
+# path + version dep on the sibling -sys crate. The path resolves for local
+# development AND for git/path downstream consumers (cargo finds crispasr-sys
+# inside the checkout); on `cargo publish` the path is stripped and the version
+# pin resolves the crates.io release (both crates are published there). See
+# README.md for the two consumption modes (git build-from-source vs crates.io
+# release + a pre-built lib via CRISPASR_LIB_DIR).
+[dependencies]
+crispasr-sys = { path = "../crispasr-sys", version = "0.8.42" }
+
+[features]
+default = []
+cuda = ["crispasr-sys/cuda"]
+metal = ["crispasr-sys/metal"]
+vulkan = ["crispasr-sys/vulkan"]
+
+[dev-dependencies]
+hound = "3.5"
+
+[package.metadata.docs.rs]
+# docs.rs has no native libcrispasr installed — disable build.rs link
+# probing by exposing a stub, or document that docs builds need the lib.
+all-features = true
+
+# Debug artifacts dominate `target/debug` and are almost all DWARF, most of
+# which the profile controls. Measured 2026-09-03 with `readelf -S` on a real
+# 187.9 MB dev-profile test binary on this machine (no rebuild needed — an
+# existing artifact answers it):
+#
+#     ALL .debug_*   155.1 MB   = 82.5% of the binary
+#     std's floor      ~3.9 MB  (precompiled rlibs; [profile.dev] cannot touch)
+#     profile-governed ~151 MB
+#
+#     dev default (debug=2)   187.9 MB  MEASURED (readelf -S, one artifact)
+#     line-tables-only         ~60 MB   -68%  PROJECTED from the section sizes
+#     debug = 0                ~36.7 MB -80%  PROJECTED
+#
+# THE PROJECTIONS OVERSHOOT, and by a knowable amount. bw-fixes-1 measured the
+# real thing on kerotakis afterwards: deps 13.7 GB -> 6.1 GB and the binary
+# -61%, against the -68% projected here. The gap is not noise — std's
+# precompiled floor is a FIXED cost the profile cannot touch, so the percentage
+# saving degrades as binaries get smaller. That single fact also explains the
+# hello-world measurement that said 0.1% and was off by ~700x: on a toy binary
+# the untouchable floor IS the whole binary. Expect -55% to -65% in practice,
+# and readelf an artifact from the class you actually care about before
+# quoting a number for a different one.
+#
+# line-tables-only, alone: the extra ~1.5 GB/repo that debug=0 would save is not
+# worth losing per-frame `at ./src/...` lines in backtraces. Do NOT add
+# `strip = "debuginfo"` alongside it — strip removes DWARF sections, and
+# .debug_line IS one, so the pair silently cancels and lands within 200 bytes of
+# debug=0 (verified: zero .debug_line sections, no per-frame lines).
+#
+# `panicked at file:line` survives either setting — it is panic location
+# metadata, not DWARF — so debug=0 is not blind, it just loses the frames below.
+[profile.dev]
+debug = "line-tables-only"

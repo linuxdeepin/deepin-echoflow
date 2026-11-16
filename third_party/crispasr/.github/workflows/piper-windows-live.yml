@@ -1,0 +1,232 @@
+name: Piper Windows Live
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/piper-windows-live.yml'
+      - 'examples/cli/crispasr_model_mgr_cli.cpp'
+      - 'src/crispasr_model_registry.cpp'
+      - 'src/crispasr_cache.cpp'
+      - 'src/crispasr_cache.h'
+      - 'src/CMakeLists.txt'
+      - 'src/piper_tts.cpp'
+      - 'src/piper_tts.h'
+      - 'tests/test-dry-run-resolve.sh'
+
+# One run per workflow per branch: a newer push cancels the older run. On
+# main nothing is cancelled (every main commit keeps its verdict).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  # Cheap gate: on a branch push, run the heavy job only when the BRANCH ITSELF
+  # changes a watched path (vs its merge-base with main). A rebase onto a main
+  # that touched CMakeLists.txt no longer queues one heavy run per branch.
+  # main, pull requests and manual dispatch always run. See the script's header.
+  scope:
+    runs-on: ubuntu-latest
+    outputs:
+      relevant: ${{ steps.scope.outputs.relevant }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: scope
+        run: |
+          if [ "${{ github.event_name }}" != "push" ] || [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          else
+            git fetch --no-tags origin main || true   # no base -> script answers true
+            python3 .github/scripts/branch_touches_paths.py "$GITHUB_WORKFLOW_REF_PATH" origin/main >> "$GITHUB_OUTPUT" \
+              || echo "relevant=true" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GITHUB_WORKFLOW_REF_PATH: .github/workflows/piper-windows-live.yml
+
+  cori-cli-and-server:
+    needs: scope
+    if: needs.scope.outputs.relevant == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Build portable CPU CLI (bounded)
+        shell: pwsh
+        run: |
+          Get-CimInstance Win32_OperatingSystem | Select-Object FreePhysicalMemory,TotalVisibleMemorySize
+          Get-CimInstance Win32_Processor | Select-Object LoadPercentage
+          cmake -S . -B build -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DGGML_NATIVE=OFF -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON
+          cmake --build build --target crispasr-cli -j 2
+
+      - name: Download Cori Piper and Whisper judge
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force proof-models, proof | Out-Null
+          Invoke-WebRequest `
+            -Uri 'https://huggingface.co/cstr/piper-voices-GGUF/resolve/main/piper-en_GB-cori-medium-f16.gguf' `
+            -OutFile 'proof-models/piper-en_GB-cori-medium-f16.gguf'
+          Invoke-WebRequest `
+            -Uri 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin' `
+            -OutFile 'proof-models/ggml-base.en.bin'
+          if ((Get-Item proof-models/piper-en_GB-cori-medium-f16.gguf).Length -lt 30000000) {
+            throw 'Cori GGUF is truncated'
+          }
+
+      - name: Prove bare-name resolution and direct synthesis
+        shell: pwsh
+        run: |
+          $env:CRISPASR_MODELS_DIR = (Resolve-Path proof-models).Path
+          $env:CRISPASR_CACHE_DIR = $env:CRISPASR_MODELS_DIR
+          $preview = (& build/bin/crispasr.exe `
+            -m piper-en_GB-cori-medium-f16.gguf --dry-run-resolve 2>&1) -join "`n"
+          Write-Host $preview
+          if ($LASTEXITCODE -ne 0) { throw "dry-run resolve exited $LASTEXITCODE" }
+          if ($preview -notmatch 'backend:\s+piper') { throw 'Piper backend was not inferred' }
+          $normalPreview = $preview.Replace('/', '\')
+          if ($normalPreview -notmatch [regex]::Escape((Resolve-Path proof-models/piper-en_GB-cori-medium-f16.gguf).Path)) {
+            throw 'Cori did not resolve to the exact CRISPASR_MODELS_DIR file'
+          }
+          if ($preview -match 'lessac') { throw 'Cori was substituted with the Lessac registry default' }
+
+          $ttsLog = (& build/bin/crispasr.exe --backend piper `
+            -m piper-en_GB-cori-medium-f16.gguf -l en -t 2 --no-gpu --seed 42 `
+            --tts 'The quick brown fox jumps over the lazy dog.' `
+            --tts-output proof/cori-cli.wav `
+            --no-spoken-disclaimer --no-c2pa --accept-marking-responsibility 2>&1) -join "`n"
+          Write-Host $ttsLog
+          if ($LASTEXITCODE -ne 0) { throw "Piper CLI exited $LASTEXITCODE" }
+          if ($ttsLog -notmatch 'espeak IPA dict loaded') {
+            throw 'Piper did not load its auto-downloaded IPA dictionary'
+          }
+          if (-not (Test-Path proof-models/espeak_en_us.tsv) -or
+              (Get-Item proof-models/espeak_en_us.tsv).Length -lt 1000000) {
+            throw 'Piper IPA dictionary was not downloaded into the clean cache'
+          }
+          # Seed 0 resamples VITS noise every run. Keep seed 42 explicit and
+          # prove reproducibility without relaxing the existing speech gate.
+          $repeat = (& build/bin/crispasr.exe --backend piper `
+            -m piper-en_GB-cori-medium-f16.gguf -l en -t 2 --no-gpu --seed 42 `
+            --tts 'The quick brown fox jumps over the lazy dog.' `
+            --tts-output proof/cori-cli-repeat.wav `
+            --no-spoken-disclaimer --no-c2pa --accept-marking-responsibility 2>&1) -join "`n"
+          Write-Host $repeat
+          if ($LASTEXITCODE -ne 0) { throw "Repeated Piper CLI exited $LASTEXITCODE" }
+          $firstHash = (Get-FileHash proof/cori-cli.wav -Algorithm SHA256).Hash
+          $repeatHash = (Get-FileHash proof/cori-cli-repeat.wav -Algorithm SHA256).Hash
+          if ($firstHash -ne $repeatHash) { throw 'Seeded Piper WAVs differ' }
+          @{
+            source = $env:GITHUB_SHA; seed = 42
+            wav_sha256 = $firstHash.ToLower(); repeated_wav_sha256 = $repeatHash.ToLower()
+            inputs = @(Get-FileHash proof-models/piper-en_GB-cori-medium-f16.gguf,
+              proof-models/ggml-base.en.bin, proof-models/espeak_en_us.tsv -Algorithm SHA256 |
+              Select-Object Path,Hash)
+          } | ConvertTo-Json -Depth 4 | Set-Content proof/seeded-cli-proof.json
+          Write-Host "PIPER_SEEDED_REPEAT_OK seed=42 sha256=$firstHash"
+
+          $wav = [IO.File]::ReadAllBytes('proof/cori-cli.wav')
+          if ($wav.Length -lt 10000 -or [Text.Encoding]::ASCII.GetString($wav, 0, 4) -ne 'RIFF') {
+            throw 'CLI output is not a non-empty WAV'
+          }
+          $asr = (& build/bin/crispasr.exe --backend whisper `
+            -m proof-models/ggml-base.en.bin --no-gpu -l en -np `
+            -f proof/cori-cli.wav 2>&1) -join "`n"
+          Write-Host $asr
+          if ($LASTEXITCODE -ne 0 -or $asr -notmatch '(?i)quick brown fox') {
+            throw 'Whisper did not recover the CLI synthesis'
+          }
+
+      - name: Prove HTTP WAV and chunked PCM
+        shell: pwsh
+        run: |
+          $env:CRISPASR_MODELS_DIR = (Resolve-Path proof-models).Path
+          $server = Start-Process -FilePath (Resolve-Path build/bin/crispasr.exe) `
+            -ArgumentList @('--server', '-m', 'piper-en_GB-cori-medium-f16.gguf',
+              '--port', '18089', '-l', 'en', '-t', '2', '--no-gpu', '--seed', '42',
+              '--no-spoken-disclaimer', '--no-c2pa', '--accept-marking-responsibility') `
+            -RedirectStandardOutput proof/server.stdout.log `
+            -RedirectStandardError proof/server.stderr.log -PassThru
+          try {
+            $ready = $false
+            1..60 | ForEach-Object {
+              if (-not $ready) {
+                try {
+                  $health = Invoke-WebRequest -UseBasicParsing http://127.0.0.1:18089/health -TimeoutSec 2
+                  $ready = $health.StatusCode -eq 200
+                } catch { Start-Sleep -Seconds 1 }
+              }
+            }
+            if (-not $ready) { throw 'Piper server did not become healthy' }
+
+            $wavBody = @{
+              model = 'piper'; input = 'Hello, how are you today? You did a great job today.'
+              spoken_disclaimer = $false; response_format = 'wav'
+            } | ConvertTo-Json -Compress
+            Invoke-WebRequest -UseBasicParsing http://127.0.0.1:18089/v1/audio/speech `
+              -Method Post -ContentType 'application/json' -Body $wavBody `
+              -OutFile proof/cori-server.wav
+            $wav = [IO.File]::ReadAllBytes('proof/cori-server.wav')
+            if ($wav.Length -lt 10000 -or [Text.Encoding]::ASCII.GetString($wav, 0, 4) -ne 'RIFF') {
+              throw 'Server output is not a non-empty WAV'
+            }
+
+            $pcmBody = @{
+              model = 'piper'; input = 'Streaming Piper audio works correctly.'
+              spoken_disclaimer = $false; stream = $true; response_format = 'pcm'
+            } | ConvertTo-Json -Compress
+            $stream = Invoke-WebRequest -UseBasicParsing http://127.0.0.1:18089/v1/audio/speech `
+              -Method Post -ContentType 'application/json' -Body $pcmBody `
+              -OutFile proof/cori-stream.pcm -PassThru
+            if ((Get-Item proof/cori-stream.pcm).Length -lt 10000) { throw 'Streaming PCM is empty/truncated' }
+            if ($stream.Headers['Content-Type'] -notmatch 'audio/pcm') { throw 'Streaming response is not audio/pcm' }
+
+            $asr = (& build/bin/crispasr.exe --backend whisper `
+              -m proof-models/ggml-base.en.bin --no-gpu -l en -np `
+              -f proof/cori-server.wav 2>&1) -join "`n"
+            Write-Host $asr
+            # Word overlap against the WHOLE prompt, not a single magic phrase.
+            #
+            # This used to be `-notmatch '(?i)great job'`, which is fragile in
+            # BOTH directions. It failed a run whose transcript was
+            # "Hello how are you today?  UT-Tay Quit Job Today." — sentence one
+            # recovered perfectly, sentence two garbled — and it would equally
+            # have PASSED if only those two words survived and the rest were
+            # noise. A whole-prompt overlap catches the multi-sentence case the
+            # single phrase was blind to, which is the case this arm exists for:
+            # the CLI arm above sends ONE sentence and passed in the same run.
+            $expected = 'hello how are you today you did a great job today'
+            $heard = ($asr -replace '[^\p{L}\p{N}\s]', ' ').ToLower()
+            # UNIQUE words on the expected side. Counting duplicates scores the
+            # known-bad transcript at 0.73 — ABOVE a 0.70 threshold — because
+            # "you" and "today" each appear twice and both survived. Deduped it
+            # scores 0.67 and fails, while a correct transcript scores 1.00 and
+            # pure noise 0.00. Verified against those exact strings before this
+            # gate was trusted.
+            $want  = $expected -split '\s+' | Where-Object { $_ } | Select-Object -Unique
+            $got   = $heard    -split '\s+' | Where-Object { $_ }
+            $hits  = ($want | Where-Object { $got -contains $_ }).Count
+            $overlap = if ($want.Count) { $hits / $want.Count } else { 0 }
+            Write-Host ("HTTP ASR word overlap: {0:N2} ({1}/{2})" -f $overlap, $hits, $want.Count)
+            if ($LASTEXITCODE -ne 0 -or $overlap -lt 0.7) {
+              # Keep the audio so the next failure is diagnosable instead of
+              # being re-run until it passes.
+              Copy-Item proof/cori-server.wav proof/FAILED-cori-server.wav -ErrorAction SilentlyContinue
+              throw ("Whisper did not recover the HTTP synthesis (overlap {0:N2} < 0.70). Heard: {1}" -f $overlap, $heard)
+            }
+            Write-Host 'PIPER_WINDOWS_LIVE_OK — exact Cori lookup + CLI WAV + HTTP WAV + streaming PCM'
+          } finally {
+            if ($server -and -not $server.HasExited) { Stop-Process -Id $server.Id -Force }
+          }
+
+      - name: Upload proof artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: piper-windows-cori-proof
+          path: proof/

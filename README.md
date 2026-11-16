@@ -44,7 +44,7 @@ EchoFlow 不止是语音转文字。它直接接入 Fcitx5 输入法框架，通
 ### 第一步：构建
 
 ```bash
-git clone https://github.com/hualet/echoflow.git --recurse-submodules
+git clone https://github.com/hualet/echoflow.git
 cd echoflow
 cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build

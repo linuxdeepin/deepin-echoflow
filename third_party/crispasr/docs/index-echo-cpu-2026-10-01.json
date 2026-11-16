@@ -1,0 +1,752 @@
+{
+  "provenance": {
+    "source": "IndexTeam/Index-Echo-S2TT-2B",
+    "source_revision": "5d98a34d9685869b11e9c94d01dee22a8b8e53b5",
+    "model_revision": "022317a0aacb5813050abf813dde423e91a30403",
+    "commit": "62c93803c69b0c2e4b01ab10bbe6f0361a299a64",
+    "threads": 4,
+    "native_build": false,
+    "cpu": "Architecture:                            aarch64\nCPU op-mode(s):                          32-bit, 64-bit\nByte Order:                              Little Endian\nCPU(s):                                  4\nOn-line CPU(s) list:                     0-3\nVendor ID:                               ARM\nModel name:                              Neoverse-N2\nModel:                                   0\nThread(s) per core:                      1\nCore(s) per socket:                      4\nSocket(s):                               1\nStepping:                                r0p0\nBogoMIPS:                                2000.00\nFlags:                                   fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm jscvt fcma lrcpc dcpop sha3 sm3 sm4 asimddp sha512 sve asimdfhm uscat ilrcpc flagm sb paca pacg dcpodp sve2 sveaes svebitperm svesha3 svesm4 flagm2 frint svei8mm svebf16 i8mm bf16\nL1d cache:                               256 KiB (4 instances)\nL1i cache:                               256 KiB (4 instances)\nL2 cache:                                4 MiB (4 instances)\nL3 cache:                                128 MiB (1 instance)\nNUMA node(s):                            1\nNUMA node0 CPU(s):                       0-3\nVulnerability Gather data sampling:      Not affected\nVulnerability Ghostwrite:                Not affected\nVulnerability Indirect target selection: Not affected\nVulnerability Itlb multihit:             Not affected\nVulnerability L1tf:                      Not affected\nVulnerability Mds:                       Not affected\nVulnerability Meltdown:                  Not affected\nVulnerability Mmio stale data:           Not affected\nVulnerability Old microcode:             Not affected\nVulnerability Reg file data sampling:    Not affected\nVulnerability Retbleed:                  Not affected\nVulnerability Spec rstack overflow:      Not affected\nVulnerability Spec store bypass:         Mitigation; Speculative Store Bypass disabled via prctl\nVulnerability Spectre v1:                Mitigation; __user pointer sanitization\nVulnerability Spectre v2:                Mitigation; CSV2, BHB\nVulnerability Srbds:                     Not affected\nVulnerability Tsa:                       Not affected\nVulnerability Tsx async abort:           Not affected\nVulnerability Vmscape:                   Not affected\n",
+    "source_effective_parameter_dtypes": {
+      "tower": {
+        "parameter_elements": {
+          "torch.float32": 647927168
+        },
+        "module_class": "Qwen3OmniMoeAudioEncoder"
+      },
+      "connector": {
+        "parameter_elements": {
+          "torch.float32": 8388610
+        },
+        "module_class": "AudioConnector"
+      },
+      "llm": {
+        "parameter_elements": {
+          "torch.bfloat16": 1881825088
+        },
+        "module_class": "Qwen3_5ForCausalLM"
+      },
+      "embedding_dtype": "torch.bfloat16"
+    },
+    "dtype_audit_run": 36911946162,
+    "profile_run": 36907737439
+  },
+  "results": {
+    "python": {
+      "arm": "python",
+      "precision": "tower/connector F32; decoder BF16 (audited)",
+      "load_seconds": 14.515450533999967,
+      "clips": {
+        "jfk": [
+          {
+            "iteration": 0,
+            "seconds": 30.952984860000015,
+            "audio_seconds": 11.0,
+            "realtime_factor": 2.813907714545456,
+            "segments": [
+              {
+                "start": 0.0,
+                "end": 2.44,
+                "text": "And so my fellow Americans,\nSo, my fellow Americans,"
+              },
+              {
+                "start": 3.08,
+                "end": 7.52,
+                "text": "ask not what your country can do for you,\ndo not ask what your country can do for you,"
+              },
+              {
+                "start": 7.96,
+                "end": 11.0,
+                "text": "ask what you can do for your country.\nask what you can do for your country."
+              }
+            ]
+          },
+          {
+            "iteration": 1,
+            "seconds": 23.34895225699995,
+            "audio_seconds": 11.0,
+            "realtime_factor": 2.1226320233636318,
+            "segments": [
+              {
+                "start": 0.0,
+                "end": 2.44,
+                "text": "And so my fellow Americans,\nSo, my fellow Americans,"
+              },
+              {
+                "start": 3.08,
+                "end": 7.52,
+                "text": "ask not what your country can do for you,\ndo not ask what your country can do for you,"
+              },
+              {
+                "start": 7.96,
+                "end": 11.0,
+                "text": "ask what you can do for your country.\nask what you can do for your country."
+              }
+            ]
+          },
+          {
+            "iteration": 2,
+            "seconds": 23.696087454000008,
+            "audio_seconds": 11.0,
+            "realtime_factor": 2.1541897685454554,
+            "segments": [
+              {
+                "start": 0.0,
+                "end": 2.44,
+                "text": "And so my fellow Americans,\nSo, my fellow Americans,"
+              },
+              {
+                "start": 3.08,
+                "end": 7.52,
+                "text": "ask not what your country can do for you,\ndo not ask what your country can do for you,"
+              },
+              {
+                "start": 7.96,
+                "end": 11.0,
+                "text": "ask what you can do for your country.\nask what you can do for your country."
+              }
+            ]
+          }
+        ],
+        "zh": [
+          {
+            "iteration": 0,
+            "seconds": 32.641625213,
+            "audio_seconds": 13.052,
+            "realtime_factor": 2.500890684416181,
+            "segments": [
+              {
+                "start": 0.45,
+                "end": 4.57,
+                "text": "正是因为存在绝对正义，所以我们接受现实的相对正义。\nIt is precisely because absolute justice exists that we accept the relative justice of reality."
+              },
+              {
+                "start": 5.23,
+                "end": 7.45,
+                "text": "但是不要因为现实的相对正义，\nBut don't let the relative justice of reality"
+              },
+              {
+                "start": 7.45,
+                "end": 10.01,
+                "text": "我们就认为这个世界没有正义。\nmake us believe there is no justice in this world."
+              },
+              {
+                "start": 10.49,
+                "end": 12.92,
+                "text": "因为如果当你认为这个世界没有正义，\nBecause if you believe there is no justice in this world,"
+              }
+            ]
+          },
+          {
+            "iteration": 1,
+            "seconds": 32.88500878599996,
+            "audio_seconds": 13.052,
+            "realtime_factor": 2.5195379088262304,
+            "segments": [
+              {
+                "start": 0.45,
+                "end": 4.57,
+                "text": "正是因为存在绝对正义，所以我们接受现实的相对正义。\nIt is precisely because absolute justice exists that we accept the relative justice of reality."
+              },
+              {
+                "start": 5.23,
+                "end": 7.45,
+                "text": "但是不要因为现实的相对正义，\nBut don't let the relative justice of reality"
+              },
+              {
+                "start": 7.45,
+                "end": 10.01,
+                "text": "我们就认为这个世界没有正义。\nmake us believe there is no justice in this world."
+              },
+              {
+                "start": 10.49,
+                "end": 12.92,
+                "text": "因为如果当你认为这个世界没有正义，\nBecause if you believe there is no justice in this world,"
+              }
+            ]
+          },
+          {
+            "iteration": 2,
+            "seconds": 32.92663259099993,
+            "audio_seconds": 13.052,
+            "realtime_factor": 2.5227269836806565,
+            "segments": [
+              {
+                "start": 0.45,
+                "end": 4.57,
+                "text": "正是因为存在绝对正义，所以我们接受现实的相对正义。\nIt is precisely because absolute justice exists that we accept the relative justice of reality."
+              },
+              {
+                "start": 5.23,
+                "end": 7.45,
+                "text": "但是不要因为现实的相对正义，\nBut don't let the relative justice of reality"
+              },
+              {
+                "start": 7.45,
+                "end": 10.01,
+                "text": "我们就认为这个世界没有正义。\nmake us believe there is no justice in this world."
+              },
+              {
+                "start": 10.49,
+                "end": 12.92,
+                "text": "因为如果当你认为这个世界没有正义，\nBecause if you believe there is no justice in this world,"
+              }
+            ]
+          }
+        ],
+        "jfk-tail": [
+          {
+            "iteration": 0,
+            "seconds": 23.43867618899992,
+            "audio_seconds": 10.9876875,
+            "realtime_factor": 2.133176447637405,
+            "segments": [
+              {
+                "start": 0.0,
+                "end": 2.44,
+                "text": "And so my fellow Americans,\nSo, my fellow Americans,"
+              },
+              {
+                "start": 3.08,
+                "end": 7.52,
+                "text": "ask not what your country can do for you,\ndo not ask what your country can do for you,"
+              },
+              {
+                "start": 7.96,
+                "end": 10.96,
+                "text": "ask what you can do for your country.\nask what you can do for your country."
+              }
+            ]
+          },
+          {
+            "iteration": 1,
+            "seconds": 23.391287684999952,
+            "audio_seconds": 10.9876875,
+            "realtime_factor": 2.1288635743417306,
+            "segments": [
+              {
+                "start": 0.0,
+                "end": 2.44,
+                "text": "And so my fellow Americans,\nSo, my fellow Americans,"
+              },
+              {
+                "start": 3.08,
+                "end": 7.52,
+                "text": "ask not what your country can do for you,\ndo not ask what your country can do for you,"
+              },
+              {
+                "start": 7.96,
+                "end": 10.96,
+                "text": "ask what you can do for your country.\nask what you can do for your country."
+              }
+            ]
+          },
+          {
+            "iteration": 2,
+            "seconds": 23.36056484900007,
+            "audio_seconds": 10.9876875,
+            "realtime_factor": 2.126067459508661,
+            "segments": [
+              {
+                "start": 0.0,
+                "end": 2.44,
+                "text": "And so my fellow Americans,\nSo, my fellow Americans,"
+              },
+              {
+                "start": 3.08,
+                "end": 7.52,
+                "text": "ask not what your country can do for you,\ndo not ask what your country can do for you,"
+              },
+              {
+                "start": 7.96,
+                "end": 10.96,
+                "text": "ask what you can do for your country.\nask what you can do for your country."
+              }
+            ]
+          }
+        ]
+      },
+      "peak_rss_kib": 8340504
+    },
+    "f16": {
+      "arm": "f16",
+      "precision": "f16",
+      "load_seconds": 2.122595678000039,
+      "clips": {
+        "jfk": [
+          {
+            "iteration": 0,
+            "seconds": 19.677949621999915,
+            "audio_seconds": 11.0,
+            "realtime_factor": 1.7889045110909014,
+            "segments": [
+              {
+                "start": 0.0,
+                "end": 2.44,
+                "text": "And so my fellow Americans,\nSo, my fellow Americans,"
+              },
+              {
+                "start": 3.08,
+                "end": 7.52,
+                "text": "ask not what your country can do for you,\ndo not ask what your country can do for you,"
+              },
+              {
+                "start": 7.96,
+                "end": 11.0,
+                "text": "ask what you can do for your country.\nask what you can do for your country."
+              }
+            ]
+          },
+          {
+            "iteration": 1,
+            "seconds": 18.568743884000014,
+            "audio_seconds": 11.0,
+            "realtime_factor": 1.688067625818183,
+            "segments": [
+              {
+                "start": 0.0,
+                "end": 2.44,
+                "text": "And so my fellow Americans,\nSo, my fellow Americans,"
+              },
+              {
+                "start": 3.08,
+                "end": 7.52,
+                "text": "ask not what your country can do for you,\ndo not ask what your country can do for you,"
+              },
+              {
+                "start": 7.96,
+                "end": 11.0,
+                "text": "ask what you can do for your country.\nask what you can do for your country."
+              }
+            ]
+          },
+          {
+            "iteration": 2,
+            "seconds": 18.59327062300008,
+            "audio_seconds": 11.0,
+            "realtime_factor": 1.6902973293636436,
+            "segments": [
+              {
+                "start": 0.0,
+                "end": 2.44,
+                "text": "And so my fellow Americans,\nSo, my fellow Americans,"
+              },
+              {
+                "start": 3.08,
+                "end": 7.52,
+                "text": "ask not what your country can do for you,\ndo not ask what your country can do for you,"
+              },
+              {
+                "start": 7.96,
+                "end": 11.0,
+                "text": "ask what you can do for your country.\nask what you can do for your country."
+              }
+            ]
+          }
+        ],
+        "zh": [
+          {
+            "iteration": 0,
+            "seconds": 24.794505533000006,
+            "audio_seconds": 13.052,
+            "realtime_factor": 1.8996709724946375,
+            "segments": [
+              {
+                "start": 0.45,
+                "end": 4.57,
+                "text": "正是因为存在绝对正义，所以我们接受现实的相对正义。\nIt is precisely because absolute justice exists that we accept the relative justice of reality."
+              },
+              {
+                "start": 5.23,
+                "end": 7.45,
+                "text": "但是不要因为现实的相对正义，\nBut don't let the relative justice of reality"
+              },
+              {
+                "start": 7.45,
+                "end": 10.01,
+                "text": "我们就认为这个世界没有正义。\nmake us believe there is no justice in this world."
+              },
+              {
+                "start": 10.49,
+                "end": 12.92,
+                "text": "因为如果当你认为这个世界没有正义，\nBecause if you believe there is no justice in this world,"
+              }
+            ]
+          },
+          {
+            "iteration": 1,
+            "seconds": 24.68276157799994,
+            "audio_seconds": 13.052,
+            "realtime_factor": 1.8911095294207738,
+            "segments": [
+              {
+                "start": 0.45,
+                "end": 4.57,
+                "text": "正是因为存在绝对正义，所以我们接受现实的相对正义。\nIt is precisely because absolute justice exists that we accept the relative justice of reality."
+              },
+              {
+                "start": 5.23,
+                "end": 7.45,
+                "text": "但是不要因为现实的相对正义，\nBut don't let the relative justice of reality"
+              },
+              {
+                "start": 7.45,
+                "end": 10.01,
+                "text": "我们就认为这个世界没有正义。\nmake us believe there is no justice in this world."
+              },
+              {
+                "start": 10.49,
+                "end": 12.92,
+                "text": "因为如果当你认为这个世界没有正义，\nBecause if you believe there is no justice in this world,"
+              }
+            ]
+          },
+          {
+            "iteration": 2,
+            "seconds": 24.734325953999928,
+            "audio_seconds": 13.052,
+            "realtime_factor": 1.8950602171314685,
+            "segments": [
+              {
+                "start": 0.45,
+                "end": 4.57,
+                "text": "正是因为存在绝对正义，所以我们接受现实的相对正义。\nIt is precisely because absolute justice exists that we accept the relative justice of reality."
+              },
+              {
+                "start": 5.23,
+                "end": 7.45,
+                "text": "但是不要因为现实的相对正义，\nBut don't let the relative justice of reality"
+              },
+              {
+                "start": 7.45,
+                "end": 10.01,
+                "text": "我们就认为这个世界没有正义。\nmake us believe there is no justice in this world."
+              },
+              {
+                "start": 10.49,
+                "end": 12.92,
+                "text": "因为如果当你认为这个世界没有正义，\nBecause if you believe there is no justice in this world,"
+              }
+            ]
+          }
+        ],
+        "jfk-tail": [
+          {
+            "iteration": 0,
+            "seconds": 18.563835243000085,
+            "audio_seconds": 10.9876875,
+            "realtime_factor": 1.689512487773254,
+            "segments": [
+              {
+                "start": 0.0,
+                "end": 2.44,
+                "text": "And so my fellow Americans,\nSo, my fellow Americans,"
+              },
+              {
+                "start": 3.08,
+                "end": 7.52,
+                "text": "ask not what your country can do for you,\ndo not ask what your country can do for you,"
+              },
+              {
+                "start": 7.96,
+                "end": 10.96,
+                "text": "ask what you can do for your country.\nask what you can do for your country."
+              }
+            ]
+          },
+          {
+            "iteration": 1,
+            "seconds": 18.608025913000006,
+            "audio_seconds": 10.9876875,
+            "realtime_factor": 1.6935343231230418,
+            "segments": [
+              {
+                "start": 0.0,
+                "end": 2.44,
+                "text": "And so my fellow Americans,\nSo, my fellow Americans,"
+              },
+              {
+                "start": 3.08,
+                "end": 7.52,
+                "text": "ask not what your country can do for you,\ndo not ask what your country can do for you,"
+              },
+              {
+                "start": 7.96,
+                "end": 10.96,
+                "text": "ask what you can do for your country.\nask what you can do for your country."
+              }
+            ]
+          },
+          {
+            "iteration": 2,
+            "seconds": 18.569075489000056,
+            "audio_seconds": 10.9876875,
+            "realtime_factor": 1.6899894075982829,
+            "segments": [
+              {
+                "start": 0.0,
+                "end": 2.44,
+                "text": "And so my fellow Americans,\nSo, my fellow Americans,"
+              },
+              {
+                "start": 3.08,
+                "end": 7.52,
+                "text": "ask not what your country can do for you,\ndo not ask what your country can do for you,"
+              },
+              {
+                "start": 7.96,
+                "end": 10.96,
+                "text": "ask what you can do for your country.\nask what you can do for your country."
+              }
+            ]
+          }
+        ]
+      },
+      "peak_rss_kib": 5832092
+    },
+    "q8_0": {
+      "arm": "q8_0",
+      "precision": "q8_0",
+      "load_seconds": 3.036268457999995,
+      "clips": {
+        "jfk": [
+          {
+            "iteration": 0,
+            "seconds": 17.993291439000018,
+            "audio_seconds": 11.0,
+            "realtime_factor": 1.6357537671818199,
+            "segments": [
+              {
+                "start": 0.0,
+                "end": 2.44,
+                "text": "And so my fellow Americans,\nSo, my fellow Americans,"
+              },
+              {
+                "start": 3.08,
+                "end": 7.52,
+                "text": "ask not what your country can do for you,\ndo not ask what your country can do for you,"
+              },
+              {
+                "start": 7.96,
+                "end": 11.0,
+                "text": "ask what you can do for your country.\nask what you can do for your country."
+              }
+            ]
+          },
+          {
+            "iteration": 1,
+            "seconds": 17.580082464000043,
+            "audio_seconds": 11.0,
+            "realtime_factor": 1.5981893149090949,
+            "segments": [
+              {
+                "start": 0.0,
+                "end": 2.44,
+                "text": "And so my fellow Americans,\nSo, my fellow Americans,"
+              },
+              {
+                "start": 3.08,
+                "end": 7.52,
+                "text": "ask not what your country can do for you,\ndo not ask what your country can do for you,"
+              },
+              {
+                "start": 7.96,
+                "end": 11.0,
+                "text": "ask what you can do for your country.\nask what you can do for your country."
+              }
+            ]
+          },
+          {
+            "iteration": 2,
+            "seconds": 17.587741530000017,
+            "audio_seconds": 11.0,
+            "realtime_factor": 1.598885593636365,
+            "segments": [
+              {
+                "start": 0.0,
+                "end": 2.44,
+                "text": "And so my fellow Americans,\nSo, my fellow Americans,"
+              },
+              {
+                "start": 3.08,
+                "end": 7.52,
+                "text": "ask not what your country can do for you,\ndo not ask what your country can do for you,"
+              },
+              {
+                "start": 7.96,
+                "end": 11.0,
+                "text": "ask what you can do for your country.\nask what you can do for your country."
+              }
+            ]
+          }
+        ],
+        "zh": [
+          {
+            "iteration": 0,
+            "seconds": 22.571239312000102,
+            "audio_seconds": 13.052,
+            "realtime_factor": 1.7293318504443842,
+            "segments": [
+              {
+                "start": 0.45,
+                "end": 4.57,
+                "text": "正是因为存在绝对正义，所以我们接受现实的相对正义。\nIt is precisely because absolute justice exists that we accept the relative justice of reality."
+              },
+              {
+                "start": 5.23,
+                "end": 7.45,
+                "text": "但是不要因为现实的相对正义，\nBut don't let the relative justice of reality"
+              },
+              {
+                "start": 7.45,
+                "end": 10.01,
+                "text": "我们就认为这个世界没有正义。\nmake us believe there is no justice in this world."
+              },
+              {
+                "start": 10.49,
+                "end": 12.92,
+                "text": "因为如果当你认为这个世界没有正义，\nBecause if you believe there is no justice in this world,"
+              }
+            ]
+          },
+          {
+            "iteration": 1,
+            "seconds": 22.520732689000056,
+            "audio_seconds": 13.052,
+            "realtime_factor": 1.7254622041832712,
+            "segments": [
+              {
+                "start": 0.45,
+                "end": 4.57,
+                "text": "正是因为存在绝对正义，所以我们接受现实的相对正义。\nIt is precisely because absolute justice exists that we accept the relative justice of reality."
+              },
+              {
+                "start": 5.23,
+                "end": 7.45,
+                "text": "但是不要因为现实的相对正义，\nBut don't let the relative justice of reality"
+              },
+              {
+                "start": 7.45,
+                "end": 10.01,
+                "text": "我们就认为这个世界没有正义。\nmake us believe there is no justice in this world."
+              },
+              {
+                "start": 10.49,
+                "end": 12.92,
+                "text": "因为如果当你认为这个世界没有正义，\nBecause if you believe there is no justice in this world,"
+              }
+            ]
+          },
+          {
+            "iteration": 2,
+            "seconds": 22.48967874699997,
+            "audio_seconds": 13.052,
+            "realtime_factor": 1.7230829564051464,
+            "segments": [
+              {
+                "start": 0.45,
+                "end": 4.57,
+                "text": "正是因为存在绝对正义，所以我们接受现实的相对正义。\nIt is precisely because absolute justice exists that we accept the relative justice of reality."
+              },
+              {
+                "start": 5.23,
+                "end": 7.45,
+                "text": "但是不要因为现实的相对正义，\nBut don't let the relative justice of reality"
+              },
+              {
+                "start": 7.45,
+                "end": 10.01,
+                "text": "我们就认为这个世界没有正义。\nmake us believe there is no justice in this world."
+              },
+              {
+                "start": 10.49,
+                "end": 12.92,
+                "text": "因为如果当你认为这个世界没有正义，\nBecause if you believe there is no justice in this world,"
+              }
+            ]
+          }
+        ],
+        "jfk-tail": [
+          {
+            "iteration": 0,
+            "seconds": 17.561635601000035,
+            "audio_seconds": 10.9876875,
+            "realtime_factor": 1.5983013351080502,
+            "segments": [
+              {
+                "start": 0.0,
+                "end": 2.44,
+                "text": "And so my fellow Americans,\nSo, my fellow Americans,"
+              },
+              {
+                "start": 3.08,
+                "end": 7.52,
+                "text": "ask not what your country can do for you,\ndo not ask what your country can do for you,"
+              },
+              {
+                "start": 7.96,
+                "end": 10.96,
+                "text": "ask what you can do for your country.\nask what you can do for your country."
+              }
+            ]
+          },
+          {
+            "iteration": 1,
+            "seconds": 17.610297434000017,
+            "audio_seconds": 10.9876875,
+            "realtime_factor": 1.6027300952998542,
+            "segments": [
+              {
+                "start": 0.0,
+                "end": 2.44,
+                "text": "And so my fellow Americans,\nSo, my fellow Americans,"
+              },
+              {
+                "start": 3.08,
+                "end": 7.52,
+                "text": "ask not what your country can do for you,\ndo not ask what your country can do for you,"
+              },
+              {
+                "start": 7.96,
+                "end": 10.96,
+                "text": "ask what you can do for your country.\nask what you can do for your country."
+              }
+            ]
+          },
+          {
+            "iteration": 2,
+            "seconds": 17.59649317100002,
+            "audio_seconds": 10.9876875,
+            "realtime_factor": 1.6014737560564969,
+            "segments": [
+              {
+                "start": 0.0,
+                "end": 2.44,
+                "text": "And so my fellow Americans,\nSo, my fellow Americans,"
+              },
+              {
+                "start": 3.08,
+                "end": 7.52,
+                "text": "ask not what your country can do for you,\ndo not ask what your country can do for you,"
+              },
+              {
+                "start": 7.96,
+                "end": 10.96,
+                "text": "ask what you can do for your country.\nask what you can do for your country."
+              }
+            ]
+          }
+        ]
+      },
+      "peak_rss_kib": 4227692
+    }
+  },
+  "notes": [
+    "Transformers 5.6.0 retains nested text_config BF16 despite the requested F32 dtype.",
+    "Timings compare the actual released Python path with native F16/Q8, not equal arithmetic precision.",
+    "Each arm is a separate process on the same four-core Neoverse-N2 VM; GGML_NATIVE=OFF.",
+    "Three iterations per clip, in fixed python/F16/Q8 arm order; warm median uses iterations 1 and 2.",
+    "Peak RSS includes the Python process and tokenizer; first-clip source initialization is visible.",
+    "All timed iterations exactly reproduce the released direct-window fixture text and timestamps."
+  ]
+}

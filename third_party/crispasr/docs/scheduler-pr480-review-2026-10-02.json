@@ -1,0 +1,42 @@
+{
+  "status": "PASS",
+  "pr": 480,
+  "recommendation": "Do not merge as-is: useful cached-replay fix already shipped; unconditional disposal regresses recycled graph metadata.",
+  "pr_head": "65486c570b1c17b817b450c4aaa760effb576182",
+  "scheduler_commit": "3fcc67f9b90899f6be8b3a733fffff6b426e829a",
+  "existing_fix": "890278a8342c620197c90e702e1188bcab94f510",
+  "shared_ggml_pin": "2f5a80d258c46e6ac8eee95f1328c0f58376d7ee",
+  "already_in_release": "v0.8.40",
+  "tested_commit": "7100b5059",
+  "run": "https://github.com/CrispStrobe/CrispASR/actions/runs/36999971712",
+  "backend": "Vulkan0 / Mesa lavapipe (software Vulkan; no physical GPU or T3 model claim)",
+  "positive": {
+    "changed_input_computes": 10,
+    "source_restoration_checks": 10,
+    "recycled_graph_reset": "PASS",
+    "uncomputed_graph_reset": "PASS",
+    "max_abs_tolerance": 1e-06,
+    "reference": "independent elementwise F32 subtraction"
+  },
+  "negative_controls": [
+    {
+      "mutation": "remove cached source reapplication",
+      "result": "second-compute SIGBUS",
+      "exit_status": 135
+    },
+    {
+      "mutation": "unconditional source restoration at disposal, matching PR 480",
+      "result": "reset overwrites recycled metadata",
+      "exit_status": 1
+    }
+  ],
+  "source_sha256": {
+    "tests/test-ggml-scheduler-replay.cpp": "c2a8af673966a264e5f18d48ccbc1ff84a6318829a7725f33a8e367c48f9e51c",
+    "tools/ci-heavy/scheduler-replay/CMakeLists.txt": "d27695a193f0b6e14e6fe56ecd0d79822a9c38dd7f81d6ead2dbdb711b235d3f",
+    ".github/workflows/scheduler-replay-vulkan.yml": "7fc5f9fc2842f14231ca1cb5adc4b5d924b588d0a0d8a4f4ecb58f9e52af940d"
+  },
+  "limitations": [
+    "Focused scheduler correctness test; no T3 synthesis or hardware performance benchmark.",
+    "PR Windows workflow checks source strings and builds only; it is not runtime acceptance."
+  ]
+}

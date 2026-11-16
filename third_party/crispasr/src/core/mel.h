@@ -1,0 +1,267 @@
+// src/core/mel.h — shared log-mel spectrogram computation.
+//
+// Replaces the 9 copy-pasted mel spectrogram implementations across the
+// src/ model files (parakeet.cpp, canary.cpp, canary_ctc.cpp, cohere.cpp,
+// qwen3_asr.cpp, voxtral.cpp, voxtral4b.cpp, granite_speech.cpp,
+// crispasr). Two algorithm clusters are supported via enums:
+//
+//   NeMo / Conformer style  — ln + per-mel z-score, (T, n_mels) output
+//       used by parakeet, canary, canary_ctc, cohere
+//
+//   Whisper / HF style      — log10 + global clip (max-8+4)/4, (n_mels, T) output
+//       used by whisper, qwen3, voxtral, voxtral4b, granite
+//
+// The function is parameterised rather than having two entry points
+// because the STFT + mel projection steps are identical; only the log
+// base, normalization, and output transpose differ. Keeping them in one
+// code path means numerical differences between clusters stay localised
+// to the post-processing step, not the heavy computation.
+//
+// Models continue to own their own FFT function — it's passed in as a
+// function pointer so we don't have to unify the 9 near-identical
+// Cooley-Tukey implementations in this first pass. (They can be
+// consolidated in a follow-up; the win there is small compared to the
+// mel extraction itself.)
+
+#pragma once
+
+#include <cstdint>
+#include <vector>
+
+namespace core_mel {
+
+// Real-to-complex FFT callback signature. N is always a power of two.
+// Output layout: interleaved (re, im) pairs, length 2*N floats.
+// Each model passes its own FFT so we don't disturb numerical paths.
+using FftR2C = void (*)(const float* in, int N, float* out);
+
+enum class LogBase {
+    Ln,
+    Log10,
+
+    // Skip the log step entirely. The compute() output is the raw
+    // mel-projected spectrum (Power or Magnitude per spec_kind), with
+    // any post-processing (normalization, layout transpose) still
+    // applied. Used by the Resemble VoiceEncoder
+    // (chatterbox/models/voice_encoder/melspec.py — mel_type='amp':
+    // mel_basis @ |stft|^2 with no dB conversion). Pair with
+    // log_guard = MaxClip and log_eps = 0 to also disable the
+    // pre-log floor (which would otherwise raise small values to
+    // log_eps before the log step is even attempted).
+    None,
+};
+
+// What to project through the mel filterbank: |X|^2 (power) — Whisper /
+// most encoders — or |X| (magnitude) — HF Gemma4AudioFeatureExtractor.
+enum class SpecKind { Power, Magnitude };
+
+enum class Normalization {
+    // Per-mel band z-score across time: (x - mean) / sqrt(var + 1e-5).
+    // Used by parakeet / canary / canary_ctc / cohere.
+    PerFeatureZ,
+
+    // Global clip-and-scale: y = (max(x, max(x)-8) + 4) / 4.
+    // Used by whisper / qwen3 / voxtral / granite.
+    GlobalClipMax,
+
+    // Global clip with fixed ceiling (max-like value is baked into the
+    // normalization rather than computed): y = (max(x, fixed_max-8) + 4) / 4.
+    // Used by voxtral4b with fixed_max = 1.5.
+    GlobalClipFixed,
+
+    // No post-log normalization — raw log10(max(mel, mel_floor)) is the
+    // final feature. Used by Gemma4AudioFeatureExtractor (no per_bin_mean
+    // or per_bin_stddev, no whisper-style clip-and-scale).
+    None,
+};
+
+enum class Layout {
+    // Row-major (T, n_mels) — each frame's n_mels values contiguous.
+    // Used by the NeMo cluster.
+    TimeMels,
+
+    // Row-major (n_mels, T) — each mel band's full time series contiguous.
+    // Used by the HF/Whisper cluster.
+    MelsTime,
+};
+
+enum class LogGuard {
+    // log(x + log_eps): NeMo convention (parakeet, canary, canary_ctc, cohere).
+    AddEpsilon,
+
+    // log(max(x, log_eps)): HF / Whisper convention.
+    MaxClip,
+};
+
+enum class MatmulPrecision {
+    // Float32 accumulator. Fastest, matches NeMo numerical path.
+    Float,
+
+    // Float64 accumulator, promoted before multiply-add. Matches the
+    // HF / Whisper / Qwen3 / Voxtral numerical path which explicitly
+    // uses double for the mel projection.
+    Double,
+};
+
+// Filterbank storage layout in memory. Both are row-major floats.
+enum class FbLayout {
+    // [n_mels, n_freqs]: fb[m * n_freqs + k]. NeMo cluster.
+    MelsFreqs,
+
+    // [n_freqs, n_mels]: fb[k * n_mels + m]. HF / Whisper cluster
+    // (WhisperFeatureExtractor.mel_filters).
+    FreqsMels,
+};
+
+struct Params {
+    int n_fft = 400;      // power-of-two FFT size
+    int hop_length = 160; // frame stride in samples
+    int win_length = 400; // window length, must be <= n_fft
+    int n_mels = 128;
+
+    LogBase log_base = LogBase::Log10;
+    LogGuard log_guard = LogGuard::AddEpsilon;
+    SpecKind spec_kind = SpecKind::Power;
+    Normalization norm = Normalization::GlobalClipMax;
+    Layout layout = Layout::MelsTime;
+    FbLayout fb_layout = FbLayout::MelsFreqs;
+    MatmulPrecision matmul = MatmulPrecision::Float;
+
+    // Small positive constant used in the log guard:
+    //   AddEpsilon -> log(x + log_eps)
+    //   MaxClip    -> log(max(x, log_eps))
+    // NeMo uses 2^-24; Whisper uses 1e-10. Pass what the model originally used.
+    float log_eps = 1e-10f;
+
+    // For Normalization::GlobalClipFixed: the fixed ceiling used in place
+    // of the per-audio max. Ignored for other normalization modes.
+    float fixed_max = 1.5f;
+
+    // Apply symmetric padding of n_fft/2 samples before/after the input
+    // (matches torchaudio / NeMo center=True). Set false if the caller has
+    // already padded the input.
+    bool center_pad = true;
+
+    // Use reflect padding instead of zero padding for center_pad.
+    // torchaudio and librosa use reflect padding by default. NeMo uses zero padding.
+    bool center_pad_reflect = false;
+
+    // Pre-emphasis coefficient: x[i] -= preemph * x[i-1] applied BEFORE
+    // center-padding (so the first sample is preserved as-is, matching
+    // NeMo's `torch.cat((x[:,0:1], x[:,1:] - α*x[:,:-1]))`). 0 disables.
+    // NeMo's AudioToMelSpectrogramPreprocessor defaults to 0.97 and applies
+    // the filter at inference time. The HF / Whisper cluster does NOT
+    // apply pre-emphasis. Pass 0.97 for the NeMo cluster (parakeet,
+    // canary, canary_ctc, cohere if their preprocessor configs match).
+    float preemph = 0.0f;
+
+    // Drop the last STFT frame. Matches Whisper / HF feature extractor
+    // convention that produces floor((n - n_fft) / hop + 1) - 1 frames
+    // instead of the full count.
+    bool drop_last_frame = false;
+
+    // If (after drop_last_frame) the frame count is odd, also drop the
+    // first frame so the caller sees an even T. Used by voxtral4b, which
+    // feeds mel into a stride-2 conv and needs an even temporal length.
+    bool drop_first_frame_if_odd = false;
+
+    // Pad the mel output on the right so the final length is exactly this
+    // many frames. 0 disables. Voxtral 3B pads to 3000 (= 30s at hop=160).
+    //
+    // Padding happens AFTER the log step but BEFORE normalization, so the
+    // padded positions are filled with the log of log_eps (i.e. the value
+    // the log guard would produce for a zero-energy frame) rather than
+    // plain zero. This matches voxtral's behaviour where padded frames
+    // participate in the global-max calculation at a sensible floor.
+    int pad_to_T = 0;
+
+    // Stack `stacked_frames` consecutive mel frames into a single wider
+    // frame. With stacked_frames=2 the output goes from (T, n_mels) to
+    // (T/2, n_mels * 2) where row i is [mel[2i, :], mel[2i+1, :]]. If the
+    // frame count is not a multiple of stacked_frames the trailing
+    // remainder is dropped. Used by granite-speech's audio encoder which
+    // expects a (T/2, 160) input built from consecutive pairs of 80-mel
+    // frames. Default 1 (no stacking). Currently only supported with
+    // Layout::TimeMels; other layouts leave the knob ignored.
+    int stacked_frames = 1;
+
+    // Per-backend opt-in for the OpenMP-parallel STFT frame loop (§176f). The
+    // global env var CRISPASR_MEL_PARALLEL=1 enables it for everything; this
+    // flag lets a single backend turn it on by default once (a) its `fft`
+    // callable is confirmed re-entrant and (b) it has been benched faster on the
+    // target arch. AUDIT (2026-06-20): every in-tree fft callable is re-entrant
+    // — pure stack-only Cooley-Tukey (cohere/nemotron/parakeet/canary/canary_ctc),
+    // a captureless lambda (glm_asr), recursive-on-caller-buffer (qwen3_asr), or
+    // thread_local scratch (voxtral) — none use shared mutable state, so the
+    // parallel path is correctness-safe; the remaining gate is per-arch perf.
+    bool allow_parallel_stft = false;
+
+    // Thread budget for the parallel STFT. 0 (default) keeps the previous
+    // behaviour: the OpenMP path uses omp_get_max_threads() and the portable
+    // std::thread path uses min(hardware_concurrency, 8). A positive value caps
+    // both paths to that many threads WITHOUT mutating global OpenMP state —
+    // callers wanting a specific budget set this instead of omp_set_num_threads()
+    // (which races across concurrent callers of the shared OpenMP thread count).
+    int n_threads = 0;
+};
+
+// Compute log-mel spectrogram from raw PCM samples.
+//
+//   samples      : float32 PCM at the caller's sample rate (usually 16 kHz)
+//   n_samples    : sample count
+//   window       : float32[n_fft] Hann/Hamming window padded with zeros if
+//                  win_length < n_fft (caller's responsibility). When the
+//                  model stores only the win_length-sized window in its GGUF,
+//                  this helper pads it inside compute().
+//   mel_fb       : float32[n_mels * n_freqs] row-major filterbank with
+//                  n_freqs = n_fft/2 + 1
+//   fft          : model-specific FFT function pointer (see FftR2C above)
+//   params       : configuration (see Params struct)
+//   T_out [out]  : number of output frames
+//
+// Returns the flat log-mel buffer in the layout specified by params.layout.
+std::vector<float> compute(const float* samples, int n_samples,
+                           const float* window, // length win_length (we center-pad inside to n_fft)
+                           int win_length,
+                           const float* mel_fb, // [n_mels, n_freqs]
+                           int n_freqs, FftR2C fft, const Params& params, int& T_out);
+
+// HTK-mel-scale triangular filterbank builder. Matches torchaudio's
+// MelSpectrogram defaults (mel_scale='htk', norm=None) and the inline
+// builders that ecapa_lid / firered_vad / firered_asr / mimo_tokenizer
+// have copies of.
+//
+//   sr      : sample rate
+//   n_fft   : STFT size
+//   n_mels  : number of mel bands
+//   fmin    : low edge in Hz (use 0)
+//   fmax    : high edge in Hz; pass <= 0 for sr/2 (Nyquist)
+//   layout  : MelsFreqs ([n_mels, n_freqs] row-major) or
+//             FreqsMels ([n_freqs, n_mels] row-major).
+//
+// Returns a flat float32 vector with the requested layout, sized
+// n_mels * (n_fft/2+1).
+std::vector<float> build_htk_fb(int sr, int n_fft, int n_mels, float fmin, float fmax,
+                                FbLayout layout = FbLayout::MelsFreqs);
+
+// Slaney-mel-scale triangular filterbank builder with Slaney area
+// normalization. Matches `librosa.filters.mel(htk=False, norm='slaney')`
+// — the librosa default — used by Chatterbox's 24 kHz prompt-mel
+// (`chatterbox/models/s3gen/utils/mel.py:56`), the S3Tokenizer mel
+// (16 kHz, 128 bins), and any other model that takes its mel basis
+// from librosa without overriding the defaults.
+//
+// Differs from build_htk_fb() in two ways:
+//   1. Mel scale is the piecewise Slaney curve (linear below 1 kHz at
+//      200/3 Hz per mel, log above 1 kHz with logstep = ln(6.4)/27).
+//      vs HTK's single-formula 2595 * log10(1 + f/700).
+//   2. Slaney norm scales each triangular filter by 2/(f_hi - f_lo),
+//      so each filter has roughly equal area regardless of bandwidth.
+//      Without this, the higher-frequency wider filters would dominate
+//      the projection.
+//
+// Same arg semantics as build_htk_fb. Returns the same flat shape.
+std::vector<float> build_slaney_fb(int sr, int n_fft, int n_mels, float fmin, float fmax,
+                                   FbLayout layout = FbLayout::MelsFreqs);
+
+} // namespace core_mel

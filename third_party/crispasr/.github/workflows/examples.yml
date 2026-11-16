@@ -1,0 +1,61 @@
+name: Examples Tests
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - examples/addon.node/**
+      - crispasr.h
+      - .github/workflows/examples.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - examples/addon.node/**
+      - crispasr.h
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  addon_node-ubuntu-22:
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        node-version: [ 16.x, 18.x ]
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install build-essential git
+          sudo apt-get install cmake
+          sudo apt-get install libsdl2-dev
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Install package.json dependencies
+        working-directory: ./examples/addon.node
+        run: npm install
+
+      - name: Compile addon.node
+        # Pin cmake-js to the node-16/18-compatible 7.x line (matches the
+        # ^7.1.1 devDependency). This step runs from the repo root, where there
+        # is no local node_modules, so an unpinned `npx cmake-js` would fetch
+        # cmake-js@8 — which requires node >=20 and crashes on this matrix.
+        run: npx cmake-js@7 compile -T addon.node -B Release
+
+      - name: Download test model
+        run: |
+          bash ./models/download-ggml-model.sh base.en
+      - name: Test
+        run: |
+          cd examples/addon.node
+          npm run test

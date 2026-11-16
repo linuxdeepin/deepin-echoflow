@@ -1,0 +1,1123 @@
+#!/usr/bin/env python3
+"""
+Convert ResembleAI/chatterbox safetensors → GGUF for the CrispASR
+`chatterbox` backend.
+
+Chatterbox pipeline:
+  1. T3 (520M Llama AR) — text + conditioning → speech tokens @25 Hz
+  2. S3Gen — speech tokens → mel-spectrogram via CFM (flow matching)
+     - UpsampleConformerEncoder (6+4 blocks, 512D, 8 heads)
+     - ConditionalDecoder (UNet1D, 1 down + 12 mid + 1 up, 256 ch)
+     - Euler ODE solver, 10 steps, cosine schedule
+  3. HiFTGenerator — mel → 24 kHz waveform (F0 predictor + iSTFT)
+  4. VoiceEncoder — 3-layer LSTM, 256D speaker embedding
+  5. CAMPPlus — 192D x-vector for S3Gen speaker conditioning
+  6. S3Tokenizer — tokenizes reference audio (WhisperV2-style)
+
+Produces TWO GGUFs:
+  - chatterbox-t3.gguf   — T3 model + VE + character tokenizer + precomputed conds
+  - chatterbox-s3gen.gguf — S3Gen flow + HiFTGenerator + CAMPPlus + S3Tokenizer
+
+Usage:
+    python models/convert-chatterbox-to-gguf.py \\
+        --input /mnt/storage/chatterbox \\
+        --output-dir /mnt/storage/chatterbox
+
+    # or from HuggingFace:
+    python models/convert-chatterbox-to-gguf.py \\
+        --input ResembleAI/chatterbox \\
+        --output-dir .
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import struct
+import sys
+from pathlib import Path
+
+import numpy as np
+
+from chatterbox_paths import (
+    select_chatterbox_s3gen_checkpoint,
+    select_chatterbox_t3_checkpoint,
+    select_chatterbox_tokenizer,
+)
+
+try:
+    from gguf import GGUFWriter, GGMLQuantizationType
+except ImportError:
+    sys.exit("pip install gguf")
+
+try:
+    from safetensors import safe_open
+except ImportError:
+    sys.exit("pip install safetensors")
+
+try:
+    import torch
+except ImportError:
+    sys.exit("pip install torch")
+
+try:
+    from huggingface_hub import snapshot_download
+except ImportError:
+    snapshot_download = None
+
+
+# ── Architecture constants ──────────────────────────────────────────
+
+T3_HPARAMS = dict(
+    arch="chatterbox",
+    n_layers=30,
+    n_heads=16,
+    n_kv_heads=16,
+    hidden_size=1024,
+    intermediate_size=4096,
+    head_dim=64,
+    rms_norm_eps=1e-5,
+    rope_theta=500000.0,
+    rope_factor=8.0,
+    rope_high_freq_factor=4.0,
+    rope_low_freq_factor=1.0,
+    rope_original_max_pos=8192,
+    text_vocab_size=704,
+    speech_vocab_size=8194,
+    text_pos_emb_size=2050,
+    speech_pos_emb_size=4100,
+    start_text_token=255,
+    stop_text_token=0,
+    start_speech_token=6561,
+    stop_speech_token=6562,
+    speech_cond_prompt_len=150,
+    speaker_embed_size=256,
+    perceiver_n_queries=32,
+    perceiver_n_heads=4,
+)
+
+S3GEN_HPARAMS = dict(
+    # Conformer encoder
+    enc_n_layers=6,
+    enc_up_n_layers=4,
+    enc_hidden=512,
+    enc_heads=8,
+    enc_ffn=2048,
+    enc_head_dim=64,
+    # CFM decoder (UNet1D)
+    dec_in_channels=320,
+    dec_out_channels=80,
+    dec_channels=256,
+    dec_n_down=1,
+    dec_n_mid=12,
+    dec_n_up=1,
+    dec_n_blocks=4,  # transformer blocks per UNet block
+    dec_n_heads=8,
+    dec_head_dim=64,
+    # CFM solver
+    cfm_n_steps=10,
+    cfm_sigma_min=1e-6,
+    cfm_inference_cfg_rate=0.7,
+    # Vocoder (HiFTGenerator)
+    voc_upsample_rates="8,5,3",
+    voc_upsample_kernels="16,11,7",
+    voc_resblock_kernels="3,7,11",
+    voc_source_resblock_kernels="7,7,11",
+    voc_base_channels=512,
+    voc_istft_n_fft=16,
+    voc_istft_hop_len=4,
+    voc_nb_harmonics=8,
+    # Speaker encoder (CAMPPlus)
+    spk_enc_dim=192,
+    # S3Tokenizer
+    s3_vocab_size=6561,
+    s3_token_rate=25,
+    # mel
+    mel_channels=80,
+    sample_rate=24000,
+)
+
+VE_HPARAMS = dict(
+    ve_num_mels=40,
+    ve_hidden_size=256,
+    ve_n_layers=3,
+    ve_embed_size=256,
+    ve_sample_rate=16000,
+)
+
+KARTOFFELBOX_T3_HPARAMS = dict(
+    arch="chatterbox_turbo",
+    n_layers=24,
+    n_heads=16,
+    # GPT-2 is MHA, so n_kv_heads == n_heads. Written explicitly because
+    # the C++ default is 16 — correct for Turbo only by coincidence (#382).
+    n_kv_heads=16,
+    hidden_size=1024,
+    intermediate_size=4096,
+    head_dim=64,
+    text_vocab_size=50276,
+    speech_vocab_size=6563,
+    wpe_max_positions=8196,
+    speech_cond_prompt_len=375,
+    start_text_token=255,
+    stop_text_token=0,
+    start_speech_token=6561,
+    stop_speech_token=6562,
+    speaker_embed_size=256,
+)
+
+# Chatterbox Nano (#382): the same GPT-2 T3 pipeline as Turbo, backed by
+# upstream's GPT2_small config instead of GPT2_medium. Upstream inference
+# (tts_turbo.py from_local, nano=True) builds T3Config in code, so the
+# token ids / prompt length come from T3Config defaults — NOT from
+# t3_nano_v1.yaml, whose stop_text_token=50256 and cfg_weight=0.3 are
+# training-time artifacts that generate() never reads. s3gen_meanflow,
+# ve.safetensors and conds.pt are byte-identical to chatterbox-turbo
+# (same HF LFS oids), so only the T3 needs converting.
+NANO_T3_HPARAMS = dict(
+    KARTOFFELBOX_T3_HPARAMS,
+    n_layers=12,
+    n_heads=12,
+    n_kv_heads=12,
+    hidden_size=768,
+    intermediate_size=3072,
+)
+
+
+# ── Helpers ─────────────────────────────────────────────────────────
+
+def load_model_dir(model_id: str, revision: str | None = None) -> Path:
+    p = Path(model_id)
+    if p.is_dir():
+        return p
+    if snapshot_download is None:
+        sys.exit(f"Directory {model_id} not found and huggingface_hub not installed")
+    print(f"Downloading {model_id}…", file=sys.stderr)
+    return Path(snapshot_download(model_id, revision=revision, allow_patterns=[
+        "*.safetensors", "*.json", "*.pt", "tokenizer*",
+    ]))
+
+
+def denorm_weight_norm(original0, original1):
+    """Denormalize PyTorch weight_norm parametrization.
+    original0 is the magnitude (g), original1 is the direction (v).
+    weight = g * v / ||v||
+    """
+    # original0: (out_ch, 1, 1) or (out_ch,) — magnitude
+    # original1: (out_ch, in_ch, kernel) — direction
+    g = original0
+    v = original1
+    # Compute norm over all dims except first
+    norm_dims = tuple(range(1, v.ndim))
+    v_norm = torch.norm(v, dim=norm_dims, keepdim=True)
+    return (g * v / (v_norm + 1e-12))
+
+
+def load_safetensors(path: Path) -> dict:
+    """Load all tensors from a safetensors file, denormalizing weight_norm."""
+    tensors = {}
+    with safe_open(str(path), framework='pt') as f:
+        keys = list(f.keys())
+        # First pass: collect all tensors
+        raw = {}
+        for k in keys:
+            raw[k] = f.get_tensor(k)
+
+    # Second pass: denormalize weight_norm pairs
+    wn_bases = set()
+    for k in raw:
+        if '.parametrizations.weight.original0' in k:
+            base = k.replace('.parametrizations.weight.original0', '')
+            wn_bases.add(base)
+
+    for base in wn_bases:
+        o0 = raw.pop(f'{base}.parametrizations.weight.original0')
+        o1 = raw.pop(f'{base}.parametrizations.weight.original1')
+        raw[f'{base}.weight'] = denorm_weight_norm(o0, o1)
+
+    # Filter out non-weight tensors
+    for k, v in raw.items():
+        if k.endswith('.num_batches_tracked'):
+            continue
+        tensors[k] = v
+
+    return tensors
+
+
+def to_f16(t: torch.Tensor) -> np.ndarray:
+    """Convert tensor to float16 numpy array."""
+    return t.detach().to(torch.float16).numpy()
+
+
+def to_f32(t: torch.Tensor) -> np.ndarray:
+    """Convert tensor to float32 numpy array."""
+    return t.detach().to(torch.float32).numpy()
+
+
+def choose_dtype(name: str, shape: list, t: torch.Tensor):
+    """Choose F16 vs F32 for a tensor. Keep small/1D/embedding tensors as F32."""
+    n = np.prod(shape)
+    if t.ndim <= 1 or n < 256:
+        return to_f32(t), GGMLQuantizationType.F32
+    # Keep embedding/position tables and conditioning tensors as F32
+    # since they are read on CPU for embedding construction
+    keep_f32 = (
+        'emb.weight' in name or 'pos_emb.weight' in name or
+        'wpe.weight' in name or  # GPT-2 learned positional embeddings
+        'speech_head' in name or  # read on CPU for logit extraction
+        'cond.' in name or 'conds.' in name or
+        'perceiver.' in name or 've.' in name or
+        'input_embedding' in name or 'embed_affine' in name or
+        'encoder_proj' in name or 'embed.out' in name or
+        # Keep time MLP weights as F32 since they're read on CPU
+        'time_mlp' in name or 'time_emb' in name or
+        'tm.linear' in name or 'tmx.' in name or
+        'pla.' in name or  # pre-lookahead conv
+        'sa.lp' in name or 'sa.pb' in name or  # relative position attention weights
+        'sa.lq' in name or 'sa.lk' in name or  # Q/K/V/O projections — F16 causes
+        'sa.lv' in name or 'sa.lo' in name or   # cumulative error across 10 blocks
+        'ff.w_1' in name or 'ff.w_2' in name or # FFN weights (same reason)
+        'uemb.' in name or 'ul.' in name or     # upsample re-embed + conv
+
+        # Keep vocoder conv weights as F32 for precision
+        'cpre' in name or 'cpost' in name or
+        'ups.' in name or 'rb.' in name or 'srb.' in name or
+        'sd.' in name
+    )
+    if keep_f32:
+        return to_f32(t), GGMLQuantizationType.F32
+    return to_f16(t), GGMLQuantizationType.F16
+
+
+# ── T3 tensor name remapping ───────────────────────────────────────
+
+def map_t3_name(hf_name: str) -> str | None:
+    """Map T3 HF tensor name → GGUF tensor name."""
+    n = hf_name
+
+    # Llama backbone
+    n = n.replace("tfmr.embed_tokens.", "t3.llama_embd.")  # unused dummy
+    n = n.replace("tfmr.norm.", "t3.output_norm.")
+    n = n.replace("tfmr.layers.", "t3.blk.")
+    n = n.replace(".self_attn.q_proj.", ".attn_q.")
+    n = n.replace(".self_attn.k_proj.", ".attn_k.")
+    n = n.replace(".self_attn.v_proj.", ".attn_v.")
+    n = n.replace(".self_attn.o_proj.", ".attn_output.")
+    n = n.replace(".input_layernorm.", ".attn_norm.")
+    n = n.replace(".post_attention_layernorm.", ".ffn_norm.")
+    n = n.replace(".mlp.gate_proj.", ".ffn_gate.")
+    n = n.replace(".mlp.up_proj.", ".ffn_up.")
+    n = n.replace(".mlp.down_proj.", ".ffn_down.")
+
+    # Custom embeddings
+    n = n.replace("text_emb.", "t3.text_emb.")
+    n = n.replace("speech_emb.", "t3.speech_emb.")
+    n = n.replace("text_pos_emb.emb.", "t3.text_pos_emb.")
+    n = n.replace("speech_pos_emb.emb.", "t3.speech_pos_emb.")
+
+    # Heads
+    n = n.replace("text_head.", "t3.text_head.")
+    n = n.replace("speech_head.", "t3.speech_head.")
+
+    # Conditioning encoder
+    n = n.replace("cond_enc.spkr_enc.", "t3.cond.spkr_enc.")
+    n = n.replace("cond_enc.emotion_adv_fc.", "t3.cond.emotion_adv.")
+    n = n.replace("cond_enc.perceiver.", "t3.cond.perceiver.")
+
+    return n
+
+
+# ── Kartoffelbox T3 tensor name remapping ─────────────────────────
+
+def map_kartoffelbox_t3_name(hf_name: str) -> str | None:
+    """Map Kartoffelbox GPT-2 tensor name → GGUF tensor name."""
+    import re
+
+    n = hf_name
+
+    # Transformer backbone (GPT-2 naming)
+    n = n.replace("tfmr.wpe.weight", "t3.wpe.weight")
+    n = n.replace("tfmr.ln_f.weight", "t3.output_norm.weight")
+    n = n.replace("tfmr.ln_f.bias", "t3.output_norm.bias")
+
+    # Per-layer mappings
+    m = re.match(r'^tfmr\.h\.(\d+)\.(.+)$', n)
+    if m:
+        layer = m.group(1)
+        rest = m.group(2)
+        rest = rest.replace("ln_1.weight", "attn_norm.weight")
+        rest = rest.replace("ln_1.bias", "attn_norm.bias")
+        rest = rest.replace("attn.c_attn.weight", "attn_qkv.weight")
+        rest = rest.replace("attn.c_attn.bias", "attn_qkv.bias")
+        rest = rest.replace("attn.c_proj.weight", "attn_output.weight")
+        rest = rest.replace("attn.c_proj.bias", "attn_output.bias")
+        rest = rest.replace("ln_2.weight", "ffn_norm.weight")
+        rest = rest.replace("ln_2.bias", "ffn_norm.bias")
+        rest = rest.replace("mlp.c_fc.weight", "ffn_fc.weight")
+        rest = rest.replace("mlp.c_fc.bias", "ffn_fc.bias")
+        rest = rest.replace("mlp.c_proj.weight", "ffn_proj.weight")
+        rest = rest.replace("mlp.c_proj.bias", "ffn_proj.bias")
+        n = f"t3.blk.{layer}.{rest}"
+
+    # Custom embeddings
+    n = n.replace("text_emb.weight", "t3.text_emb.weight")
+    n = n.replace("speech_emb.weight", "t3.speech_emb.weight")
+
+    # Heads
+    n = n.replace("text_head.weight", "t3.text_head.weight")
+    if n == hf_name.replace("speech_head.weight", "t3.speech_head.weight"):
+        n = n  # already replaced or not matching
+    n = n.replace("speech_head.weight", "t3.speech_head.weight")
+    n = n.replace("speech_head.bias", "t3.speech_head.bias")
+
+    # Conditioning encoder
+    n = n.replace("cond_enc.spkr_enc.weight", "t3.cond.spkr_enc.weight")
+    n = n.replace("cond_enc.spkr_enc.bias", "t3.cond.spkr_enc.bias")
+
+    return n
+
+
+# ── S3Gen tensor name remapping ────────────────────────────────────
+
+def map_s3gen_name(hf_name: str) -> str | None:
+    """Map S3Gen HF tensor name → GGUF tensor name.
+    Abbreviate deep paths to stay under the 64-byte GGUF name limit."""
+    if hf_name.endswith('.num_batches_tracked'):
+        return None
+
+    n = hf_name
+    # Abbreviate the deep decoder paths
+    n = n.replace("flow.decoder.estimator.", "fd.")
+    n = n.replace("down_blocks", "db")
+    n = n.replace("mid_blocks", "mb")
+    n = n.replace("up_blocks", "ub")
+    n = n.replace("final_block", "fb")
+    n = n.replace("final_proj", "fp")
+    n = n.replace("time_embeddings", "te")
+    n = n.replace("time_mlp", "tm")
+    n = n.replace("time_embed_mixer", "tmx")
+    n = n.replace("block1.block", "b1")
+    n = n.replace("block2.block", "b2")
+    n = n.replace("res_conv", "rc")
+    n = n.replace("transformer_blocks", "tb")  # not used in current arch
+    n = n.replace("attn1.to_out.0", "attn1.o")
+    n = n.replace("attn1.to_", "attn1.")
+    n = n.replace("ff.net.0.proj", "ff.up")
+    n = n.replace("ff.net.2", "ff.down")
+    # Abbreviate speaker encoder paths
+    n = n.replace("speaker_encoder.", "se.")
+    n = n.replace("xvector.", "xv.")
+    n = n.replace("nonlinear.", "nl.")
+    n = n.replace("batchnorm", "bn")
+    n = n.replace("cam_layer.", "cam.")
+    n = n.replace("linear_local", "ll")
+    n = n.replace("linear1", "l1")
+    n = n.replace("linear2", "l2")
+    # Abbreviate conformer encoder paths
+    n = n.replace("flow.encoder.", "fe.")
+    n = n.replace("self_attn.", "sa.")
+    n = n.replace("feed_forward.", "ff.")
+    n = n.replace("pre_lookahead_layer.", "pla.")
+    n = n.replace("up_encoders", "ue")
+    n = n.replace("encoders", "enc")
+    n = n.replace("up_embed", "uemb")
+    n = n.replace("up_layer", "ul")
+    n = n.replace("after_norm", "an")
+    n = n.replace("norm_mha", "nmha")
+    n = n.replace("norm_ff", "nff")
+    n = n.replace("linear_out", "lo")
+    n = n.replace("linear_pos", "lp")
+    n = n.replace("linear_q", "lq")
+    n = n.replace("linear_k", "lk")
+    n = n.replace("linear_v", "lv")
+    n = n.replace("pos_bias_u", "pbu")
+    n = n.replace("pos_bias_v", "pbv")
+    # Abbreviate vocoder paths
+    n = n.replace("mel2wav.", "v.")
+    n = n.replace("conv_pre", "cpre")
+    n = n.replace("conv_post", "cpost")
+    n = n.replace("source_downs", "sd")
+    n = n.replace("source_resblocks", "srb")
+    n = n.replace("resblocks", "rb")
+    n = n.replace("activations1", "a1")
+    n = n.replace("activations2", "a2")
+    n = n.replace("convs1", "c1")
+    n = n.replace("convs2", "c2")
+    n = n.replace("condnet", "cn")
+    n = n.replace("f0_predictor.", "f0.")
+    n = n.replace("m_source.", "ms.")
+    n = n.replace("l_sin_gen.", "sg.")
+    n = n.replace("l_linear", "ll")
+    n = n.replace("l_tanh", "lt")
+    n = n.replace("classifier", "cls")
+    # S3Tokenizer paths
+    n = n.replace("tokenizer.", "tok.")
+    n = n.replace("quantizer.", "quant.")
+    n = n.replace("_codebook.", "cb.")
+    n = n.replace("encoder.blocks", "enc.b")
+    n = n.replace("fsmn_block", "fsmn")
+    n = n.replace("project_down", "pd")
+    n = n.replace("project_up", "pu")
+    # Common
+    n = n.replace("parametrizations.weight.", "pw.")
+
+    name = "s3." + n
+    if len(name) >= 64:
+        # Last resort: hash the overflow
+        import hashlib
+        h = hashlib.md5(hf_name.encode()).hexdigest()[:8]
+        name = f"s3.h.{h}"
+    return name
+
+
+# ── VE tensor name remapping ──────────────────────────────────────
+
+def map_ve_name(hf_name: str) -> str | None:
+    """Map VoiceEncoder HF tensor name → GGUF tensor name."""
+    return "ve." + hf_name
+
+
+# ── Write T3 GGUF ─────────────────────────────────────────────────
+
+def write_t3_gguf(
+    model_dir: Path,
+    output_path: Path,
+    conds_path: Path | None,
+    tokenizer_path: Path | None,
+    t3_filename: str | None = None,
+    source_revision: str | None = None,
+):
+    print(f"\n=== Writing T3 GGUF: {output_path} ===")
+
+    # ── Pre-load T3 to infer vocab size before writing hparams ──
+    t3_path = model_dir / t3_filename if t3_filename else select_chatterbox_t3_checkpoint(model_dir)
+    if not t3_path.exists():
+        sys.exit(f"Missing T3 weights (tried t3_mtl*.safetensors and t3_cfg.safetensors in {model_dir})")
+    print(f"  T3 weights: {t3_path.name}")
+    t3_tensors = load_safetensors(t3_path)
+
+    # Do not mutate the module-level defaults: converter functions are also
+    # exercised in-process by tests and tooling.
+    t3_hparams = dict(T3_HPARAMS)
+
+    # Infer text_vocab_size from the actual embedding (#170).
+    for emb_key in ["text_emb.weight", "text_embedding.weight"]:
+        if emb_key in t3_tensors:
+            actual_vocab = t3_tensors[emb_key].shape[0]
+            if actual_vocab != t3_hparams["text_vocab_size"]:
+                print(f"  text_vocab_size: {t3_hparams['text_vocab_size']} -> {actual_vocab} (from {emb_key})")
+                t3_hparams["text_vocab_size"] = actual_vocab
+            break
+
+    writer = GGUFWriter(str(output_path), "chatterbox")
+    writer.add_string("general.source.url", "https://huggingface.co/ResembleAI/chatterbox")
+    if source_revision:
+        writer.add_string("general.source.revision", source_revision)
+    writer.add_string("chatterbox.t3.checkpoint", t3_path.name)
+
+    # ── Hyperparameters (after vocab inference) ──
+    for k, v in t3_hparams.items():
+        key = f"chatterbox.t3.{k}"
+        if isinstance(v, int):
+            writer.add_uint32(key, v)
+        elif isinstance(v, float):
+            writer.add_float32(key, v)
+        elif isinstance(v, str):
+            writer.add_string(key, v)
+
+    # VE hparams (VE is in the T3 GGUF since it's tiny)
+    for k, v in VE_HPARAMS.items():
+        key = f"chatterbox.ve.{k}"
+        if isinstance(v, int):
+            writer.add_uint32(key, v)
+        elif isinstance(v, float):
+            writer.add_float32(key, v)
+
+    # ── Load and write base Chatterbox tokenizer ──
+    if tokenizer_path and tokenizer_path.exists():
+        with open(tokenizer_path, "r", encoding="utf-8") as f:
+            tok_data = json.load(f)
+        model = tok_data.get('model', {})
+        vocab = model.get('vocab')
+        if vocab:
+            max_id = max(vocab.values())
+            tokens = [""] * (max_id + 1)
+            for token, idx in vocab.items():
+                if idx < len(tokens):
+                    tokens[idx] = token
+            expected_vocab = int(t3_hparams["text_vocab_size"])
+            if len(tokens) != expected_vocab:
+                sys.exit(
+                    f"Tokenizer vocab size mismatch for {tokenizer_path.name}: "
+                    f"{len(tokens)} tokens vs T3 text_vocab_size={expected_vocab}. "
+                    "Use the tokenizer paired with the selected T3 checkpoint."
+                )
+            writer.add_array("tokenizer.ggml.tokens", tokens)
+            # Keep legacy field for older runtimes, but prefer tokenizer.ggml.tokens.
+            writer.add_array("chatterbox.t3.text_tokens", tokens)
+            print(f"  Tokenizer: {len(tokens)} tokens from {tokenizer_path.name}")
+
+            merges = model.get('merges', [])
+            if merges:
+                flat_merges = []
+                for m in merges:
+                    if isinstance(m, list) and len(m) == 2:
+                        flat_merges.append(f"{m[0]} {m[1]}")
+                    elif isinstance(m, str):
+                        flat_merges.append(m)
+                if flat_merges:
+                    writer.add_array("tokenizer.ggml.merges", flat_merges)
+                    print(f"  Merges: {len(flat_merges)} from tokenizer.json")
+
+    # ── Load and write precomputed conditioning ──
+    if conds_path and conds_path.exists():
+        conds = torch.load(conds_path, map_location='cpu', weights_only=False)
+        t3_cond = conds['t3']
+        gen_cond = conds['gen']
+
+        # T3 conditioning
+        if t3_cond.get('speaker_emb') is not None:
+            writer.add_tensor("conds.t3.speaker_emb",
+                              to_f32(t3_cond['speaker_emb']),
+                              raw_dtype=GGMLQuantizationType.F32)
+        if t3_cond.get('cond_prompt_speech_tokens') is not None:
+            tokens = t3_cond['cond_prompt_speech_tokens'].to(torch.int32).numpy()
+            writer.add_tensor("conds.t3.speech_prompt_tokens", tokens,
+                              raw_dtype=GGMLQuantizationType.I32)
+        if t3_cond.get('emotion_adv') is not None:
+            writer.add_float32("chatterbox.conds.emotion_adv",
+                               float(t3_cond['emotion_adv'].item()))
+
+        # S3Gen conditioning (stored in T3 GGUF for convenience)
+        if gen_cond.get('prompt_token') is not None:
+            tokens = gen_cond['prompt_token'].to(torch.int32).numpy()
+            writer.add_tensor("conds.gen.prompt_token", tokens,
+                              raw_dtype=GGMLQuantizationType.I32)
+        if gen_cond.get('prompt_token_len') is not None:
+            writer.add_uint32("chatterbox.conds.gen_prompt_token_len",
+                              int(gen_cond['prompt_token_len'].item()))
+        if gen_cond.get('prompt_feat') is not None:
+            writer.add_tensor("conds.gen.prompt_feat",
+                              to_f32(gen_cond['prompt_feat']),
+                              raw_dtype=GGMLQuantizationType.F32)
+        if gen_cond.get('embedding') is not None:
+            writer.add_tensor("conds.gen.embedding",
+                              to_f32(gen_cond['embedding']),
+                              raw_dtype=GGMLQuantizationType.F32)
+        print(f"  Precomputed conds loaded")
+
+    # T3 tensors already loaded above (pre-hparams vocab inference)
+    n_t3 = 0
+    for hf_name, tensor in sorted(t3_tensors.items()):
+        gguf_name = map_t3_name(hf_name)
+        if gguf_name is None:
+            continue
+        data, dtype = choose_dtype(gguf_name, list(tensor.shape), tensor)
+        writer.add_tensor(gguf_name, data, raw_dtype=dtype)
+        n_t3 += 1
+    print(f"  T3: {n_t3} tensors")
+
+    # ── Load VE weights ──
+    ve_path = model_dir / "ve.safetensors"
+    if ve_path.exists():
+        ve_tensors = load_safetensors(ve_path)
+        n_ve = 0
+        for hf_name, tensor in sorted(ve_tensors.items()):
+            gguf_name = map_ve_name(hf_name)
+            if gguf_name is None:
+                continue
+            data, dtype = choose_dtype(gguf_name, list(tensor.shape), tensor)
+            writer.add_tensor(gguf_name, data, raw_dtype=dtype)
+            n_ve += 1
+        print(f"  VE: {n_ve} tensors")
+
+    writer.write_header_to_file()
+    writer.write_kv_data_to_file()
+    writer.write_tensors_to_file()
+    writer.close()
+    print(f"  Written: {output_path} ({output_path.stat().st_size / 1e6:.1f} MB)")
+
+
+# ── Write Chatterbox-Turbo T3 GGUF ────────────────────────────────
+
+def write_turbo_t3_gguf(
+    model_dir: Path,
+    output_path: Path,
+    conds_path: Path | None,
+    t3_filename: str = "t3_turbo_v1.safetensors",
+    hparams: dict | None = None,
+):
+    """Convert Chatterbox-Turbo/Nano T3 (GPT-2 from safetensors) + conds + VE."""
+    print(f"\n=== Writing Turbo-family T3 GGUF: {output_path} ===")
+    if hparams is None:
+        hparams = KARTOFFELBOX_T3_HPARAMS
+
+    writer = GGUFWriter(str(output_path), "chatterbox")
+
+    # ── Hyperparameters ──
+    for k, v in hparams.items():
+        key = f"chatterbox.t3.{k}"
+        if isinstance(v, int):
+            writer.add_uint32(key, v)
+        elif isinstance(v, float):
+            writer.add_float32(key, v)
+        elif isinstance(v, str):
+            writer.add_string(key, v)
+
+    # VE hparams
+    for k, v in VE_HPARAMS.items():
+        key = f"chatterbox.ve.{k}"
+        if isinstance(v, int):
+            writer.add_uint32(key, v)
+        elif isinstance(v, float):
+            writer.add_float32(key, v)
+
+    # ── GPT-2 BPE tokenizer from local vocab.json + merges.txt ──
+    vocab_path = model_dir / "vocab.json"
+    merges_path = model_dir / "merges.txt"
+    if vocab_path.exists():
+        import json as _json
+        with open(vocab_path, encoding="utf-8") as f:
+            vocab = _json.load(f)
+        # #181: the turbo tokenizer's special tokens (e.g. [laugh], [whispering],
+        # [angry] — the 19 emotion/style controls) live in added_tokens.json at
+        # ids past the base BPE vocab (50257..50275), NOT in vocab.json. The old
+        # path read only vocab.json (50257) while the T3 text embedding is 50276,
+        # so the embedded tokenizer was 19 short — a baked-in vocab mismatch that
+        # v0.8.0's loader rejected. Merge added_tokens.json so the tokens array
+        # covers the full text_vocab_size.
+        added = {}
+        added_path = model_dir / "added_tokens.json"
+        if added_path.exists():
+            with open(added_path, encoding="utf-8") as f:
+                added = _json.load(f)  # {token_str: id}
+        max_id = max([max(vocab.values())] + list(added.values()))
+        tokens = [""] * (max_id + 1)
+        for tok_str, tok_id in vocab.items():
+            tokens[tok_id] = tok_str
+        for tok_str, tok_id in added.items():
+            if 0 <= tok_id < len(tokens):
+                tokens[tok_id] = tok_str
+        writer.add_array("tokenizer.ggml.tokens", tokens)
+        if added:
+            print(f"  Tokenizer: {len(tokens)} tokens from vocab.json + {len(added)} added_tokens.json")
+        else:
+            print(f"  Tokenizer: {len(tokens)} tokens from vocab.json")
+
+        if merges_path.exists():
+            merges = []
+            with open(merges_path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        merges.append(line)
+            writer.add_array("tokenizer.ggml.merges", merges)
+            print(f"  Merges: {len(merges)} from merges.txt")
+    else:
+        # Fallback: get from transformers
+        try:
+            from transformers import GPT2TokenizerFast
+            gpt2_tok = GPT2TokenizerFast.from_pretrained('gpt2')
+            vocab = gpt2_tok.get_vocab()
+            max_id = max(vocab.values())
+            tokens = [""] * (max_id + 1)
+            for tok_str, tok_id in vocab.items():
+                tokens[tok_id] = tok_str
+            writer.add_array("tokenizer.ggml.tokens", tokens)
+            import json as _json
+            tok_json = _json.loads(gpt2_tok.backend_tokenizer.to_str())
+            raw_merges = tok_json.get('model', {}).get('merges', [])
+            merges = []
+            for m in raw_merges:
+                if isinstance(m, list) and len(m) == 2:
+                    merges.append(f"{m[0]} {m[1]}")
+                elif isinstance(m, str):
+                    merges.append(m)
+            if merges:
+                writer.add_array("tokenizer.ggml.merges", merges)
+            print(f"  GPT-2 tokenizer from transformers: {len(tokens)} tokens, {len(merges)} merges")
+        except ImportError:
+            print("  WARNING: no tokenizer (no vocab.json and transformers not installed)")
+
+    # ── Precomputed conditioning ──
+    if conds_path and conds_path.exists():
+        conds = torch.load(conds_path, map_location='cpu', weights_only=False)
+        t3_cond = conds['t3']
+        gen_cond = conds['gen']
+
+        if t3_cond.get('speaker_emb') is not None:
+            writer.add_tensor("conds.t3.speaker_emb",
+                              to_f32(t3_cond['speaker_emb']),
+                              raw_dtype=GGMLQuantizationType.F32)
+        if t3_cond.get('cond_prompt_speech_tokens') is not None:
+            tokens = t3_cond['cond_prompt_speech_tokens'].to(torch.int32).numpy()
+            writer.add_tensor("conds.t3.speech_prompt_tokens", tokens,
+                              raw_dtype=GGMLQuantizationType.I32)
+        if t3_cond.get('emotion_adv') is not None:
+            writer.add_float32("chatterbox.conds.emotion_adv",
+                               float(t3_cond['emotion_adv'].item()))
+        if gen_cond.get('prompt_token') is not None:
+            tokens = gen_cond['prompt_token'].to(torch.int32).numpy()
+            writer.add_tensor("conds.gen.prompt_token", tokens,
+                              raw_dtype=GGMLQuantizationType.I32)
+        if gen_cond.get('prompt_token_len') is not None:
+            writer.add_uint32("chatterbox.conds.gen_prompt_token_len",
+                              int(gen_cond['prompt_token_len'].item()))
+        if gen_cond.get('prompt_feat') is not None:
+            writer.add_tensor("conds.gen.prompt_feat",
+                              to_f32(gen_cond['prompt_feat']),
+                              raw_dtype=GGMLQuantizationType.F32)
+        if gen_cond.get('embedding') is not None:
+            writer.add_tensor("conds.gen.embedding",
+                              to_f32(gen_cond['embedding']),
+                              raw_dtype=GGMLQuantizationType.F32)
+        print(f"  Precomputed conds loaded")
+
+    # ── T3 weights from safetensors (GPT-2 Conv1D — need transpose) ──
+    t3_path = model_dir / t3_filename
+    if not t3_path.exists():
+        sys.exit(f"Missing {t3_path}")
+    t3_tensors = load_safetensors(t3_path)
+
+    conv1d_weight_keys = {
+        'attn.c_attn.weight', 'attn.c_proj.weight',
+        'mlp.c_fc.weight', 'mlp.c_proj.weight',
+    }
+
+    n_t3 = 0
+    for hf_name, tensor in sorted(t3_tensors.items()):
+        gguf_name = map_kartoffelbox_t3_name(hf_name)
+        if gguf_name is None:
+            continue
+        if gguf_name == hf_name:
+            continue
+        for ck in conv1d_weight_keys:
+            if hf_name.endswith(ck):
+                tensor = tensor.t().contiguous()
+                break
+        data, dtype = choose_dtype(gguf_name, list(tensor.shape), tensor)
+        writer.add_tensor(gguf_name, data, raw_dtype=dtype)
+        n_t3 += 1
+    print(f"  T3 (Turbo GPT-2): {n_t3} tensors")
+
+    # ── VE weights ──
+    ve_path = model_dir / "ve.safetensors"
+    if ve_path.exists():
+        ve_tensors = load_safetensors(ve_path)
+        n_ve = 0
+        for hf_name, tensor in sorted(ve_tensors.items()):
+            gguf_name = map_ve_name(hf_name)
+            if gguf_name is None:
+                continue
+            data, dtype = choose_dtype(gguf_name, list(tensor.shape), tensor)
+            writer.add_tensor(gguf_name, data, raw_dtype=dtype)
+            n_ve += 1
+        print(f"  VE: {n_ve} tensors")
+
+    writer.write_header_to_file()
+    writer.write_kv_data_to_file()
+    writer.write_tensors_to_file()
+    writer.close()
+    print(f"  Written: {output_path} ({output_path.stat().st_size / 1e6:.1f} MB)")
+
+
+# ── Write Kartoffelbox T3 GGUF ────────────────────────────────────
+
+def write_kartoffelbox_t3_gguf(
+    model_dir: Path,
+    output_path: Path,
+    conds_path: Path | None = None,
+):
+    print(f"\n=== Writing Kartoffelbox T3 GGUF: {output_path} ===")
+
+    writer = GGUFWriter(str(output_path), "chatterbox")
+
+    # ── Hyperparameters ──
+    for k, v in KARTOFFELBOX_T3_HPARAMS.items():
+        key = f"chatterbox.t3.{k}"
+        if isinstance(v, int):
+            writer.add_uint32(key, v)
+        elif isinstance(v, float):
+            writer.add_float32(key, v)
+        elif isinstance(v, str):
+            writer.add_string(key, v)
+
+    # ── Embed GPT-2 BPE tokenizer ──
+    try:
+        from transformers import GPT2TokenizerFast
+        gpt2_tok = GPT2TokenizerFast.from_pretrained('gpt2')
+        vocab = gpt2_tok.get_vocab()
+        # Build token list ordered by ID
+        max_id = max(vocab.values())
+        tokens = [""] * (max_id + 1)
+        for tok_str, tok_id in vocab.items():
+            tokens[tok_id] = tok_str
+        writer.add_array("tokenizer.ggml.tokens", tokens)
+        # Get merges from the tokenizer's backend
+        merges = []
+        try:
+            import json as _json
+            tok_json = _json.loads(gpt2_tok.backend_tokenizer.to_str())
+            raw_merges = tok_json.get('model', {}).get('merges', [])
+            # Merges are [left, right] pairs — join to "left right" strings
+            for m in raw_merges:
+                if isinstance(m, list) and len(m) == 2:
+                    merges.append(f"{m[0]} {m[1]}")
+                elif isinstance(m, str):
+                    merges.append(m)
+        except Exception:
+            pass
+        if merges:
+            writer.add_array("tokenizer.ggml.merges", merges)
+            print(f"  GPT-2 tokenizer: {len(tokens)} tokens, {len(merges)} merges")
+        else:
+            print(f"  GPT-2 tokenizer: {len(tokens)} tokens (no merges — BPE will fall back to char-level)")
+    except ImportError:
+        print("  WARNING: transformers not installed — no GPT-2 tokenizer embedded")
+
+    # ── Load weights from model.pt ──
+    model_path = model_dir / "model.pt"
+    if not model_path.exists():
+        sys.exit(f"Missing {model_path}")
+
+    print(f"  Loading {model_path}...")
+    raw = torch.load(str(model_path), map_location='cpu', weights_only=True)
+
+    # GPT-2 Conv1D stores weights as (in, out) unlike nn.Linear's (out, in).
+    # ggml_mul_mat expects nn.Linear convention, so transpose Conv1D weights.
+    conv1d_weight_keys = {
+        'attn.c_attn.weight',  # (1024, 3072) → (3072, 1024)
+        'attn.c_proj.weight',  # (1024, 1024) → same (square)
+        'mlp.c_fc.weight',     # (1024, 4096) → (4096, 1024)
+        'mlp.c_proj.weight',   # (4096, 1024) → (1024, 4096)
+    }
+
+    n_t3 = 0
+    for hf_name, tensor in sorted(raw.items()):
+        gguf_name = map_kartoffelbox_t3_name(hf_name)
+        if gguf_name is None:
+            continue
+        if gguf_name == hf_name:
+            print(f"  SKIP (unmapped): {hf_name}")
+            continue
+        # Transpose Conv1D weights from (in, out) to (out, in)
+        for ck in conv1d_weight_keys:
+            if hf_name.endswith(ck):
+                tensor = tensor.t().contiguous()
+                break
+        data, dtype = choose_dtype(gguf_name, list(tensor.shape), tensor)
+        writer.add_tensor(gguf_name, data, raw_dtype=dtype)
+        n_t3 += 1
+    print(f"  T3 (Kartoffelbox GPT-2): {n_t3} tensors")
+
+    # ── Precomputed conditioning (shared with turbo base) ──
+    if conds_path and conds_path.exists():
+        conds = torch.load(conds_path, map_location='cpu', weights_only=False)
+        t3_cond = conds['t3']
+        gen_cond = conds['gen']
+        if t3_cond.get('speaker_emb') is not None:
+            writer.add_tensor("conds.t3.speaker_emb",
+                              to_f32(t3_cond['speaker_emb']),
+                              raw_dtype=GGMLQuantizationType.F32)
+        if t3_cond.get('cond_prompt_speech_tokens') is not None:
+            tokens = t3_cond['cond_prompt_speech_tokens'].to(torch.int32).numpy()
+            writer.add_tensor("conds.t3.speech_prompt_tokens", tokens,
+                              raw_dtype=GGMLQuantizationType.I32)
+        if t3_cond.get('emotion_adv') is not None:
+            writer.add_float32("chatterbox.conds.emotion_adv",
+                               float(t3_cond['emotion_adv'].item()))
+        if gen_cond.get('prompt_token') is not None:
+            tokens = gen_cond['prompt_token'].to(torch.int32).numpy()
+            writer.add_tensor("conds.gen.prompt_token", tokens,
+                              raw_dtype=GGMLQuantizationType.I32)
+        if gen_cond.get('prompt_token_len') is not None:
+            writer.add_uint32("chatterbox.conds.gen_prompt_token_len",
+                              int(gen_cond['prompt_token_len'].item()))
+        if gen_cond.get('prompt_feat') is not None:
+            writer.add_tensor("conds.gen.prompt_feat",
+                              to_f32(gen_cond['prompt_feat']),
+                              raw_dtype=GGMLQuantizationType.F32)
+        if gen_cond.get('embedding') is not None:
+            writer.add_tensor("conds.gen.embedding",
+                              to_f32(gen_cond['embedding']),
+                              raw_dtype=GGMLQuantizationType.F32)
+        print(f"  Precomputed conds loaded")
+
+    writer.write_header_to_file()
+    writer.write_kv_data_to_file()
+    writer.write_tensors_to_file()
+    writer.close()
+    print(f"  Written: {output_path} ({output_path.stat().st_size / 1e6:.1f} MB)")
+
+
+# ── Write S3Gen GGUF ──────────────────────────────────────────────
+
+def write_s3gen_gguf(
+    model_dir: Path,
+    output_path: Path,
+    s3gen_filename: str | None = None,
+    source_revision: str | None = None,
+):
+    print(f"\n=== Writing S3Gen GGUF: {output_path} ===")
+
+    writer = GGUFWriter(str(output_path), "chatterbox-s3gen")
+
+    # ── Hyperparameters ──
+    for k, v in S3GEN_HPARAMS.items():
+        key = f"chatterbox.s3gen.{k}"
+        if isinstance(v, int):
+            writer.add_uint32(key, v)
+        elif isinstance(v, float):
+            writer.add_float32(key, v)
+        elif isinstance(v, str):
+            writer.add_string(key, v)
+
+    # ── Load S3Gen weights ──
+    if s3gen_filename is None:
+        s3gen_path = select_chatterbox_s3gen_checkpoint(model_dir)
+    else:
+        s3gen_path = model_dir / s3gen_filename
+    if not s3gen_path.exists():
+        sys.exit(f"Missing {s3gen_path}")
+    writer.add_string("general.source.url", "https://huggingface.co/ResembleAI/chatterbox")
+    if source_revision:
+        writer.add_string("general.source.revision", source_revision)
+    writer.add_string("chatterbox.s3gen.checkpoint", s3gen_path.name)
+    s3gen_tensors = load_safetensors(s3gen_path)
+
+    # Group by component for reporting
+    counts = {"flow": 0, "mel2wav": 0, "speaker_encoder": 0, "tokenizer": 0}
+
+    for hf_name, tensor in sorted(s3gen_tensors.items()):
+        gguf_name = map_s3gen_name(hf_name)
+        if gguf_name is None:
+            continue
+
+        # Track counts
+        for prefix in counts:
+            if hf_name.startswith(prefix):
+                counts[prefix] += 1
+                break
+
+        data, dtype = choose_dtype(gguf_name, list(tensor.shape), tensor)
+        writer.add_tensor(gguf_name, data, raw_dtype=dtype)
+
+    for comp, n in counts.items():
+        print(f"  {comp}: {n} tensors")
+    print(f"  Total: {sum(counts.values())} tensors")
+
+    writer.write_header_to_file()
+    writer.write_kv_data_to_file()
+    writer.write_tensors_to_file()
+    writer.close()
+    print(f"  Written: {output_path} ({output_path.stat().st_size / 1e6:.1f} MB)")
+
+
+# ── Main ──────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(description="Convert Chatterbox to GGUF")
+    parser.add_argument("--input", required=True,
+                        help="HF repo ID or local directory with safetensors")
+    parser.add_argument("--output-dir", required=True,
+                        help="Output directory for GGUF files")
+    parser.add_argument("--variant", default=None, choices=["kartoffelbox", "turbo", "nano"],
+                        help="Model variant (turbo = Chatterbox-Turbo base, nano = Chatterbox-Nano, "
+                             "kartoffelbox = Kartoffelbox fine-tune)")
+    parser.add_argument("--t3-only", action="store_true",
+                        help="Only convert T3 model")
+    parser.add_argument("--s3gen-only", action="store_true",
+                        help="Only convert S3Gen model")
+    parser.add_argument("--t3-checkpoint", default="t3_mtl23ls_v3.safetensors",
+                        help="Multilingual T3 checkpoint filename (default: production V3)")
+    parser.add_argument("--s3gen-checkpoint", default="s3gen.safetensors",
+                        help="S3Gen checkpoint filename (default: production V3 pairing)")
+    parser.add_argument("--revision", default=None,
+                        help="Pinned Hugging Face revision (also embedded as GGUF provenance)")
+    parser.add_argument("--output-prefix", default="chatterbox",
+                        help="Output filename prefix (for example: chatterbox-v3)")
+    args = parser.parse_args()
+
+    model_dir = load_model_dir(args.input, revision=args.revision)
+    out_dir = Path(args.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.variant == "kartoffelbox":
+        # Kartoffelbox shares conds with turbo base — check both locations
+        conds_path = model_dir / "conds.pt"
+        if not conds_path.exists():
+            turbo_base = model_dir.parent / "chatterbox_turbo_base" / "conds.pt"
+            if turbo_base.exists():
+                conds_path = turbo_base
+        write_kartoffelbox_t3_gguf(
+            model_dir,
+            out_dir / "kartoffelbox-turbo-t3-f16.gguf",
+            conds_path if conds_path.exists() else None,
+        )
+        print("\nDone!")
+        return
+
+    if args.variant == "nano":
+        # Chatterbox Nano (#382): only the T3 differs from Turbo. The
+        # s3gen_meanflow / ve / conds files in ResembleAI/chatterbox-nano
+        # are byte-identical to ResembleAI/chatterbox-turbo, so the
+        # existing chatterbox-turbo S3Gen GGUF is reused as companion.
+        conds_path = model_dir / "conds.pt"
+        write_turbo_t3_gguf(
+            model_dir,
+            out_dir / "chatterbox-nano-t3-f16.gguf",
+            conds_path if conds_path.exists() else None,
+            t3_filename="t3_nano_v1.safetensors",
+            hparams=NANO_T3_HPARAMS,
+        )
+        print("\nDone! (S3Gen not converted — Nano reuses the Turbo S3Gen verbatim.)")
+        return
+
+    if args.variant == "turbo":
+        # Chatterbox-Turbo: GPT-2 T3 from safetensors + meanflow S3Gen
+        conds_path = model_dir / "conds.pt"
+        if not args.s3gen_only:
+            write_turbo_t3_gguf(
+                model_dir,
+                out_dir / "chatterbox-turbo-t3-f16.gguf",
+                conds_path if conds_path.exists() else None,
+            )
+        if not args.t3_only:
+            # Use s3gen_meanflow if available, else s3gen
+            s3gen_name = "s3gen_meanflow.safetensors"
+            if not (model_dir / s3gen_name).exists():
+                s3gen_name = "s3gen.safetensors"
+            write_s3gen_gguf(
+                model_dir,
+                out_dir / "chatterbox-turbo-s3gen-f16.gguf",
+                s3gen_filename=s3gen_name,
+            )
+        print("\nDone!")
+        return
+
+    conds_path = model_dir / "conds.pt"
+    tokenizer_path = select_chatterbox_tokenizer(model_dir)
+
+    if not args.s3gen_only:
+        write_t3_gguf(
+            model_dir,
+            out_dir / f"{args.output_prefix}-t3-f16.gguf",
+            conds_path if conds_path.exists() else None,
+            tokenizer_path if tokenizer_path.exists() else None,
+            t3_filename=args.t3_checkpoint,
+            source_revision=args.revision,
+        )
+
+    if not args.t3_only:
+        write_s3gen_gguf(
+            model_dir,
+            out_dir / f"{args.output_prefix}-s3gen-f16.gguf",
+            s3gen_filename=args.s3gen_checkpoint,
+            source_revision=args.revision,
+        )
+
+    print("\nDone!")
+
+
+if __name__ == "__main__":
+    main()

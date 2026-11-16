@@ -1,0 +1,17 @@
+{
+  "id": "${KAGGLE_ACCOUNT}/crispasr-sidon-quant-cuda",
+  "title": "CrispASR sidon quant cuda",
+  "code_file": "sidon_quant_cuda.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_internet": "true",
+  "competition_sources": [],
+  "dataset_sources": [
+    "${KAGGLE_ACCOUNT}/crispasr-hf-token"
+  ],
+  "kernel_sources": [],
+  "model_sources": [],
+  "machine_shape": "GPU_T4_X2"
+}

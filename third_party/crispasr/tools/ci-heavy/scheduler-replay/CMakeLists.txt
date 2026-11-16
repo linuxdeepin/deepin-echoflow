@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.16)
+project(scheduler_replay LANGUAGES C CXX)
+set(GGML_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(GGML_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+add_subdirectory(../../../ggml ggml)
+add_executable(scheduler-replay ../../../tests/test-ggml-scheduler-replay.cpp)
+target_link_libraries(scheduler-replay PRIVATE ggml ggml-cpu ggml-vulkan)
+target_compile_features(scheduler-replay PRIVATE cxx_std_17)

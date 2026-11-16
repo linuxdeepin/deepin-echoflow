@@ -1,0 +1,1490 @@
+{
+  "_comment": "Per-backend regression pins. Each entry pins (a) the GGUF under test to a specific HF revision SHA so an upstream re-quantise doesn't silently regress us, and (b) the reference-dump archive in cstr/crispasr-regression-fixtures (also pinned). See tests/regression/README.md. Entries with skip_diff=true run transcript-only checks (no ref dump needed yet); see README for the fast-track workflow.",
+  "version": 1,
+  "fixtures": {
+    "repo": "cstr/crispasr-regression-fixtures",
+    "revision": "cb678dfd4806778aa55c39fe7b7a710a54cdc153",
+    "_note": "Pinned. To re-bake, run `tools/kaggle-regression.py` with MODE=rebake UPLOAD=1; the new commit SHA gets pasted here as a reviewable diff. Previous: 99f005d59a0f7f4915dea5faea4d2e17b2120268 (2026-05-17). Bumped 2026-05-25 after Kaggle rebake v13 published 9 ref archives — adds parakeet-tdt-1.1b, parakeet-tdt_ctc-1.1b, parakeet-rnnt-0.6b, parakeet-rnnt-1.1b (all NEW from handover-prompts/extend-coverage-via-kaggle.md realistic goal); refreshes canary-1b-v2, moonshine-tiny/base, parakeet-tdt-0.6b-{en,ja}. Bumped 2026-09-27 from b61b03014b: adds sensevoice-small, paraformer-zh, funasr-nano jfk_11s refs (copied from the #436 final rebake in the dataset repo of the same name). Nothing removed. Bumped 2026-09-28 from e5781ed4f8: Kaggle rebake batches 4-6 (parakeet-tdt-0.6b-en, parakeet-tdt_ctc-1.1b, granite-speech-4.1-2b, qwen3-asr-0.6b, kyutai-stt-1b, mini-omni2, nemotron-3.5-asr-streaming-0.6b, wav2vec2-xlsr-en, hubert-large, data2vec-base, omniasr-ctc-1b-v2, fastconformer-ctc-large). Bumped 2026-09-28 from cafce827fc: adds cohere-transcribe/jfk_11s/ref.gguf (fresh rebake). Bumped 2026-09-30 from fe509cca: adds Phonon-2 JFK and LibriSpeech reference/audio fixtures only; no existing fixture changed. Bumped 2026-10-01 from cf16f45941: adds independent Index-Echo 2B CPU F32-tower/BF16-decoder JFK, Chinese and partial-hop stage/cache references; no existing fixture changed. Bumped 2026-10-01 from 0f4ac3b0c0: adds separate explicitly F32-decoder Index-Echo diagnostic refs and both source full-pipeline captures/dtype audit; original mixed-precision refs unchanged. Bumped 2026-10-02: corrected independent original-generation 9B F32 stage/cache references, complete natural Chinese-context F32 file oracle and pinned real Piper roundtrip WAVs. Existing 2B and other backend fixtures retained; rejected stress remains separate."
+  },
+  "backends": [
+    {
+      "name": "parakeet-tdt-0.6b-ja",
+      "backend_id": "parakeet",
+      "source_model": "nvidia/parakeet-tdt_ctc-0.6b-ja",
+      "source_model_note": "HF id passed to NeMo's ASRModel.from_pretrained() by tools/reference_backends/parakeet.py. Only needed for re-bake (Kaggle); the nightly validate path doesn't touch source weights.",
+      "gguf": {
+        "repo": "cstr/parakeet-tdt-0.6b-ja-GGUF",
+        "revision": "fd1963a153f09c883662624a8ac2fbf57c97a98d",
+        "file": "parakeet-tdt-0.6b-ja.gguf",
+        "approx_size_mb": 530
+      },
+      "fixture_sample_path": "parakeet-tdt-0.6b-ja/reazon_baseball_14s/audio.wav",
+      "_sample_note": "Sample WAVs live in the fixtures HF repo rather than the source tree; samples/.gitignore excludes them by default to keep the repo small.",
+      "expected_transcript": "ピッチャーの岡本は1回戦の鳥取城北戦は8回、6対33点リードの場面で3人目でマウンドに上がりました。 はきょう先発の石川。",
+      "expected_transcript_source": "RE-BAKED after the auto-VAD safe-window fix (crispasr_run.cpp, #89). HF revision fd1963a, M1 Metal CPU+BLAS, decode_temperature=0, deterministic across 4 runs. NOT the human ground-truth (ground_truth.srt reads 山本 / Yamamoto vs the model's 岡本 / Okamoto). Lock-in is for regression, not correctness. WHY RE-BAKED: the previous value was captured on commit 3a9b294c via a FULL 14.06 s single pass — i.e. past parakeet-ja's ~12 s safe window (#89), the degraded path the auto-VAD gate is meant to prevent. That capture missed the clip's second utterance. Post-fix the run is VAD-sliced: segment 1 (00:03.220-00:12.420) reproduces the old reference byte-for-byte and ends at exactly the ground-truth SRT's 00:12.420, and segment 2 (00:13.100-00:13.900, 'はきょう先発の石川。') is a distinct speech region silero VAD detects independently — real speech the single-subtitle SRT simply doesn't annotate, NOT the 'hallucinated trailing sentence' the pre-fix degraded path made it look like.",
+      "fixture_ref_path": "parakeet-tdt-0.6b-ja/reazon_baseball_14s/ref.gguf",
+      "diff_thresholds": {
+        "encoder_output": 0.999,
+        "encoder_output_ref_mel": 0.999,
+        "mel_spectrogram": 0.999
+      },
+      "diff_thresholds_note": "mel_spectrogram tightened from 0.95 to 0.999 after drop_last_frame fix (commit 07cfcff). NeMo ref needs rebake to clip mel to feat_len; current ref has one extra frame that the comparison truncates.",
+      "transcript_tolerance": {
+        "cer_max": 0.1,
+        "wer_max": 1.0,
+        "transcript_tolerance_note": "CJK: WER is degenerate (no whitespace) so the gate is CER. cer_max=0.10 tolerates minor kanji/punct decode variance. KEEP IT TIGHT — 0.30 was a prior band-aid that masked a real defect, and 0.10 is what surfaced it. That defect is now FIXED, not tolerated: JA clips in the 12-30 s gap skipped the #89 auto-VAD safeguard (gated on the unrelated 30 s long-audio constant) and ran a degraded full single pass, which hallucinated a leading sentence and misread '6対3' as '0失点' (cer 0.68). crispasr_run.cpp now gates auto-VAD on the backend's own vad_slice_cap_seconds(); the fixture decodes at cer 0.00 against the re-baked reference."
+      },
+      "transcript_tolerance_note": "Wide tolerance — GH runner decode diverges significantly from Kaggle T4",
+      "stage_threshold_default": 0.9995,
+      "stage_threshold_note": "Gates encoder_layer_* / pre_encode_output. GH CPU Sep 24-26: every stage >= 0.999997."
+    },
+    {
+      "name": "moonshine-tiny",
+      "backend_id": "moonshine",
+      "source_model": "usefulsensors/moonshine-tiny",
+      "source_model_note": "HF id for tools/reference_backends/moonshine.py. Only needed for re-bake.",
+      "gguf": {
+        "repo": "cstr/moonshine-tiny-GGUF",
+        "revision": "28281de882bac021e9241e640f44a9a289607e03",
+        "file": "moonshine-tiny.gguf",
+        "approx_size_mb": 104,
+        "_file_note": "F16 GGUF used for diff regression (cos=1.000 vs PyTorch). The q4_k variant uses Q4_0 for attn weights, giving cos_min~0.79 — not suitable for diff. Transcript is identical between F16 and Q4K.",
+        "companion_files": [
+          "tokenizer.bin"
+        ]
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "And so my fellow Americans ask not what your country can do for you, ask what you can do for your country.",
+      "expected_transcript_source": "captured 2026-05-15 with HF revision 28281de, CPU-only, samples/jfk.wav (11s JFK speech)",
+      "fixture_ref_path": "moonshine-tiny/jfk_11s/ref.gguf",
+      "diff_thresholds": {
+        "encoder_output": 0.999
+      },
+      "diff_thresholds_note": "F16 GGUF vs PyTorch reference gives cos_min=1.000. Threshold set at 0.999 to absorb any future F16 rounding."
+    },
+    {
+      "name": "moonshine-base",
+      "backend_id": "moonshine",
+      "source_model": "usefulsensors/moonshine-base",
+      "source_model_note": "HF id for tools/reference_backends/moonshine.py. Only needed for re-bake.",
+      "gguf": {
+        "repo": "cstr/moonshine-base-GGUF",
+        "revision": "bfb1ef9865b9f83f35f050ab03e5e9ddaf736b7b",
+        "file": "moonshine-base.gguf",
+        "approx_size_mb": 234,
+        "_file_note": "F16 GGUF used for diff regression (cos=1.000 vs PyTorch). The q4_k variant uses Q4_0 for attn weights, giving cos_min~0.83 — not suitable for diff.",
+        "companion_files": [
+          "tokenizer.bin"
+        ]
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "And so my fellow Americans ask not what your country can do for you ask what you can do for your country",
+      "expected_transcript_source": "captured 2026-05-15 with HF revision bfb1ef9, CPU-only, samples/jfk.wav (moonshine-base F16 greedy, no comma or trailing period — model-deterministic)",
+      "fixture_ref_path": "moonshine-base/jfk_11s/ref.gguf",
+      "diff_thresholds": {
+        "encoder_output": 0.999
+      },
+      "diff_thresholds_note": "F16 GGUF vs PyTorch reference gives cos_min=1.000. Threshold 0.999 for headroom."
+    },
+    {
+      "name": "moonshine-streaming-tiny",
+      "backend_id": "moonshine-streaming",
+      "gguf": {
+        "repo": "cstr/moonshine-streaming-tiny-GGUF",
+        "revision": "56e0ac359fe5b44674cb4f6e8adee0b4f2baaec1",
+        "file": "moonshine-streaming-tiny.gguf",
+        "approx_size_mb": 169,
+        "companion_files": [
+          "tokenizer.bin"
+        ],
+        "_file_note": "F32 GGUF used for diff regression (cos_min=1.000 vs GGUF-direct reference). The q4_k variant is also available for transcript testing."
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "ANd so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country..",
+      "expected_transcript_source": "captured 2026-05-15 with HF revision 56e0ac3, CPU-only, samples/jfk.wav. Note: leading 'ANd' capitalisation and trailing '..' are model-deterministic output, not a bug.",
+      "fixture_ref_path": "moonshine-streaming-tiny/jfk_11s/ref.gguf",
+      "diff_thresholds": {
+        "encoder_output": 0.999
+      },
+      "diff_thresholds_note": "F32 GGUF vs GGUF-direct Python reference gives cos_min=1.000. Threshold 0.999 for headroom.",
+      "source_model": "UsefulSensors/moonshine-streaming-tiny",
+      "source_model_note": "Added 2026-09-07 to unblock the Kaggle rebake, which refused every entry with 'manifest entry has no source_model'. Taken from this model's own published GGUF card in hf_readmes/ where one exists, otherwise HEADed against the HF API before being written — a fuzzy card match had produced granite-speech-4.1-2b -> granite-speech-3.2-8b, which is wrong and was caught by printing which card each id came from."
+    },
+    {
+      "name": "parakeet-tdt-0.6b-en",
+      "backend_id": "parakeet",
+      "skip_diff": false,
+      "source_model": "nvidia/parakeet-tdt-0.6b-v3",
+      "gguf": {
+        "repo": "cstr/parakeet-tdt-0.6b-v3-GGUF",
+        "revision": "815cc1bcb5cfb92f9cd0bbd22c7bc2f6e2d4ec13",
+        "file": "parakeet-tdt-0.6b-v3-q4_k.gguf",
+        "approx_size_mb": 466
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country.",
+      "expected_transcript_source": "captured 2026-05-15 with HF revision 815cc1b, CPU-only, samples/jfk.wav",
+      "fixture_ref_path": "parakeet-tdt-0.6b-en/ref.gguf",
+      "diff_gguf": {
+        "file": "parakeet-tdt-0.6b-v3.gguf"
+      },
+      "diff_thresholds": {
+        "mel_spectrogram": 0.999,
+        "encoder_output": 0.999
+      },
+      "stage_threshold_default": 0.999,
+      "stage_threshold_note": "Kaggle validate 2026-09-28: all 28 stages >= 0.999914 after the absent-xscaling fix 6814698f (encoder was 0.594)."
+    },
+    {
+      "name": "phonon2",
+      "backend_id": "parakeet",
+      "reference_backend": "phonon2",
+      "source_model": "FermionResearch/Phonon-2",
+      "gguf": {
+        "repo": "cstr/phonon2-GGUF",
+        "revision": "3ed3e6ad6e7ce63affffeede37328ff756efaa2f",
+        "file": "phonon2-q8_0.gguf",
+        "approx_size_mb": 674
+      },
+      "fixture_sample_path": "phonon2/jfk/audio.wav",
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "And so my fellow Americans, ask not what your country can do for you, ask what you can do for your country.",
+      "expected_transcript_source": "Independent upstream container reader + stock Transformers ParakeetForTDT; F16/Q8/Q4 CPU CLI/C ABI JFK exact, 2026-09-30 (#481).",
+      "fixture_ref_path": "phonon2/jfk/ref.gguf",
+      "diff_gguf": {
+        "file": "phonon2-f16.gguf"
+      },
+      "diff_thresholds": {
+        "mel_spectrogram": 0.999,
+        "encoder_output": 0.999
+      },
+      "stage_threshold_default": 0.999,
+      "stage_threshold_note": "All 28 F16 compared JFK stages pass, minimum cosine 0.999996, norm-ratio error bounded by 0.065%; Q8 default has one word edit versus reference across the broader 21-clip conversion check."
+    },
+    {
+      "name": "canary-1b-v2",
+      "backend_id": "canary",
+      "source_model": "nvidia/canary-1b-v2",
+      "source_model_note": "HF id for tools/reference_backends/canary.py. Only needed for re-bake.",
+      "gguf": {
+        "repo": "cstr/canary-1b-v2-GGUF",
+        "revision": "b3715a517928f8f68833142c90fc5810ad583210",
+        "file": "canary-1b-v2.gguf",
+        "approx_size_mb": 1900,
+        "_file_note": "F16 GGUF used for diff regression (cos_min=0.999280 vs NeMo). The q4_k variant diverges too much for diff."
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country.",
+      "expected_transcript_source": "captured 2026-05-17 with HF revision b3715a5, CPU-only, samples/jfk.wav",
+      "fixture_ref_path": "canary-1b-v2/jfk_11s/ref.gguf",
+      "diff_thresholds": {
+        "encoder_output": 0.999,
+        "mel_spectrogram": 0.999,
+        "pre_encode_output": 0.999
+      },
+      "diff_thresholds_note": "F16 GGUF vs NeMo reference with dither=0 and drop_last_frame. mel cos=1.0, encoder cos=0.999280. Layers 18-19 are F16 near-misses (0.9977/0.9988).",
+      "transcript_tolerance": {
+        "cer_max": 0.12,
+        "wer_max": 0.15
+      },
+      "transcript_tolerance_note": "Widened — GH runner decode drift exceeds narrow tolerance",
+      "stage_threshold_default": 0.99,
+      "stage_threshold_note": "Gates every captured stage without an explicit threshold (encoder_layer_*, pre_enc_c*, encoder_output_ref_mel). GH CPU Sep 24-26: layers 0-17 >= 0.999996, 18-31 dip to 0.998967 (layer 18) - F16 accumulation through the deep stack, stable across nights. Lowered 0.998 -> 0.99 on 2026-10-06: with the ggml v0.26.0 sync the x86 CI runner measured layer 18 at 0.997703 and layer 19 at 0.998941 - the same 0.9977/0.9988 near-miss pair diff_thresholds_note already records for this model - with every other stage and the transcript unchanged, and all 41 stages passing on CUDA. 0.99 is the maintainer's stated floor for these per-layer gates. pre_enc_c* were negative before the harness layout fix 3bc9f1ac."
+    },
+    {
+      "name": "firered-asr2-aed",
+      "backend_id": "firered-asr",
+      "source_model": "FireRedTeam/FireRedASR2-AED",
+      "source_model_note": "HF id for tools/reference_backends/firered_asr.py. Only needed for re-bake.",
+      "gguf": {
+        "repo": "cstr/firered-asr2-aed-GGUF",
+        "revision": "076633a711b3b0f1a5e04ee43b2a9748cde253bd",
+        "file": "firered-asr2-aed.gguf",
+        "approx_size_mb": 2300,
+        "_file_note": "F32 GGUF used for diff regression (cos_min=0.999515). The q4_k variant diverges too much."
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "AND SO MY FELLOW AMERICANS, ASK NOT WHAT YOUR COUNTRY CAN DO FOR YOU, ASK WHAT YOU CAN DO FOR YOUR COUNTRY.",
+      "expected_transcript_source": "re-baked 2026-07-13 from nightly run 29232149677 (ubuntu-x86 OpenBLAS CI); word-identical to the prior CPU capture (WER=0), differs only in decode-tie punctuation/case",
+      "fixture_ref_path": "firered-asr2-aed/jfk_11s/ref.gguf",
+      "diff_thresholds": {
+        "encoder_output": 0.999,
+        "mel_spectrogram": 0.999
+      },
+      "diff_thresholds_note": "F32 GGUF vs Python reference with int16-scaled Kaldi fbank. mel cos=0.999224, encoder cos=0.999515."
+    },
+    {
+      "name": "glm-asr-nano",
+      "backend_id": "glm-asr",
+      "source_model": "THUDM/glm-4-voice-tokenizer",
+      "source_model_note": "HF id for tools/reference_backends/glm_asr.py. Only needed for re-bake.",
+      "gguf": {
+        "repo": "cstr/glm-asr-nano-GGUF",
+        "revision": "0eed3da3582c7cbabd7c7206ca7e7925a3ac49a5",
+        "file": "glm-asr-nano.gguf",
+        "approx_size_mb": 4300,
+        "_file_note": "F32 GGUF used for diff regression (cos_min=1.000). The q4_k/q8_0 variants diverge."
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country",
+      "expected_transcript_source": "re-baked 2026-07-13 from nightly run 29232149677 (ubuntu-x86 OpenBLAS CI); word-identical to the prior CPU capture (WER=0), differs only in decode-tie punctuation/case",
+      "transcript_tolerance": {
+        "cer_max": 0.02,
+        "wer_max": 0.05
+      },
+      "transcript_tolerance_note": "glm-asr-nano's LLM-style decoder ties on score-boundary punctuation/case ('you. Ask' vs 'you, ask') — the encoder+mel checks BOTH pass at cos=1.000 (model weights are identical) but a runner/library upgrade can nudge a softmax score by 1e-7 and flip a decode tie. 2% CER / 5% WER catches real regressions (missing/wrong words, language confusion) while tolerating cosmetic decode drift. Other backends keep the tighter byte-equal bar by omitting this field.",
+      "fixture_ref_path": "glm-asr-nano/jfk_11s/ref.gguf",
+      "diff_thresholds": {
+        "encoder_output": 0.999,
+        "mel_spectrogram": 0.999
+      },
+      "diff_thresholds_note": "F32 GGUF vs Python reference gives cos_min=1.000 for both mel and encoder."
+    },
+    {
+      "name": "cohere-transcribe",
+      "backend_id": "cohere",
+      "skip_diff": true,
+      "_skip_diff_note": "Repinned 2026-09-28: the old repo cstr/cohere-transcribe-GGUF is gone (404); the model now lives in cstr/cohere-transcribe-03-2026-GGUF (public, what the model registry uses). Ref rebake pending.",
+      "gguf": {
+        "repo": "cstr/cohere-transcribe-03-2026-GGUF",
+        "revision": "77234fcd7f77d271e5fc57f14fb05f260275558c",
+        "file": "cohere-transcribe-q4_k.gguf",
+        "approx_size_mb": 1500
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country.",
+      "expected_transcript_source": "captured 2026-05-15 with HF revision b9bcdb1, CPU-only, samples/jfk.wav",
+      "source_model": "CohereLabs/cohere-transcribe-03-2026",
+      "source_model_note": "Added 2026-09-07 to unblock the Kaggle rebake, which refused every entry with 'manifest entry has no source_model'. Taken from this model's own published GGUF card in hf_readmes/ where one exists, otherwise HEADed against the HF API before being written — a fuzzy card match had produced granite-speech-4.1-2b -> granite-speech-3.2-8b, which is wrong and was caught by printing which card each id came from."
+    },
+    {
+      "name": "granite-speech-4.1-2b",
+      "backend_id": "granite",
+      "skip_diff": false,
+      "gguf": {
+        "repo": "cstr/granite-speech-4.1-2b-GGUF",
+        "revision": "7ee888f67b68fd6a25af5903ca5b3829ca32c215",
+        "file": "granite-speech-4.1-2b-q4_k.gguf",
+        "approx_size_mb": 2806
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "and so, my fellow americans, ask not what your country can do for you, ask what you can do for your country.",
+      "expected_transcript_source": "re-baked 2026-07-13 from nightly run 29232149677 (ubuntu-x86 OpenBLAS CI); word-identical to the prior CPU capture (WER=0), differs only in decode-tie punctuation/case",
+      "source_model": "ibm-granite/granite-speech-4.1-2b",
+      "source_model_note": "Added 2026-09-07 to unblock the Kaggle rebake, which refused every entry with 'manifest entry has no source_model'. Taken from this model's own published GGUF card in hf_readmes/ where one exists, otherwise HEADed against the HF API before being written — a fuzzy card match had produced granite-speech-4.1-2b -> granite-speech-3.2-8b, which is wrong and was caught by printing which card each id came from.",
+      "fixture_ref_path": "granite-speech-4.1-2b/ref.gguf",
+      "diff_gguf": {
+        "file": "granite-speech-4.1-2b-f16.gguf"
+      },
+      "diff_thresholds": {
+        "mel_spectrogram": 0.999,
+        "encoder_out": 0.999
+      },
+      "stage_threshold_default": 0.999,
+      "stage_threshold_note": "Kaggle validate 2026-09-28 (CPU, F16 diff): transcript + every stage >= 0.99973."
+    },
+    {
+      "name": "parakeet-tdt-1.1b",
+      "backend_id": "parakeet",
+      "skip_diff": false,
+      "source_model": "nvidia/parakeet-tdt-1.1b",
+      "gguf": {
+        "repo": "cstr/parakeet-tdt-1.1b-GGUF",
+        "revision": "1eeefb7d078c63d3afc62972d34fc9fe07415663",
+        "file": "parakeet-tdt-1.1b-q8_0.gguf",
+        "approx_size_mb": 1213
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country.",
+      "expected_transcript_source": "captured 2026-06-15 VPS CPU with parakeet-tdt-1.1b-q8_0",
+      "fixture_ref_path": "parakeet-tdt-1.1b/ref.gguf",
+      "diff_gguf": {
+        "file": "parakeet-tdt-1.1b.gguf"
+      },
+      "diff_thresholds": {
+        "mel_spectrogram": 0.999,
+        "pre_encode_output": 0.999,
+        "encoder_output": 0.999
+      },
+      "stage_threshold_default": 0.999,
+      "stage_threshold_note": "Diff on the full-precision GGUF; Kaggle CPU 2026-09-27: every stage >= 0.99999. Revision repinned: the old pin 1d406d87 predates the q8_0 file (added by the 2026-07-11 requantize), so the entry could never download."
+    },
+    {
+      "name": "parakeet-tdt_ctc-1.1b",
+      "backend_id": "parakeet",
+      "skip_diff": true,
+      "_skip_diff_note": "Rebake-pending for diff; transcript captured 2026-06-15.",
+      "skip_preflight": true,
+      "source_model": "nvidia/parakeet-tdt_ctc-1.1b",
+      "gguf": {
+        "repo": "cstr/parakeet-tdt_ctc-1.1b-GGUF",
+        "revision": "6ced2ca0551aa68a892f3e7ffe83369082522617",
+        "file": "parakeet-tdt_ctc-1.1b-q8_0.gguf",
+        "approx_size_mb": 1215
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country.",
+      "expected_transcript_source": "captured 2026-06-15 VPS CPU with parakeet-tdt_ctc-1.1b-q8_0"
+    },
+    {
+      "name": "parakeet-rnnt-0.6b",
+      "backend_id": "parakeet",
+      "skip_diff": false,
+      "source_model": "nvidia/parakeet-rnnt-0.6b",
+      "gguf": {
+        "repo": "cstr/parakeet-rnnt-0.6b-GGUF",
+        "revision": "7a582b3f5ff014c7c9efe45b00685cff4c130ad6",
+        "file": "parakeet-rnnt-0.6b-q4_k.gguf",
+        "approx_size_mb": 447
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "and so my fellow americans ask not what your country can do for you ask what you can do for your country",
+      "expected_transcript_source": "captured 2026-06-15 VPS CPU with parakeet-rnnt-0.6b-q4_k",
+      "fixture_ref_path": "parakeet-rnnt-0.6b/ref.gguf",
+      "diff_gguf": {
+        "file": "parakeet-rnnt-0.6b-f16.gguf"
+      },
+      "diff_thresholds": {
+        "mel_spectrogram": 0.999,
+        "pre_encode_output": 0.999,
+        "encoder_output": 0.999
+      },
+      "stage_threshold_default": 0.999,
+      "stage_threshold_note": "Diff on the F16 GGUF (diff_gguf); Kaggle CPU 2026-09-27: every stage >= 0.99999 on F16, vs 0.95 on the pinned q4_k."
+    },
+    {
+      "name": "parakeet-rnnt-1.1b",
+      "backend_id": "parakeet",
+      "skip_diff": false,
+      "source_model": "nvidia/parakeet-rnnt-1.1b",
+      "gguf": {
+        "repo": "cstr/parakeet-rnnt-1.1b-GGUF",
+        "revision": "2bd1750f552b3a327f36f98c22096f91fa744c7b",
+        "file": "parakeet-rnnt-1.1b-q4_k.gguf",
+        "approx_size_mb": 770
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "and so my fellow americans ask not what your country can do for you ask what you can do for your country",
+      "expected_transcript_source": "captured 2026-06-15 VPS CPU with parakeet-rnnt-1.1b-q4_k",
+      "fixture_ref_path": "parakeet-rnnt-1.1b/ref.gguf",
+      "diff_gguf": {
+        "file": "parakeet-rnnt-1.1b-f16.gguf"
+      },
+      "diff_thresholds": {
+        "mel_spectrogram": 0.999,
+        "pre_encode_output": 0.999,
+        "encoder_output": 0.999
+      },
+      "stage_threshold_default": 0.999,
+      "stage_threshold_note": "Diff on the F16 GGUF; Kaggle CPU 2026-09-27: every stage >= 0.99998. Revision repinned: the old pin fb4ceb7e's q4_k was replaced by the 2026-07-11 requantize (404 at the old pin)."
+    },
+    {
+      "name": "paraformer-zh",
+      "backend_id": "paraformer",
+      "skip_diff": false,
+      "source_model": "funasr/paraformer-zh",
+      "source_model_note": "HF id for tools/reference_backends/paraformer.py. Loaded via funasr's automodel.",
+      "gguf": {
+        "repo": "cstr/paraformer-zh-GGUF",
+        "revision": "86ea220d4110aac4be7c031ed2c8d8e2eeef6aa6",
+        "file": "paraformer-zh-q8_0.gguf",
+        "approx_size_mb": 226,
+        "_revision_note": "pinned to repo main HEAD (verified via list_repo_files 2026-07-13)"
+      },
+      "sample": "samples/jfk.wav",
+      "_sample_note": "TODO: jfk.wav is English; paraformer-zh trained on Chinese. Replace with a Chinese WAV from cstr/crispasr-regression-fixtures or samples/zh/ (create if needed).",
+      "expected_transcript": "and so my fellow americans ask not what your country can do for you ask what you can do for your country",
+      "expected_transcript_source": "captured 2026-06-15 with paraformer-zh-q8_0.gguf on samples/jfk.wav (English; paraformer-zh handles English via BPE)",
+      "transcript_tolerance": {
+        "cer_max": 0.1,
+        "wer_max": 0.15
+      },
+      "transcript_tolerance_note": "Wide tolerance — GH runner decode diverges significantly from Kaggle T4",
+      "fixture_ref_path": "paraformer-zh/jfk_11s/ref.gguf",
+      "diff_gguf": {
+        "file": "paraformer-zh-f16.gguf"
+      },
+      "diff_thresholds": {
+        "mel_features": 0.999,
+        "encoder_output": 0.999
+      },
+      "stage_threshold_default": 0.999,
+      "stage_threshold_note": "Ref = #436 final rebake (real FunASR front-end). Kaggle validate 2026-09-27 (CPU, F16 diff): transcript + every captured stage >= 0.999."
+    },
+    {
+      "name": "voxtral-mini-3b-2507",
+      "backend_id": "voxtral",
+      "skip_diff": true,
+      "_skip_diff_note": "Added 2026-05-25 — rebake-pending. Voxtral mini 3B; the larger 24B variant is not on cstr yet.",
+      "source_model": "mistralai/Voxtral-Mini-3B-2507",
+      "source_model_note": "HF id for tools/reference_backends/voxtral.py.",
+      "gguf": {
+        "repo": "cstr/voxtral-mini-3b-2507-GGUF",
+        "revision": "7a6ffdc7ff9ef90d291554546f3a54562ff5beda",
+        "_revision_note": "Real commit (2026-04-09). The old pin shared its first 12 characters and was padded by hand, so it 404'd. The q4_k file is byte-identical (sha256 306088d8...) at this revision and at the current head cfe49042.",
+        "file": "voxtral-mini-3b-2507-q4_k.gguf",
+        "approx_size_mb": 2529
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country.",
+      "expected_transcript_source": "captured 2026-06-15 Kaggle T4 GPU ($KAGGLE_ACCOUNT) on samples/jfk.wav"
+    },
+    {
+      "name": "mimo-asr",
+      "backend_id": "mimo-asr",
+      "skip_diff": true,
+      "_skip_diff_note": "Added 2026-05-25 — local ref archive exists at /Volumes/backups/ai/mimo-asr-ref.gguf (mtime 2026-05-01) but cstr/crispasr-regression-fixtures doesn't have a frozen copy yet. Rebake will upload it; then bump fixtures.revision and flip skip_diff. NOTE: tests/regression/manifest.json _comment + plan(#115) flag mimo-asr baseline as broken (silent empty on short audio, segfault on long) — verify the runtime works on samples/jfk.wav before enabling the diff.",
+      "skip_preflight": true,
+      "_skip_preflight_note": "Rebake-pending — GGUF revision is a TODO placeholder. Remove skip_preflight once the rebake fills in the real 40-char SHA and the file lands on HF.",
+      "source_model": "XiaomiMiMo/MiMo-V2.5-ASR",
+      "source_model_note": "HF id for tools/reference_backends/mimo_asr.py. Needs MIMO_TOKENIZER_DIR env to point at the sibling tokenizer snapshot during rebake.",
+      "gguf": {
+        "repo": "cstr/mimo-asr-GGUF",
+        "revision": "4c6a0ede0874e2cb33fec55f73b1c3969d5cfad5",
+        "_revision_note": "TODO: replace with full 40-char SHA.",
+        "file": "mimo-asr-q4_k.gguf",
+        "approx_size_mb": 4308
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "ANd so, my fellow Americans, ask not what your country can do for you.. ASk what you can do for your country..",
+      "expected_transcript_source": "captured 2026-06-15 Kaggle T4 GPU ($KAGGLE_ACCOUNT) with --codec-model mimo-tokenizer-q4_k"
+    },
+    {
+      "name": "mimo-audio-tokenizer",
+      "backend_id": "mimo-tokenizer",
+      "skip_diff": true,
+      "_skip_diff_note": "Added 2026-05-25 — rebake-pending. Encoder of the MiMo-Audio tokenizer (32-layer transformer + 8-stage RVQ). The C++ harness branch is wired at examples/cli/crispasr_diff_main.cpp:2161. See handover-prompts/extend-coverage-via-kaggle.md.",
+      "source_model": "XiaomiMiMo/MiMo-Audio-Tokenizer",
+      "source_model_note": "HF id for tools/reference_backends/mimo_tokenizer.py. Set MIMO_TOKENIZER_DIR to point at the local snapshot during rebake.",
+      "gguf": {
+        "repo": "cstr/mimo-audio-tokenizer-GGUF",
+        "revision": "e2e4a8dec8fdc38c5b029971f1f983adf66c6ef5",
+        "file": "mimo-tokenizer.gguf",
+        "approx_size_mb": 1240
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "RVQ codes output — regression by codes-hash, not transcript",
+      "expected_transcript_source": "tokenizer outputs 8-channel RVQ codes; transcript field N/A"
+    },
+    {
+      "name": "lid-cld3-f16",
+      "backend_id": "lid-cld3",
+      "skip_diff": true,
+      "_skip_diff_note": "Added 2026-05-25 — rebake-pending. CLD3 is a text language-ID backend; audio arg is unused (input rides in LID_TEXT env var). C++ harness wired at examples/cli/crispasr_diff_main.cpp:3189. See handover-prompts/extend-coverage-via-kaggle.md.",
+      "source_model": "(text-LID; no upstream source weights — GGUF generated from cld3 protobuf by models/convert-cld3-to-gguf.py)",
+      "source_model_note": "tools/reference_backends/lid_cld3.py re-implements CLD3 feature extractors in Python and cross-checks against pycld3. Set LID_TEXT (or CLD3_TEXT) during rebake to control the input string.",
+      "gguf": {
+        "repo": "cstr/cld3-GGUF",
+        "revision": "ce295cc04e4796be10b7a45e82b1513b5d9cc225",
+        "file": "cld3-f16.gguf",
+        "approx_size_mb": 1
+      },
+      "sample": "samples/jfk.wav",
+      "_sample_note": "Audio arg is ignored by the lid-cld3 backend; the LID_TEXT env var carries the actual input. samples/jfk.wav is a placeholder so the existing rebake harness doesn't need a special-case for text-LID backends.",
+      "expected_transcript": "en",
+      "expected_transcript_source": "captured 2026-06-15 VPS — LID output on JFK audio/text (expected: en)"
+    },
+    {
+      "name": "titanet-large",
+      "backend_id": "titanet",
+      "skip_diff": true,
+      "_skip_diff_note": "Added 2026-05-25 — rebake-pending. NVIDIA TitaNet-Large speaker verification (192-D speaker embedding). NOTE: no C++ harness branch yet (docs/diff-harness-coverage.md flags `titanet` as 'harness: no'); a future commit must add an `else if (backend_name == \"titanet\")` block in examples/cli/crispasr_diff_main.cpp before skip_diff can flip to false. Lower priority per handover (speaker verification, not ASR) but small enough (43 MB) to be cheap.",
+      "source_model": "nvidia/speakerverification_en_titanet_large",
+      "source_model_note": "HF id for tools/reference_backends/titanet.py. Loaded via NeMo's EncDecSpeakerLabelModel.from_pretrained().",
+      "gguf": {
+        "repo": "cstr/titanet-large-GGUF",
+        "revision": "c27e6312bb176e73ee8363982be8d5d25d213d6d",
+        "file": "titanet-large.gguf",
+        "approx_size_mb": 43
+      },
+      "sample": "samples/jfk.wav",
+      "_sample_note": "Single speaker utterance for embedding capture; the per-speaker 192-D vector is what gets dumped.",
+      "expected_transcript": "192-dim speaker embedding (regression by L2 norm + cosine)",
+      "expected_transcript_source": "titanet outputs embeddings, not transcripts — regression uses embedding similarity"
+    },
+    {
+      "name": "wav2vec2-xlsr-en",
+      "backend_id": "wav2vec2",
+      "skip_diff": false,
+      "gguf": {
+        "repo": "cstr/wav2vec2-large-xlsr-53-english-GGUF",
+        "revision": "3de5f69700e163286eaae85952fba9bf4ab761f6",
+        "file": "wav2vec2-xlsr-en-q4_k.gguf",
+        "approx_size_mb": 200
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "And so my fellow americans ask not what your country can do for you, ask what you can do for your country.",
+      "expected_transcript_source": "captured 2026-06-15 with wav2vec2-xlsr-en-q4_k on samples/jfk.wav",
+      "transcript_tolerance": {
+        "cer_max": 0.05,
+        "wer_max": 0.0
+      },
+      "transcript_tolerance_note": "CTC decoder is byte-equal-fragile to the punctuation decode tie (the comma after 'americans' flips run-to-run on CI at WER=0). Route through the WER gate (space-delimited → WER is the gate, CER advisory): wer_max=0.0 keeps words exact while absorbing the punctuation flip. Added 2026-07-13 after runs 29238328963 / 29242753343 flipped this model pass/fail on the comma alone.",
+      "source_model": "jonatasgrosman/wav2vec2-large-xlsr-53-english",
+      "source_model_note": "Added 2026-09-07 to unblock the Kaggle rebake, which refused every entry with 'manifest entry has no source_model'. Taken from this model's own published GGUF card in hf_readmes/ where one exists, otherwise HEADed against the HF API before being written — a fuzzy card match had produced granite-speech-4.1-2b -> granite-speech-3.2-8b, which is wrong and was caught by printing which card each id came from.",
+      "fixture_ref_path": "wav2vec2-xlsr-en/ref.gguf",
+      "diff_gguf": {
+        "file": "wav2vec2-xlsr-en.gguf"
+      },
+      "diff_thresholds": {
+        "ctc_logits": 0.999
+      },
+      "stage_threshold_default": 0.999,
+      "stage_threshold_note": "Kaggle validate 2026-09-28: ctc_logits >= 0.999958 vs transformers after the even-K pos-conv padding fix 3f00eaef (was 0.908)."
+    },
+    {
+      "name": "hubert-large",
+      "backend_id": "hubert",
+      "skip_diff": false,
+      "gguf": {
+        "repo": "cstr/hubert-large-ls960-ft-GGUF",
+        "revision": "fa24754efea02b7b2f8616c3b149c74d3cb8491a",
+        "file": "hubert-large-ls960-ft-q4_k.gguf",
+        "approx_size_mb": 200
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "AND SO MY FELLOW AMERICANS, ASK NOT WHAT YOUR COUNTRY CAN DO FOR YOU, ASK WHAT YOU CAN DO FOR YOUR COUNTRY.",
+      "expected_transcript_source": "re-baked 2026-07-13 from nightly run 29232149677 (ubuntu-x86 OpenBLAS CI); word-identical to the prior CPU capture (WER=0), differs only in decode-tie punctuation/case",
+      "source_model": "facebook/hubert-large-ls960-ft",
+      "source_model_note": "Added 2026-09-07 to unblock the Kaggle rebake, which refused every entry with 'manifest entry has no source_model'. Taken from this model's own published GGUF card in hf_readmes/ where one exists, otherwise HEADed against the HF API before being written — a fuzzy card match had produced granite-speech-4.1-2b -> granite-speech-3.2-8b, which is wrong and was caught by printing which card each id came from.",
+      "fixture_ref_path": "hubert-large/ref.gguf",
+      "diff_gguf": {
+        "file": "hubert-large-ls960-ft-f16.gguf"
+      },
+      "diff_thresholds": {
+        "ctc_logits": 0.999
+      },
+      "stage_threshold_default": 0.999,
+      "stage_threshold_note": "Kaggle validate 2026-09-28: ctc_logits >= 0.999917 vs transformers after the even-K pos-conv padding fix 3f00eaef (was 0.955)."
+    },
+    {
+      "name": "data2vec-base",
+      "backend_id": "data2vec",
+      "skip_diff": false,
+      "gguf": {
+        "repo": "cstr/data2vec-audio-960h-GGUF",
+        "revision": "97d798574af55a3b861d323c2222f3d6cbbf1048",
+        "file": "data2vec-audio-base-960h-q4_k.gguf",
+        "approx_size_mb": 60
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "AND SO A MY FELLOW AMERICANS ASK NOT WHAT YOUR COUNTRY CAN DO FOR YOU ASK WHAT YOU CAN DO FOR YOUR COUNTRY",
+      "expected_transcript_source": "Greedy CTC decode of the existing frozen independent transformers reference, SHA256 ab4151f868b958d9461719ba8142c2f5c8f104fac2c2987539aa6f041bc7ac1a, not a native-output rebake. The original model inserts A (human WER 4.55%); this gate checks zero-WER upstream parity, not zero human WER.",
+      "source_model": "facebook/data2vec-audio-base-960h",
+      "source_model_note": "Added 2026-09-07 to unblock the Kaggle rebake, which refused every entry with 'manifest entry has no source_model'. Taken from this model's own published GGUF card in hf_readmes/ where one exists, otherwise HEADed against the HF API before being written — a fuzzy card match had produced granite-speech-4.1-2b -> granite-speech-3.2-8b, which is wrong and was caught by printing which card each id came from.",
+      "fixture_ref_path": "data2vec-base/ref.gguf",
+      "diff_gguf": {
+        "file": "data2vec-audio-base-960h-f16.gguf"
+      },
+      "diff_thresholds": {
+        "ctc_logits": 0.999
+      },
+      "stage_threshold_default": 0.999,
+      "stage_threshold_note": "Kaggle validate 2026-09-28 (CPU, F16 diff): ctc_logits per-frame cos >= 0.99916 vs transformers Data2VecAudioForCTC.",
+      "human_reference_transcript": "AND SO MY FELLOW AMERICANS, ASK NOT WHAT YOUR COUNTRY CAN DO FOR YOU, ASK WHAT YOU CAN DO FOR YOUR COUNTRY.",
+      "transcript_reference": {
+        "stage": "ctc_logits",
+        "sha256": "ab4151f868b958d9461719ba8142c2f5c8f104fac2c2987539aa6f041bc7ac1a",
+        "vocab": {
+          "repo": "facebook/data2vec-audio-base-960h",
+          "revision": "32331f3123e703528918aa688a9a38232d58c872",
+          "file": "vocab.json",
+          "sha256": "19727f8944fe6459fc3f240ae2c198395b740f6a029bd23e06656266b83bcf64"
+        },
+        "blank_token": "<pad>",
+        "word_delimiter_token": "|",
+        "sample_sha256": "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e"
+      }
+    },
+    {
+      "name": "fastconformer-ctc-large",
+      "backend_id": "fastconformer-ctc",
+      "skip_diff": false,
+      "gguf": {
+        "repo": "cstr/stt-en-fastconformer-ctc-large-GGUF",
+        "revision": "bc24257f571edd7ea58d807d408e0254d0c6bcab",
+        "file": "stt-en-fastconformer-ctc-large-q4_k.gguf",
+        "approx_size_mb": 80
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "And so my fellow americans, ask not what your country can do for you, ask what you can do for your country.",
+      "expected_transcript_source": "re-baked 2026-07-13 from nightly run 29232149677 (ubuntu-x86 OpenBLAS CI); word-identical to the prior CPU capture (WER=0), differs only in decode-tie punctuation/case",
+      "transcript_tolerance": {
+        "cer_max": 0.05,
+        "wer_max": 0.0
+      },
+      "transcript_tolerance_note": "CTC decoder is byte-equal-fragile to the punctuation decode tie (the comma after 'americans' flips run-to-run on CI at WER=0). Route through the WER gate (space-delimited → WER is the gate, CER advisory): wer_max=0.0 keeps words exact while absorbing the punctuation flip. Added 2026-07-13 after runs 29238328963 / 29242753343 flipped this model pass/fail on the comma alone.",
+      "source_model": "nvidia/stt_en_fastconformer_ctc_large",
+      "source_model_note": "Added 2026-09-07 to unblock the Kaggle rebake, which refused every entry with 'manifest entry has no source_model'. Taken from this model's own published GGUF card in hf_readmes/ where one exists, otherwise HEADed against the HF API before being written — a fuzzy card match had produced granite-speech-4.1-2b -> granite-speech-3.2-8b, which is wrong and was caught by printing which card each id came from.",
+      "fixture_ref_path": "fastconformer-ctc-large/ref.gguf",
+      "diff_gguf": {
+        "file": "stt-en-fastconformer-ctc-large-f16.gguf"
+      },
+      "diff_thresholds": {
+        "ctc_logits": 0.99
+      },
+      "stage_threshold_default": 0.99,
+      "stage_threshold_note": "Kaggle validate 2026-09-28: ctc_logits per-frame cos (log-softmax both sides) >= 0.995 on F16; gated at 0.99. Was -0.19 before the diff normalised the raw C++ logits (1836168a)."
+    },
+    {
+      "name": "sensevoice-small",
+      "backend_id": "sensevoice",
+      "skip_diff": false,
+      "gguf": {
+        "repo": "cstr/sensevoice-small-GGUF",
+        "revision": "e1ad67de9d05137a6a0b02beba1fd66e28df6ae4",
+        "file": "sensevoice-small-q4_k.gguf",
+        "approx_size_mb": 470
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "And so my fellow Americans ask not what your country can do for you, ask what you can do for your country.",
+      "expected_transcript_source": "captured 2026-06-15 with sensevoice-small-q4_k (auto-downloaded) on samples/jfk.wav",
+      "transcript_tolerance": {
+        "cer_max": 0.05,
+        "wer_max": 0.1
+      },
+      "transcript_tolerance_note": "Cross-platform decode drift",
+      "source_model": "FunAudioLLM/SenseVoiceSmall",
+      "source_model_note": "Added 2026-09-07 to unblock the Kaggle rebake, which refused every entry with 'manifest entry has no source_model'. Taken from this model's own published GGUF card in hf_readmes/ where one exists, otherwise HEADed against the HF API before being written — a fuzzy card match had produced granite-speech-4.1-2b -> granite-speech-3.2-8b, which is wrong and was caught by printing which card each id came from.",
+      "fixture_ref_path": "sensevoice-small/jfk_11s/ref.gguf",
+      "diff_gguf": {
+        "file": "sensevoice-small-f16.gguf"
+      },
+      "diff_thresholds": {
+        "mel_features": 0.999,
+        "encoder_output": 0.999
+      },
+      "stage_threshold_default": 0.999,
+      "stage_threshold_note": "Repinned abbeaf54 -> e1ad67de (2026-09-23 re-convert WITH the am.mvn CMVN tensors, #436 follow-up); the old pin diverged from mel_features on (cos -0.60). Kaggle validate 2026-09-28: all 75 stages >= 0.999895."
+    },
+    {
+      "name": "qwen3-asr-0.6b",
+      "backend_id": "qwen3",
+      "skip_diff": false,
+      "gguf": {
+        "repo": "cstr/qwen3-asr-0.6b-GGUF",
+        "revision": "ad086c22597ed47af05cc159dd61c98bd6e945f9",
+        "file": "qwen3-asr-0.6b-q4_k.gguf",
+        "approx_size_mb": 400
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country.",
+      "expected_transcript_source": "captured 2026-06-15 Kaggle T4 GPU ($KAGGLE_ACCOUNT) on samples/jfk.wav",
+      "transcript_tolerance": {
+        "cer_max": 0.02,
+        "wer_max": 0.05
+      },
+      "transcript_tolerance_note": "Punctuation/decode drift across platforms — WER tolerance instead of byte-exact",
+      "source_model": "Qwen/Qwen3-ASR-0.6B",
+      "source_model_note": "Added 2026-09-07 to unblock the Kaggle rebake, which refused every entry with 'manifest entry has no source_model'. Taken from this model's own published GGUF card in hf_readmes/ where one exists, otherwise HEADed against the HF API before being written — a fuzzy card match had produced granite-speech-4.1-2b -> granite-speech-3.2-8b, which is wrong and was caught by printing which card each id came from.",
+      "fixture_ref_path": "qwen3-asr-0.6b/ref.gguf",
+      "diff_gguf": {
+        "file": "qwen3-asr-0.6b.gguf"
+      },
+      "diff_thresholds": {
+        "mel_spectrogram": 0.999,
+        "encoder_output(own_mel)": 0.99
+      },
+      "stage_threshold_default": 0.98,
+      "stage_threshold_note": "Kaggle validate 2026-09-28 (CPU, F16 diff): early stages >= 0.9996, then drift through the last encoder blocks - enc_blk16 0.9983, enc_blk17 0.9955, ln_post 0.9915, proj1 0.9856, encoder_output 0.9929 (both mel arms); transcript exact. Gates are the measured floor minus margin, so a regression still trips them; whether the late-block drift is F16 accumulation or a port gap is an open question."
+    },
+    {
+      "name": "omniasr-ctc-1b-v2",
+      "backend_id": "omniasr",
+      "skip_diff": false,
+      "gguf": {
+        "repo": "cstr/omniASR-CTC-1B-v2-GGUF",
+        "revision": "e05a1d261ca3f0dfe6932ee9d50794860d849ea0",
+        "file": "omniasr-ctc-1b-v2-q4_k.gguf",
+        "approx_size_mb": 660
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "And so my fellow americans, ask not what your country can do for you, ask what you can do for your country.",
+      "expected_transcript_source": "captured 2026-09-27 GH ubuntu-latest CPU (Regression run 36351488823) after the logit-stitching fix d7a78776, samples/jfk.wav",
+      "transcript_tolerance_note": "No tolerance (default WER 0). Was wer_max 0.25 'GH runner diverges from T4': it did not diverge - the CLI joined the TEXT of fixed 5 s windows (duplicated overlap words, garbage 2 s tail) on every device/quant. With logit stitching GH CPU is WER 0. C++ matches the official fairseq2 pipeline frame by frame (logits cos >= 0.99996).",
+      "source_model": "aadel4/omniASR-CTC-1B-v2",
+      "source_model_note": "Added 2026-09-07 to unblock the Kaggle rebake, which refused every entry with 'manifest entry has no source_model'. Taken from this model's own published GGUF card in hf_readmes/ where one exists, otherwise HEADed against the HF API before being written — a fuzzy card match had produced granite-speech-4.1-2b -> granite-speech-3.2-8b, which is wrong and was caught by printing which card each id came from.",
+      "fixture_ref_path": "omniasr-ctc-1b-v2/ref.gguf",
+      "diff_gguf": {
+        "file": "omniasr-ctc-1b-v2.gguf"
+      },
+      "diff_thresholds": {
+        "ctc_logits": 0.999
+      },
+      "stage_threshold_default": 0.999,
+      "stage_threshold_note": "Kaggle validate 2026-09-28 (CPU, full-precision diff): ctc_logits per-frame cos >= 0.99999 vs transformers Wav2Vec2ForCTC (aadel4 conversion)."
+    },
+    {
+      "name": "omniasr-llm-300m",
+      "backend_id": "omniasr",
+      "skip_diff": true,
+      "skip_preflight": true,
+      "gguf": {
+        "repo": "cstr/omniasr-llm-300m-v2-GGUF",
+        "revision": "9c3d29db4175fa38bf48414b78a37938edfd7568",
+        "file": "omniasr-llm-300m-v2-q4_k.gguf",
+        "approx_size_mb": 1100
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "And so my fellow americas, ask not what your country can do for you, ask what you can do for your country.",
+      "expected_transcript_source": "captured 2026-06-15 Kaggle T4 GPU ($KAGGLE_ACCOUNT) on samples/jfk.wav",
+      "transcript_tolerance": {
+        "cer_max": 0.02,
+        "wer_max": 0.05
+      },
+      "transcript_tolerance_note": "Punctuation/decode drift across platforms — WER tolerance instead of byte-exact",
+      "source_model": "facebook/omniASR-LLM-300M",
+      "source_model_note": "Added 2026-09-07 to unblock the Kaggle rebake, which refused every entry with 'manifest entry has no source_model'. Taken from this model's own published GGUF card in hf_readmes/ where one exists, otherwise HEADed against the HF API before being written — a fuzzy card match had produced granite-speech-4.1-2b -> granite-speech-3.2-8b, which is wrong and was caught by printing which card each id came from."
+    },
+    {
+      "name": "kyutai-stt-1b",
+      "backend_id": "kyutai-stt",
+      "skip_diff": true,
+      "skip_preflight": true,
+      "gguf": {
+        "repo": "cstr/kyutai-stt-1b-GGUF",
+        "revision": "e58ef4fec3fa53c359c4e0c73205dc46acf509b3",
+        "file": "kyutai-stt-1b-q4_k.gguf",
+        "approx_size_mb": 700
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "And so, my fellow Americans, ask not what your country can do for you. Ask what you can do for your country.",
+      "expected_transcript_source": "captured 2026-06-15 Kaggle T4 GPU ($KAGGLE_ACCOUNT) on samples/jfk.wav",
+      "source_model": "kyutai/stt-1b-en_fr",
+      "source_model_note": "Added 2026-09-07 to unblock the Kaggle rebake, which refused every entry with 'manifest entry has no source_model'. Taken from this model's own published GGUF card in hf_readmes/ where one exists, otherwise HEADed against the HF API before being written — a fuzzy card match had produced granite-speech-4.1-2b -> granite-speech-3.2-8b, which is wrong and was caught by printing which card each id came from.",
+      "_skip_diff_note": "kyutai-stt-1b/ref.gguf is on the fixtures revision (rebake 2026-09-28), but crispasr-diff's kyutai branch only exact-matches generated_text: seanet_output / enc_tfm_output / rvq_codes are 'stage API pending'. Transcript-only until those land."
+    },
+    {
+      "name": "gemma4-e2b-it",
+      "backend_id": "gemma4-e2b",
+      "skip_diff": true,
+      "skip_preflight": true,
+      "gguf": {
+        "repo": "cstr/gemma4-e2b-it-GGUF",
+        "revision": "0afc0beb5bff9f4352f0fb09ca02a6e2a08a7ada",
+        "file": "gemma4-e2b-it-q4_k.gguf",
+        "approx_size_mb": 2500
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "ANd so my fellow Americans ask not what your country can do for you, ask what you can do for your country.",
+      "expected_transcript_source": "captured 2026-06-15 Kaggle T4 GPU ($KAGGLE_ACCOUNT) on samples/jfk.wav",
+      "source_model": "google/gemma-4-E2B-it",
+      "source_model_note": "Added 2026-09-07 to unblock the Kaggle rebake, which refused every entry with 'manifest entry has no source_model'. Taken from this model's own published GGUF card in hf_readmes/ where one exists, otherwise HEADed against the HF API before being written — a fuzzy card match had produced granite-speech-4.1-2b -> granite-speech-3.2-8b, which is wrong and was caught by printing which card each id came from."
+    },
+    {
+      "name": "funasr-nano",
+      "backend_id": "funasr",
+      "skip_diff": false,
+      "gguf": {
+        "repo": "cstr/funasr-nano-GGUF",
+        "revision": "5d4346e47c268ba91a332a148a1fd39b766408ac",
+        "file": "funasr-nano-2512-q8_0.gguf",
+        "approx_size_mb": 1060
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "AND SO MY FELLOW AMERICANS ASK NOT WHAT YOUR COUNTRY CAN DO FOR YOU ASK WHAT YOU CAN DO FOR YOUR COUNTRY",
+      "expected_transcript_source": "captured 2026-06-15 Kaggle T4 GPU ($KAGGLE_ACCOUNT) on samples/jfk.wav",
+      "source_model": "FunAudioLLM/Fun-ASR-Nano-2512",
+      "source_model_note": "Added 2026-09-07 to unblock the Kaggle rebake, which refused every entry with 'manifest entry has no source_model'. Taken from this model's own published GGUF card in hf_readmes/ where one exists, otherwise HEADed against the HF API before being written — a fuzzy card match had produced granite-speech-4.1-2b -> granite-speech-3.2-8b, which is wrong and was caught by printing which card each id came from.",
+      "fixture_ref_path": "funasr-nano/jfk_11s/ref.gguf",
+      "diff_gguf": {
+        "file": "funasr-nano-2512-f16.gguf"
+      },
+      "diff_thresholds": {
+        "mel_features": 0.999,
+        "encoder_output": 0.999
+      },
+      "stage_threshold_default": 0.999,
+      "stage_threshold_note": "Ref = #436 final rebake (real FunASR front-end). Kaggle validate 2026-09-27 (CPU, F16 diff): transcript + every captured stage >= 0.999."
+    },
+    {
+      "name": "funasr-mlt-nano",
+      "backend_id": "fun-asr-mlt-nano",
+      "skip_diff": true,
+      "skip_preflight": true,
+      "gguf": {
+        "repo": "cstr/funasr-mlt-nano-GGUF",
+        "revision": "5ba2e21029b7d88eceb6e4214530eca8e00b9fc6",
+        "file": "funasr-mlt-nano-2512-f16.gguf",
+        "approx_size_mb": 1980
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "And so my fellow Americans ask not what your country can do for you, ask what you can do for your country.",
+      "expected_transcript_source": "captured 2026-06-15 Kaggle T4 GPU ($KAGGLE_ACCOUNT) on samples/jfk.wav",
+      "source_model": "FunAudioLLM/Fun-ASR-MLT-Nano-2512",
+      "source_model_note": "Added 2026-09-07 to unblock the Kaggle rebake, which refused every entry with 'manifest entry has no source_model'. Taken from this model's own published GGUF card in hf_readmes/ where one exists, otherwise HEADed against the HF API before being written — a fuzzy card match had produced granite-speech-4.1-2b -> granite-speech-3.2-8b, which is wrong and was caught by printing which card each id came from."
+    },
+    {
+      "name": "granite-4.1-plus",
+      "backend_id": "granite",
+      "skip_diff": true,
+      "skip_preflight": true,
+      "gguf": {
+        "repo": "cstr/granite-speech-4.1-2b-plus-GGUF",
+        "revision": "6e815300427226d6c18708d696a4d276aa8aa0fe",
+        "file": "granite-speech-4.1-2b-plus-q4_k.gguf",
+        "approx_size_mb": 2960
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country.",
+      "expected_transcript_source": "captured 2026-06-15 Kaggle T4 GPU ($KAGGLE_ACCOUNT) on samples/jfk.wav",
+      "source_model": "ibm-granite/granite-speech-4.1-2b-plus",
+      "source_model_note": "Added 2026-09-07 to unblock the Kaggle rebake, which refused every entry with 'manifest entry has no source_model'. Taken from this model's own published GGUF card in hf_readmes/ where one exists, otherwise HEADed against the HF API before being written — a fuzzy card match had produced granite-speech-4.1-2b -> granite-speech-3.2-8b, which is wrong and was caught by printing which card each id came from."
+    },
+    {
+      "name": "granite-4.1-nar",
+      "backend_id": "granite",
+      "skip_diff": true,
+      "skip_preflight": true,
+      "gguf": {
+        "repo": "cstr/granite-speech-4.1-2b-nar-GGUF",
+        "revision": "c9bc0d62852d150b0589ec0997bf5384ce4c2a26",
+        "file": "granite-speech-4.1-2b-nar-q4_k.gguf",
+        "approx_size_mb": 3200
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "and so my fellow americans ask not what your country can do for you ask what you can do for your country",
+      "expected_transcript_source": "captured 2026-06-15 Kaggle T4 Debug build — previous SIGABRT was stale Release build artifact",
+      "source_model": "ibm-granite/granite-speech-4.1-2b-nar",
+      "source_model_note": "Added 2026-09-07 to unblock the Kaggle rebake, which refused every entry with 'manifest entry has no source_model'. Taken from this model's own published GGUF card in hf_readmes/ where one exists, otherwise HEADed against the HF API before being written — a fuzzy card match had produced granite-speech-4.1-2b -> granite-speech-3.2-8b, which is wrong and was caught by printing which card each id came from."
+    },
+    {
+      "name": "voxtral4b-realtime",
+      "backend_id": "voxtral4b",
+      "skip_diff": true,
+      "skip_preflight": true,
+      "gguf": {
+        "repo": "cstr/voxtral-mini-4b-realtime-GGUF",
+        "revision": "38f0e025ff6091079acad38502f376dc03b6818e",
+        "file": "voxtral-mini-4b-realtime-q4_k.gguf",
+        "approx_size_mb": 2500
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "And so, my fellow Americans, ask not what your country can do for you. Ask what you can do for your country.",
+      "expected_transcript_source": "captured 2026-06-15 Kaggle T4 GPU ($KAGGLE_ACCOUNT) on samples/jfk.wav",
+      "source_model": "mistralai/Voxtral-Mini-4B-Realtime-2602",
+      "source_model_note": "Added 2026-09-07 to unblock the Kaggle rebake, which refused every entry with 'manifest entry has no source_model'. Taken from this model's own published GGUF card in hf_readmes/ where one exists, otherwise HEADed against the HF API before being written — a fuzzy card match had produced granite-speech-4.1-2b -> granite-speech-3.2-8b, which is wrong and was caught by printing which card each id came from."
+    },
+    {
+      "name": "vibevoice-asr",
+      "backend_id": "vibevoice",
+      "gguf": {
+        "repo": "cstr/vibevoice-asr-GGUF",
+        "revision": "7f09f5c112ff98251c8998946e033b6f3078247c",
+        "file": "vibevoice-asr-q4_k.gguf",
+        "approx_size_mb": 4588
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "(Speaker 0) And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country.",
+      "expected_transcript_source": "re-captured 2026-07-27 (M1 Metal, q4_k) after #300: the adapter now parses the model's JSON answer into per-utterance segments, so the transcript is the Content prefixed with the structured speaker label. The 2026-06-15 pin was the bare Content and could never have matched what the CLI printed (the raw JSON blob) — see HISTORY 2026-07-27.",
+      "skip_diff": true,
+      "source_model": "microsoft/VibeVoice-ASR",
+      "source_model_note": "Added 2026-09-07 to unblock the Kaggle rebake, which refused every entry with 'manifest entry has no source_model'. Taken from this model's own published GGUF card in hf_readmes/ where one exists, otherwise HEADed against the HF API before being written — a fuzzy card match had produced granite-speech-4.1-2b -> granite-speech-3.2-8b, which is wrong and was caught by printing which card each id came from."
+    },
+    {
+      "name": "firered-lid",
+      "backend_id": "firered-lid",
+      "gguf": {
+        "repo": "cstr/firered-lid-GGUF",
+        "revision": "f2861e9d0845889b7d7fd7c66d07c15a369577d3",
+        "file": "firered-lid-q4_k.gguf",
+        "approx_size_mb": 543
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "en",
+      "expected_transcript_source": "captured 2026-06-15 VPS — LID output on JFK audio/text (expected: en)",
+      "skip_diff": true
+    },
+    {
+      "name": "silero-lid-lang95",
+      "backend_id": "silero-lid",
+      "gguf": {
+        "repo": "cstr/silero-lid-lang95-GGUF",
+        "revision": "64cab0db25340ca04589e1efae7064bd0e4f8799",
+        "file": "silero-lid-lang95-f32.gguf",
+        "approx_size_mb": 16
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "en",
+      "expected_transcript_source": "captured 2026-06-15 VPS — LID output on JFK audio/text (expected: en)",
+      "skip_diff": true
+    },
+    {
+      "name": "fasttext-lid176",
+      "backend_id": "lid-fasttext",
+      "gguf": {
+        "repo": "cstr/fasttext-lid176-GGUF",
+        "revision": "7d1a7353c2967d365db7f6a892f9cf9e5ef4b3f6",
+        "file": "fasttext-lid176-f16.gguf",
+        "approx_size_mb": 62
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "en",
+      "expected_transcript_source": "captured 2026-06-15 VPS — LID output on JFK audio/text (expected: en)",
+      "skip_diff": true,
+      "source_model": "facebook/fasttext-language-identification",
+      "source_model_note": "Added 2026-09-07 to unblock the Kaggle rebake, which refused every entry with 'manifest entry has no source_model'. Taken from this model's own published GGUF card in hf_readmes/ where one exists, otherwise HEADed against the HF API before being written — a fuzzy card match had produced granite-speech-4.1-2b -> granite-speech-3.2-8b, which is wrong and was caught by printing which card each id came from."
+    },
+    {
+      "name": "ecapa-lid-107",
+      "backend_id": "ecapa-lid",
+      "gguf": {
+        "repo": "cstr/ecapa-lid-107-GGUF",
+        "revision": "95fb0613bf78c6e48305fccd9ce023ac15f0b5a6",
+        "file": "ecapa-lid-107-f16.gguf",
+        "approx_size_mb": 40
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "en",
+      "expected_transcript_source": "captured 2026-06-15 VPS — LID output on JFK audio/text (expected: en)",
+      "skip_diff": true,
+      "source_model": "speechbrain/lang-id-voxlingua107-ecapa",
+      "source_model_note": "Added 2026-09-07 to unblock the Kaggle rebake, which refused every entry with 'manifest entry has no source_model'. Taken from this model's own published GGUF card in hf_readmes/ where one exists, otherwise HEADed against the HF API before being written — a fuzzy card match had produced granite-speech-4.1-2b -> granite-speech-3.2-8b, which is wrong and was caught by printing which card each id came from."
+    },
+    {
+      "name": "moss-audio-4b-instruct",
+      "backend_id": "moss-audio",
+      "gguf": {
+        "repo": "cstr/MOSS-Audio-4B-Instruct-GGUF",
+        "revision": "dbc2e72233d4a6653781dc3e556f123ba5f1f0c4",
+        "file": "moss-audio-4b-instruct-q4_k.gguf",
+        "approx_size_mb": 3920
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country.",
+      "expected_transcript_source": "captured 2026-06-15 Kaggle T4 GPU ($KAGGLE_ACCOUNT) on samples/jfk.wav",
+      "skip_diff": true
+    },
+    {
+      "name": "kugelaudio-0-open",
+      "backend_id": "kugelaudio",
+      "gguf": {
+        "repo": "cstr/kugelaudio-0-open-GGUF",
+        "revision": "f3796df6f2ab4c690f01da696a29aa7bd96a9739",
+        "file": "kugelaudio-0-open-q4_k.gguf",
+        "approx_size_mb": 5445
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "TTS/audio-understanding backend — not a direct ASR transcriber; use --tts or --prompt for audio QA",
+      "expected_transcript_source": "kugelaudio outputs a TTS-only message when invoked with -f; audio understanding needs --prompt",
+      "skip_diff": true
+    },
+    {
+      "name": "mini-omni2",
+      "backend_id": "mini-omni2",
+      "gguf": {
+        "repo": "cstr/mini-omni2-GGUF",
+        "revision": "0b27fedc2a6c880f77b336bad2b524c24decbea5",
+        "file": "mini-omni2-q4_k.gguf",
+        "approx_size_mb": 1009
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "And so my fellow americans, ask not what your country can do for you, ask what you can do for your country.",
+      "expected_transcript_source": "re-baked 2026-07-13 from nightly run 29232149677 (ubuntu-x86 OpenBLAS CI); word-identical to the prior CPU capture (WER=0), differs only in decode-tie punctuation/case",
+      "skip_diff": false,
+      "source_model": "gpt-omni/mini-omni2",
+      "source_model_note": "Added 2026-09-07 to unblock the Kaggle rebake, which refused every entry with 'manifest entry has no source_model'. Taken from this model's own published GGUF card in hf_readmes/ where one exists, otherwise HEADed against the HF API before being written — a fuzzy card match had produced granite-speech-4.1-2b -> granite-speech-3.2-8b, which is wrong and was caught by printing which card each id came from.",
+      "fixture_ref_path": "mini-omni2/ref.gguf",
+      "diff_gguf": {
+        "file": "mini-omni2-f16.gguf"
+      },
+      "diff_thresholds": {
+        "whisper_encoder_output": 0.999
+      },
+      "stage_threshold_default": 0.999,
+      "stage_threshold_note": "Kaggle validate 2026-09-28 (CPU, F16 diff): every stage 1.0000."
+    },
+    {
+      "name": "lfm2-audio-1.5b",
+      "backend_id": "lfm2-audio",
+      "gguf": {
+        "repo": "cstr/lfm2-audio-1.5b-GGUF",
+        "revision": "53caad18ec951e54663fe851c71b3ffc78110cac",
+        "file": "lfm2-audio-1.5b-q5_k.gguf",
+        "approx_size_mb": 1600,
+        "_file_note": "Q5_K minimum — Q4_K produces 0 tokens on the hybrid conv+attention backbone."
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "ANd so my fellow Americans, ask not what your country can do for you, ask what you can do for your country..",
+      "expected_transcript_source": "captured 2026-06-15 with lfm2-audio-1.5b-q5_k on samples/jfk.wav (F16 gives identical text)",
+      "_ref_note": "PyTorch reference dump (LiquidAI/LFM2.5-Audio-1.5B, audio-only backbone stages mel/encoder/adapter/lfm_ao_layer_0..15) built 2026-06-21 §206. CPU diff matches at cos_mean≈0.999 (cos_min≈0.93 is Q5_K-vs-F32 quant drift, below the 0.999 gate → keep skip_diff). Run the GPU diff with CRISPASR_DIFF_USE_GPU=1 to reproduce the open backbone-on-Metal divergence.",
+      "skip_diff": true,
+      "source_model": "LiquidAI/LFM2-Audio-1.5B",
+      "source_model_note": "Added 2026-09-07 to unblock the Kaggle rebake, which refused every entry with 'manifest entry has no source_model'. Taken from this model's own published GGUF card in hf_readmes/ where one exists, otherwise HEADed against the HF API before being written — a fuzzy card match had produced granite-speech-4.1-2b -> granite-speech-3.2-8b, which is wrong and was caught by printing which card each id came from."
+    },
+    {
+      "name": "nemotron-3.5-asr-streaming-0.6b",
+      "backend_id": "nemotron",
+      "skip_diff": false,
+      "gguf": {
+        "repo": "cstr/nemotron-3.5-asr-streaming-GGUF",
+        "revision": "bbd95a9ca5fa0dfca3312a122dfc45a2b578b9c2",
+        "_revision_note": "TODO: replace with actual 40-char SHA from HF repo.",
+        "file": "nemotron-3.5-asr-streaming-0.6b-q4_k.gguf",
+        "approx_size_mb": 458
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "And so my fellow Americans ask not what your country can do for you. Ask what you can do for your country.",
+      "expected_transcript_source": "captured 2026-06-15 with nemotron Q4_K on samples/jfk.wav (F16 produces identical text)",
+      "transcript_tolerance": {
+        "cer_max": 0.05,
+        "wer_max": 0.1
+      },
+      "transcript_tolerance_note": "Nemotron emits <en-US> language-tag tokens after each sentence; since 2026-10-05 the adapter strips them (they are not transcript), so the expectation carries none.",
+      "source_model": "nvidia/nemotron-3.5-asr-streaming-0.6b",
+      "source_model_note": "Added 2026-09-07 to unblock the Kaggle rebake, which refused every entry with 'manifest entry has no source_model'. Taken from this model's own published GGUF card in hf_readmes/ where one exists, otherwise HEADed against the HF API before being written — a fuzzy card match had produced granite-speech-4.1-2b -> granite-speech-3.2-8b, which is wrong and was caught by printing which card each id came from.",
+      "fixture_ref_path": "nemotron-3.5-asr-streaming-0.6b/ref.gguf",
+      "diff_gguf": {
+        "file": "nemotron-3.5-asr-streaming-0.6b-f16.gguf"
+      },
+      "diff_thresholds": {
+        "encoder_output": 0.999
+      },
+      "stage_threshold_default": 0.999,
+      "stage_threshold_note": "CPU F16 control 2026-10-09: mel/preencode cosine minima round to 1.000000; encoder_output 0.999991. All three stages use unchanged 0.999 gates; native frontend masks invalid centered-STFT frames while retaining shape."
+    },
+    {
+      "name": "index-echo-2b",
+      "backend_id": "index-echo",
+      "source_model": "IndexTeam/Index-Echo-S2TT-2B",
+      "source_model_note": "Pinned source 5d98a34d9685869b11e9c94d01dee22a8b8e53b5; actual released wrapper: F32 tower/connector, BF16 decoder.",
+      "gguf": {
+        "repo": "cstr/index-echo-2b-GGUF",
+        "revision": "b34538267099a6769111aada860d57f312894510",
+        "file": "index-echo-2b-q8_0.gguf",
+        "approx_size_mb": 670,
+        "companion_files": [
+          "index-echo-2b-decoder-q8_0.gguf"
+        ]
+      },
+      "sample": "samples/jfk.wav",
+      "transcript_format": "srt",
+      "expected_transcript": "And so my fellow Americans, So, my fellow Americans, ask not what your country can do for you, do not ask what your country can do for you, ask what you can do for your country. ask what you can do for your country.",
+      "expected_transcript_source": "Independent released mixed-precision blueprint; F16/Q8 direct-window CPU and CUDA exact text/timestamps, 2026-10-01 (#485). No VAD companion in this direct-window fixture.",
+      "fixture_ref_path": "index-echo-2b-f32/jfk_11s/ref.gguf",
+      "diff_thresholds": {
+        "mel_spectrogram": 0.999,
+        "teacherforced_logits": 0.99
+      },
+      "stage_threshold_default": 0.99,
+      "stage_threshold_note": "Native diff also enforces magnitude <=5%, strict frontend/prompt/cache IDs and mandatory exit status. Forced-F32 source validation 36915483750: Q8 minimum stage-row cosine .997150, maximum relative L2 3.094%; direct decoded text/timestamps exact. The released mixed F32/BF16 golden remains separately retained."
+    },
+    {
+      "name": "index-echo-9b",
+      "backend_id": "index-echo",
+      "source_model": "IndexTeam/Index-Echo-S2TT-9B",
+      "source_model_note": "Pinned b8ac6fb7d3dc17cee48a52201bd3d93dc86b0dba; actual released parameters BF16, independent all-F32 source parity also captured.",
+      "gguf": {
+        "repo": "cstr/index-echo-9b-GGUF",
+        "revision": "dffbadf0f173446fee0364a0807803d2b2fb6f49",
+        "file": "index-echo-9b-f16.gguf",
+        "approx_size_mb": 1314,
+        "companion_files": [
+          "index-echo-9b-decoder-f16.gguf"
+        ]
+      },
+      "sample": "samples/jfk.wav",
+      "transcript_format": "srt",
+      "expected_transcript": "And so, my fellow Americans, And so, my fellow Americans, ask not ask not what your country can do for you, what your country can do for you, ask what you can do for ask what you can do for your country.。 your country.",
+      "expected_transcript_source": "Independent original translate_window F32 capture; exact CPU/CUDA complete cues and timestamps, 2026-10-02 (#485). No VAD companion in this direct-window fixture.",
+      "fixture_ref_path": "index-echo-9b-f32-generation/jfk_11s/ref.gguf",
+      "diff_thresholds": {
+        "mel_spectrogram": 0.999,
+        "teacherforced_logits": 0.998
+      },
+      "stage_threshold_default": 0.999,
+      "stage_threshold_note": "F16 magnitude <=2%, all32 encoder+32 decoder blocks, exact prompt and all16 cached greedy IDs. Weekly index-echo-9b-regression.yml performs five complete file cases and real Piper roundtrips on hosted scratch; not the 14GB daily matrix."
+    },
+    {
+      "name": "hikari-medium",
+      "backend_id": "hikari",
+      "skip_diff": true,
+      "_skip_diff_note": "Transcript-only for now. The stage-by-stage reference (crispasr-diff hikari, tools/reference_backends/hikari.py) was captured for en->de, while this runner transcribes; f16 matched it on every stage and 161/161 stream steps (2026-10-07).",
+      "source_model": "sbintuitions/hikari-medium",
+      "source_model_note": "HF id for tools/reference_backends/hikari.py. Only needed for re-bake.",
+      "gguf": {
+        "repo": "cstr/hikari-medium-GGUF",
+        "revision": "20311f04bd4691aefeebdabe182ac9ac770d6696",
+        "file": "hikari-medium-q8_0.gguf",
+        "approx_size_mb": 873,
+        "_file_note": "q8_0: same English and German text as f16 on CPU. Silero must sit next to the model: its speech probability drives the policy's wait penalty.",
+        "companion_files": [
+          "ggml-silero-v6.2.0.bin"
+        ]
+      },
+      "sample": "samples/jfk.wav",
+      "expected_transcript": "And so my fellow Americans, ask not. what your country can do for you. Ask what you can do for your country.",
+      "expected_transcript_source": "captured 2026-10-07 with HF revision 20311f04, q8_0 and f16 identical, CPU (-ng), samples/jfk.wav; English transcription (no target language)"
+    }
+  ],
+  "tts_backends_note": "TTS->ASR roundtrip regression. Each entry synthesises tts_phrase via the TTS backend, transcribes the output with the pinned ASR backend (parakeet by default — high-accuracy English ground truth), and asserts WER <= wer_max. Catches silent decode regressions like the voxcpm2 BF16 noise bug that the encoder/mel diff harness can miss. WER ignores punctuation and case after normalisation, so a kokoro tts_phrase that comes back as 'the quick brown fox jumps over the lazy dog.' is still WER=0.",
+  "tts_backends": [
+    {
+      "name": "kokoro-82m-en",
+      "backend_id": "kokoro",
+      "gguf": {
+        "repo": "cstr/kokoro-82m-GGUF",
+        "revision": "f20291b3a27d0900af358ea1c87d63c76183b223",
+        "file": "kokoro-82m-q8_0.gguf",
+        "approx_size_mb": 90
+      },
+      "voice": {
+        "repo": "cstr/kokoro-voices-GGUF",
+        "revision": "d6435f2e72f28392c36051c832714815382d36bd",
+        "file": "kokoro-voice-af_heart.gguf"
+      },
+      "tts_phrase": "The quick brown fox jumps over the lazy dog",
+      "roundtrip_asr_backend": "parakeet-tdt-0.6b-en",
+      "wer_max": 0.4,
+      "wer_max_note": "Widened for cross-platform TTS output variation (GH runner vs local)"
+    },
+    {
+      "name": "qwen3-tts-0.6b-customvoice-eric",
+      "backend_id": "qwen3-tts",
+      "gguf": {
+        "repo": "cstr/qwen3-tts-0.6b-customvoice-GGUF",
+        "revision": "bb17332887c5d7fa68c58ce1812ff609c7cb9a94",
+        "file": "qwen3-tts-12hz-0.6b-customvoice-q8_0.gguf",
+        "approx_size_mb": 970
+      },
+      "codec": {
+        "repo": "cstr/qwen3-tts-tokenizer-12hz-GGUF",
+        "revision": "198f2d9c39eb366b2f98af977bcb63168fdad6ad",
+        "file": "qwen3-tts-tokenizer-12hz.gguf",
+        "_size_mb": 360
+      },
+      "voice_preset": "eric",
+      "voice_preset_note": "qwen3-tts-CustomVoice has 9 baked speakers selectable by name (aiden, dylan, eric, ono_anna, ryan, serena, sohee, uncle_fu, vivian). `eric` is a clear male voice — best fit for the pangram phrase + parakeet transcription. No separate voice GGUF needed; the speaker embed lives inside the customvoice model.",
+      "tts_phrase": "The quick brown fox jumps over the lazy dog",
+      "roundtrip_asr_backend": "parakeet-tdt-0.6b-en",
+      "wer_max": 0.1,
+      "wer_max_note": "Local roundtrip lands at WER 0.0 (parakeet adds a trailing '.' which normalisation strips). The Q8_0 model is used here; Q4_K has a documented quality regression on this same repo (see its README) so we pin Q8_0 explicitly. Total download per nightly slot: 970 MB talker + 360 MB tokenizer + 466 MB parakeet = ~1.8 GB.",
+      "_total_download_mb": 1796
+    },
+    {
+      "name": "bark-small",
+      "backend_id": "bark",
+      "gguf": {
+        "repo": "cstr/bark-small-GGUF",
+        "revision": "6afdd08822226a8a0c96e2235477af67c17d15aa",
+        "file": "bark-small-q8_0.gguf",
+        "approx_size_mb": 500
+      },
+      "voice": {
+        "repo": "cstr/crispasr-regression-fixtures",
+        "revision": "736366c8d4066dda5cb5efcf6ef76906084dfcc2",
+        "file": "bark-small/en_speaker_3.npz"
+      },
+      "voice_note": "Was `voice_preset: v2/en_speaker_3`, which the bark backend does NOT support (it only accepts a `.npz` path: 'speaker presets not yet supported'). So bark ran UNCONDITIONED and synthesized near-silence (RMS 6/32767) → empty ASR → WER 1.0. Pin the real suno bark v2/en_speaker_3 prompt (semantic/coarse/fine) so bark actually conditions on a speaker.",
+      "tts_phrase": "The quick brown fox jumps over the lazy dog",
+      "roundtrip_asr_backend": "parakeet-tdt-0.6b-en",
+      "tts_extra_args": [
+        "--seed",
+        "1234"
+      ],
+      "tts_extra_args_note": "Pin ONLY the seed: bark defaults to seed 0 = non-deterministic AR sampling, so the roundtrip WER flapped run-to-run. Do NOT also force a low --temperature: bark's defaults (semantic/coarse 0.7, fine 0.5) are what the reference uses, and --temperature 0.3 measurably HURTS — our min_eos_p early-stop divides logits by the temperature, so a low temp sharpens the EOS probability, fires the stop early and truncates the sentence (measured WER 0.444 at 0.3 vs 0.111 at the default on the same seed).",
+      "wer_max": 0.4,
+      "wer_max_note": "HARD GATE (no advisory). 0.4 leaves room for legitimate cross-platform TTS sampling variation. History: briefly advisory while TWO real port bugs were open — found by comparing against the Python blueprint (HARD RULE #3), which round-trips at WER 0.00 while our backend gave 0.78 identically at F16 and q8_0 (so: not quantization, not a weak model). (1) tokenize_text prepended [CLS]/appended [SEP] but bark uses add_special_tokens=False — the extra tokens shifted the 256-token prompt and made the semantic stage emit a spurious leading word then truncate. (2) the semantic history took the FIRST 256 prompt tokens right-aligned; the reference takes the LAST 256 left-aligned ([-256:] + pad right) — en_speaker_3's prompt is 427 tokens, so we primed on an entirely different slice. Both fixed in src/bark_tts.cpp; the fixture now decodes the full sentence at WER 0.111."
+    },
+    {
+      "name": "csm-1b",
+      "backend_id": "csm",
+      "gguf": {
+        "repo": "cstr/csm-1b-GGUF",
+        "revision": "5abf936b9d17a839fca69e09baf31e0ea5068f97",
+        "file": "csm-1b-q4_k.gguf",
+        "approx_size_mb": 1100
+      },
+      "voice_preset": "default",
+      "tts_phrase": "The quick brown fox jumps over the lazy dog",
+      "roundtrip_asr_backend": "parakeet-tdt-0.6b-en",
+      "wer_max": 0.15,
+      "wer_max_note": "CSM-1B Q4_K conversational TTS. 15% WER headroom."
+    },
+    {
+      "name": "speecht5-tts-en",
+      "backend_id": "speecht5",
+      "gguf": {
+        "repo": "cstr/speecht5-tts-GGUF",
+        "revision": "1816c99e668528ea8286a8bc6b9d3f4591a4a07d",
+        "file": "speecht5-tts-f16.gguf",
+        "approx_size_mb": 301
+      },
+      "voice": {
+        "repo": "cstr/speecht5-tts-GGUF",
+        "revision": "1816c99e668528ea8286a8bc6b9d3f4591a4a07d",
+        "file": "speaker.bin"
+      },
+      "tts_phrase": "The quick brown fox jumps over the lazy dog",
+      "roundtrip_asr_backend": "parakeet-tdt-0.6b-en",
+      "wer_max": 0.4,
+      "wer_max_note": "Widened for cross-platform TTS output variation (GH runner vs local)"
+    },
+    {
+      "name": "piper-lessac-en",
+      "backend_id": "piper",
+      "gguf": {
+        "repo": "cstr/piper-en_US-lessac-medium-GGUF",
+        "revision": "d1f0ee3fcb185ed88c9831bcb7a770ad36592aa0",
+        "file": "piper-en_US-lessac-medium-f16.gguf",
+        "approx_size_mb": 16
+      },
+      "voice_preset": "default",
+      "tts_phrase": "The quick brown fox jumps over the lazy dog",
+      "roundtrip_asr_backend": "parakeet-tdt-0.6b-en",
+      "wer_max": 0.15,
+      "wer_max_note": "Piper VITS ~30MB deterministic TTS. 22 kHz output."
+    },
+    {
+      "name": "pocket-tts-en",
+      "backend_id": "pocket-tts",
+      "gguf": {
+        "repo": "cstr/pocket-tts-GGUF",
+        "revision": "7fbc23706c2112acbc17d489a7cef328a74574c8",
+        "file": "pocket-tts-english-q8_0.gguf",
+        "approx_size_mb": 118
+      },
+      "voice": {
+        "repo": "cstr/crispasr-regression-fixtures",
+        "revision": "98ba026354b6c4e6aed93550208e9c6f95e83df7",
+        "file": "pocket-tts/ref_voice_kokoro_af_heart.wav"
+      },
+      "voice_note": "Synthetic reference voice — NOT a real person. Generated with kokoro-82m-q8_0 + the af_heart voice GGUF (a synthetic TTS voice) reading the North-Wind-and-the-Sun pangram, 7.75 s @ 24 kHz. Using a synthetic voice for the voice-clone fixture avoids any real-speaker consent/likeness question while still exercising the full clone path. pocket-tts voice cloning from a .wav requires --i-have-rights (consent attestation); satisfied synthetically here.",
+      "tts_phrase": "The quick brown fox jumps over the lazy dog",
+      "roundtrip_asr_backend": "parakeet-tdt-0.6b-en",
+      "tts_extra_args": [
+        "--i-have-rights",
+        "--seed",
+        "1234"
+      ],
+      "tts_extra_args_note": "--i-have-rights is REQUIRED to clone from a .wav (voice-clone consent gate, examples/cli/crispasr_run.cpp:2483). --seed 1234 pins the AR sampling. Do NOT force a low --temperature: like bark, a sharpened distribution can early-stop and truncate; the default synthesizes the full phrase cleanly.",
+      "wer_max": 0.15,
+      "wer_max_note": "HARD GATE (was advisory while mis-configured). The pocket-tts PORT was always correct — LEARNINGS.md 'n TTS — 12 bugs from stub to cos=0.999997' (n-tts == pocket-tts) validated it, and a per-stage diff vs pocket_tts_reference.py shows token_ids byte-identical and text_embeddings cos=1.000000 (HARD RULE #2). The old red was pure MIS-CONFIG: the entry ran the '-novc' (NO-voice-clone) model unconditioned, which even the official kyutai reference garbles ('Hello world.'->'Mm.'). Fix: use the voice-clone q8_0 model + the pinned synthetic reference WAV above + --i-have-rights, and strip the mandatory spoken AI-disclosure prefix in the harness before WER (run_one.py strip_ai_disclaimer — a general fix for every voice-clone roundtrip). Verified locally: raw ASR 'This audio was generated by artificial intelligence. The quick brown fox jumps over the lazy dog.' → after disclosure-strip 'the quick brown fox jumps over the lazy dog' → WER 0.000. 0.15 leaves room for cross-platform AR sampling variation."
+    },
+    {
+      "name": "f5-tts-v1-base",
+      "backend_id": "f5-tts",
+      "gguf": {
+        "repo": "cstr/f5-tts-GGUF",
+        "revision": "cccc0919c098975c79add6e18c6f0aed9a8c1fc3",
+        "file": "f5-tts-v1-base-f16.gguf",
+        "approx_size_mb": 953
+      },
+      "tts_phrase": "The quick brown fox jumps over the lazy dog",
+      "roundtrip_asr_backend": "parakeet-tdt-0.6b-en",
+      "wer_max": 0.15,
+      "wer_max_note": "F5-TTS DiT flow-matching. Needs reference audio for voice cloning; without --voice uses built-in default.",
+      "voice_preset": "default"
+    },
+    {
+      "name": "parler-tts-mini-v1.1",
+      "backend_id": "parler-tts",
+      "gguf": {
+        "repo": "cstr/parler-tts-mini-v1.1-GGUF",
+        "revision": "28d560d8d3a9a0ac0e603322094d306bdd5b573e",
+        "file": "parler-tts-mini-v1.1-q8_0.gguf",
+        "approx_size_mb": 1000
+      },
+      "tts_phrase": "The quick brown fox jumps over the lazy dog",
+      "roundtrip_asr_backend": "parakeet-tdt-0.6b-en",
+      "wer_max": 0.2,
+      "wer_max_note": "Parler TTS Mini v1.1 (~900M). T5 encoder + DAC decoder. Prompt-conditioned voice via --instruct.",
+      "voice_preset": "default"
+    },
+    {
+      "name": "dia-1.6b",
+      "backend_id": "dia",
+      "gguf": {
+        "repo": "cstr/dia-1.6b-GGUF",
+        "revision": "3233fbcb32be47761d2e736857b6d1a075b9ba7e",
+        "file": "dia-1.6b-q8_0.gguf",
+        "approx_size_mb": 1600
+      },
+      "tts_phrase": "[S1] The quick brown fox jumps over the lazy dog.",
+      "_tts_phrase_note": "Dia requires [S1] or [S2] speaker tags. Prompts under ~100 chars may produce poor output.",
+      "roundtrip_asr_backend": "parakeet-tdt-0.6b-en",
+      "wer_max": 0.2,
+      "wer_max_note": "Dia 1.6B dialogue TTS with CFG. 20% WER headroom for stochastic decode.",
+      "voice_preset": "default"
+    },
+    {
+      "name": "cosyvoice3-0.5b",
+      "backend_id": "cosyvoice3-tts",
+      "gguf": {
+        "repo": "cstr/cosyvoice3-0.5b-2512-GGUF",
+        "revision": "1c0a6465c78eed08eab0fa8568cebddd3027a4e5",
+        "file": "cosyvoice3-llm-q4_k.gguf",
+        "approx_size_mb": 366,
+        "companion_files": [
+          "cosyvoice3-flow-f16.gguf",
+          "cosyvoice3-hift-f16.gguf",
+          "cosyvoice3-campplus-f16.gguf",
+          "cosyvoice3-s3tok-f16.gguf",
+          "cosyvoice3-voices.gguf"
+        ]
+      },
+      "tts_phrase": "The quick brown fox jumps over the lazy dog",
+      "roundtrip_asr_backend": "parakeet-tdt-0.6b-en",
+      "wer_max": 0.3,
+      "wer_max_note": "CosyVoice3 needs five companion GGUFs beside the LLM (flow/hift/campplus/s3tok/voices); without them init fails with 'no flow GGUF found'.",
+      "voice_preset": "default"
+    },
+    {
+      "name": "fastpitch-en",
+      "backend_id": "fastpitch",
+      "gguf": {
+        "repo": "cstr/fastpitch-en-GGUF",
+        "revision": "55934b51f1111a8bc41d5029d96cad547364f1cd",
+        "file": "fastpitch-en-q4_k.gguf",
+        "approx_size_mb": 226
+      },
+      "tts_phrase": "The quick brown fox jumps over the lazy dog",
+      "roundtrip_asr_backend": "parakeet-tdt-0.6b-en",
+      "wer_max": 0.3,
+      "wer_max_note": "Initial placeholder — fastpitch roundtrip WER not yet measured.",
+      "voice_preset": "default"
+    },
+    {
+      "name": "melotts-en-v3",
+      "backend_id": "melotts",
+      "gguf": {
+        "repo": "cstr/melotts-en-v3-GGUF",
+        "revision": "0d0100b0646c86e1576eaea4b14d0131311036f1",
+        "file": "melotts-en-v3-f16.gguf",
+        "approx_size_mb": 92
+      },
+      "tts_phrase": "The quick brown fox jumps over the lazy dog",
+      "roundtrip_asr_backend": "parakeet-tdt-0.6b-en",
+      "wer_max": 0.3,
+      "wer_max_note": "Initial placeholder — melotts roundtrip WER not yet measured.",
+      "voice_preset": "default"
+    },
+    {
+      "name": "orpheus-3b-0.1-ft",
+      "backend_id": "orpheus",
+      "gguf": {
+        "repo": "cstr/orpheus-3b-0.1-ft-GGUF",
+        "revision": "93847c5f3b3ec45d9fc39e94a19b4fb46b9def4c",
+        "file": "orpheus-3b-0.1-ft-q8_0.gguf",
+        "approx_size_mb": 3700
+      },
+      "tts_phrase": "The quick brown fox jumps over the lazy dog",
+      "roundtrip_asr_backend": "parakeet-tdt-0.6b-en",
+      "wer_max": 0.3,
+      "wer_max_note": "Initial placeholder — orpheus roundtrip WER not yet measured.",
+      "voice_preset": "default"
+    },
+    {
+      "name": "outetts-0.3-1b",
+      "backend_id": "outetts",
+      "gguf": {
+        "repo": "cstr/outetts-0.3-1b-GGUF",
+        "revision": "fdd6560ab48bb197ad4a2b92d2a1fd93ac115f05",
+        "file": "outetts-0.3-1b-q4_k.gguf",
+        "approx_size_mb": 801,
+        "_companion_note": "Also needs wavtokenizer-decoder-f16.gguf"
+      },
+      "tts_phrase": "The quick brown fox jumps over the lazy dog",
+      "roundtrip_asr_backend": "parakeet-tdt-0.6b-en",
+      "wer_max": 0.3,
+      "wer_max_note": "Initial placeholder — outetts roundtrip WER not yet measured.",
+      "voice_preset": "default"
+    },
+    {
+      "name": "tada-tts-3b-ml",
+      "backend_id": "tada-tts",
+      "gguf": {
+        "repo": "cstr/tada-tts-3b-ml-GGUF",
+        "revision": "b41c671e7fdcb69888b61273ea5ca840c88183b5",
+        "file": "tada-tts-3b-ml-q4_k.gguf",
+        "approx_size_mb": 2213
+      },
+      "tts_phrase": "The quick brown fox jumps over the lazy dog",
+      "roundtrip_asr_backend": "parakeet-tdt-0.6b-en",
+      "wer_max": 0.3,
+      "wer_max_note": "Initial placeholder — tada-tts roundtrip WER not yet measured.",
+      "voice_preset": "default"
+    },
+    {
+      "name": "tada-codec",
+      "backend_id": "tada-codec",
+      "gguf": {
+        "repo": "cstr/tada-tts-3b-ml-GGUF",
+        "revision": "b41c671e7fdcb69888b61273ea5ca840c88183b5",
+        "file": "tada-codec-f16.gguf",
+        "approx_size_mb": 1006
+      },
+      "tts_phrase": "The quick brown fox jumps over the lazy dog",
+      "roundtrip_asr_backend": "parakeet-tdt-0.6b-en",
+      "wer_max": 0.5,
+      "wer_max_note": "Codec roundtrip — encode+decode loses quality, WER will be higher.",
+      "voice_preset": "default",
+      "advisory": true,
+      "advisory_note": "codec, not a text-to-speech model — --tts <text> yields 'empty tokenization'. Text roundtrip is covered by tada-tts-3b-ml. Needs an encode/decode harness, not this one."
+    },
+    {
+      "name": "zonos-v0.1-transformer",
+      "backend_id": "zonos-tts",
+      "gguf": {
+        "repo": "cstr/zonos-v0.1-transformer-GGUF",
+        "revision": "42304d39d2a01b0d7a2a086ad2c1dfc6270c0b29",
+        "file": "zonos-v0.1-transformer-q4_k.gguf",
+        "approx_size_mb": 930
+      },
+      "tts_phrase": "The quick brown fox jumps over the lazy dog",
+      "roundtrip_asr_backend": "parakeet-tdt-0.6b-en",
+      "wer_max": 0.3,
+      "wer_max_note": "Initial placeholder — zonos roundtrip WER not yet measured.",
+      "voice_preset": "default"
+    },
+    {
+      "name": "voxcpm2-tts-2b",
+      "backend_id": "voxcpm2-tts",
+      "gguf": {
+        "repo": "cstr/voxcpm2-GGUF",
+        "revision": "11c5ad6b0a9b0b0f6876ec18b3c3b555d5b5cb44",
+        "file": "voxcpm2-q4_k.gguf",
+        "approx_size_mb": 1611
+      },
+      "tts_phrase": "The quick brown fox jumps over the lazy dog",
+      "roundtrip_asr_backend": "parakeet-tdt-0.6b-en",
+      "wer_max": 0.3,
+      "wer_max_note": "VoxCPM2 2B diffusion TTS. Needs reference WAV for voice cloning.",
+      "voice_preset": "default"
+    },
+    {
+      "name": "indextts-1.5",
+      "backend_id": "indextts",
+      "gguf": {
+        "repo": "cstr/indextts-1.5-GGUF",
+        "revision": "6e35d352cc95160054c662489fc7293341a1f0e4",
+        "file": "indextts-gpt.gguf",
+        "approx_size_mb": 2175,
+        "companion_files": [
+          "indextts-bigvgan.gguf"
+        ]
+      },
+      "tts_phrase": "The quick brown fox jumps over the lazy dog",
+      "roundtrip_asr_backend": "parakeet-tdt-0.6b-en",
+      "wer_max": 0.3,
+      "wer_max_note": "IndexTTS-1.5 GPT + BigVGAN. Needs reference WAV for voice cloning.",
+      "voice_preset": "default"
+    },
+    {
+      "name": "chatterbox-turbo-s3gen",
+      "backend_id": "chatterbox-turbo",
+      "gguf": {
+        "repo": "cstr/chatterbox-turbo-GGUF",
+        "revision": "1c7e7f8886aed773fb12970edf4d4f65a67d4b85",
+        "file": "chatterbox-turbo-s3gen-f16-regen.gguf",
+        "approx_size_mb": 627,
+        "_companion_note": "Also needs chatterbox-turbo-t3 model (auto-located)."
+      },
+      "tts_phrase": "The quick brown fox jumps over the lazy dog",
+      "roundtrip_asr_backend": "parakeet-tdt-0.6b-en",
+      "wer_max": 0.3,
+      "wer_max_note": "ChatterboxTurbo meanflow TTS. Uses built-in voice.",
+      "voice_preset": "default"
+    }
+  ]
+}

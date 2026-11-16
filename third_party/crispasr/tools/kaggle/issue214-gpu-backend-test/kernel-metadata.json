@@ -1,0 +1,13 @@
+{
+  "id": "${KAGGLE_ACCOUNT}/crispasr-issue-214-gpu-backend-selection-test",
+  "title": "crispasr-issue-214-gpu-backend-selection-test",
+  "code_file": "issue214_gpu_backend_test.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_internet": "true",
+  "dataset_sources": [
+    "${KAGGLE_ACCOUNT}/crispasr-hf-token"
+  ]
+}

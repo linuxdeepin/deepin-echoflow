@@ -1,0 +1,930 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>c2pa-audio — sign &amp; verify Content Credentials in the browser</title>
+<style>
+  :root{
+    --bg:#f3f5f7; --panel:#ffffff; --panel-2:#eef1f4; --line:#dde3e9;
+    --ink:#131a22; --muted:#5c6875; --faint:#8a97a4;
+    --accent:#0d9488; --accent-ink:#0a7d72;
+    --good:#16a34a; --bad:#e11d48; --warn:#b45309;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    --r:12px;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#0b0f15; --panel:#121a23; --panel-2:#0e151d; --line:#202c38;
+      --ink:#e7edf3; --muted:#93a2b1; --faint:#5f6f7e;
+      --accent:#2dd4bf; --accent-ink:#5eead4;
+      --good:#4ade80; --bad:#fb7185; --warn:#fbbf24;
+    }
+  }
+  :root[data-theme="light"]{--bg:#f3f5f7;--panel:#fff;--panel-2:#eef1f4;--line:#dde3e9;--ink:#131a22;--muted:#5c6875;--faint:#8a97a4;--accent:#0d9488;--accent-ink:#0a7d72;--good:#16a34a;--bad:#e11d48;--warn:#b45309;}
+  :root[data-theme="dark"]{--bg:#0b0f15;--panel:#121a23;--panel-2:#0e151d;--line:#202c38;--ink:#e7edf3;--muted:#93a2b1;--faint:#5f6f7e;--accent:#2dd4bf;--accent-ink:#5eead4;--good:#4ade80;--bad:#fb7185;--warn:#fbbf24;}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.55;
+    -webkit-font-smoothing:antialiased;font-size:15px}
+  .wrap{max-width:860px;margin:0 auto;padding:44px 20px 80px}
+  header.hero{margin-bottom:30px}
+  .kicker{font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;
+    color:var(--accent-ink);display:flex;align-items:center;gap:8px}
+  .kicker::before{content:"";width:26px;height:1px;background:var(--accent)}
+  h1{font-size:34px;line-height:1.1;margin:.35em 0 .2em;letter-spacing:-.02em;text-wrap:balance;font-weight:650}
+  h1 .lib{font-family:var(--mono);font-weight:600;color:var(--accent-ink)}
+  .lede{color:var(--muted);max-width:60ch;margin:0}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+    padding:22px 22px;margin-top:18px}
+  .step-h{display:flex;align-items:baseline;gap:10px;margin:0 0 14px}
+  .step-n{font-family:var(--mono);font-size:12px;color:var(--faint)}
+  .step-h h2{font-size:15px;margin:0;font-weight:600;letter-spacing:-.01em}
+  .row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+  button{font-family:var(--sans);font-size:14px;font-weight:550;cursor:pointer;
+    border-radius:9px;border:1px solid var(--line);background:var(--panel-2);color:var(--ink);
+    padding:9px 15px;transition:transform .08s ease,border-color .15s,background .15s}
+  button:hover{border-color:var(--accent)}
+  button:active{transform:translateY(1px)}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#04231f}
+  :root[data-theme="dark"] button.primary,@media (prefers-color-scheme:dark){button.primary{color:#04231f}}
+  button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .hint{color:var(--faint);font-size:13px}
+  .file-in{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+  label.upload{display:inline-flex;align-items:center;gap:7px;padding:9px 15px;border:1px dashed var(--line);
+    border-radius:9px;cursor:pointer;font-size:14px;font-weight:550}
+  label.upload:hover{border-color:var(--accent)}
+  canvas.wave{width:100%;height:56px;display:block;margin-top:14px;border-radius:8px;background:var(--panel-2)}
+  .meta{font-family:var(--mono);font-size:12.5px;color:var(--muted);margin-top:12px;display:flex;flex-wrap:wrap;gap:6px 18px}
+  .meta b{color:var(--ink);font-weight:600}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;font-family:var(--mono);font-size:12.5px;margin-top:4px}
+  .kv dt{color:var(--faint)}
+  .kv dd{margin:0;color:var(--ink);word-break:break-all}
+  .verdict{border-radius:10px;padding:16px 18px;margin-top:4px;border:1px solid var(--line);
+    display:flex;gap:14px;align-items:flex-start;background:var(--panel-2)}
+  .verdict.ok{border-color:color-mix(in oklab,var(--good) 45%,var(--line));background:color-mix(in oklab,var(--good) 9%,var(--panel))}
+  .verdict.bad{border-color:color-mix(in oklab,var(--bad) 45%,var(--line));background:color-mix(in oklab,var(--bad) 9%,var(--panel))}
+  .verdict .glyph{font-family:var(--mono);font-weight:700;font-size:20px;line-height:1.2;flex:none}
+  .verdict.ok .glyph{color:var(--good)} .verdict.bad .glyph{color:var(--bad)}
+  .verdict .title{font-weight:650;font-size:15px}
+  .verdict .sub{color:var(--muted);font-size:13px;margin-top:2px}
+  .checks{list-style:none;padding:0;margin:12px 0 0;display:grid;gap:7px}
+  .checks li{display:flex;align-items:center;gap:9px;font-family:var(--mono);font-size:12.5px;color:var(--muted)}
+  .checks .dot{width:8px;height:8px;border-radius:50%;flex:none;background:var(--faint)}
+  .checks li.pass .dot{background:var(--good)} .checks li.fail .dot{background:var(--bad)}
+  .checks li.pass{color:var(--ink)}
+  .muted-note{color:var(--faint);font-size:12.5px;margin-top:12px;font-family:var(--mono)}
+  .fade{animation:fade .35s ease both}
+  @keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+  @media (prefers-reduced-motion:reduce){.fade{animation:none}}
+  .grid2{display:grid;gap:18px;grid-template-columns:1fr 1fr}
+  @media (max-width:640px){.grid2{grid-template-columns:1fr}}
+  footer{margin-top:34px;color:var(--faint);font-size:13px;display:flex;flex-wrap:wrap;gap:6px 18px;font-family:var(--mono)}
+  footer a{color:var(--accent-ink);text-decoration:none;border-bottom:1px solid transparent}
+  footer a:hover{border-color:var(--accent)}
+  .theme-btn{position:fixed;top:16px;right:16px;padding:7px 11px;font-family:var(--mono);font-size:12px}
+  .disabled-note{opacity:.5}
+  code{font-family:var(--mono);font-size:.92em;background:var(--panel-2);padding:1px 5px;border-radius:5px}
+</style>
+
+<button class="theme-btn" id="theme" title="Toggle theme">◐ theme</button>
+<div class="wrap">
+  <header class="hero">
+    <div class="kicker">Content Credentials · pure WebCrypto</div>
+    <h1><span class="lib">c2pa-audio</span> — sign &amp; verify audio provenance, right here in your browser</h1>
+    <p class="lede">A live demo of the open-source library that embeds and checks C2PA (Content Credentials)
+      manifests in audio — ES256 / CBOR / JUMBF / COSE, no server, no Rust, no <code>c2pa-rs</code>.
+      Everything below runs on this page via the Web Crypto API. Output is interoperable with the
+      c2pa-rs reference implementation.</p>
+  </header>
+
+  <section class="card">
+    <div class="step-h"><span class="step-n">01</span><h2>Pick some audio</h2></div>
+    <div class="row">
+      <button class="primary" id="gen">Generate a 1&nbsp;s tone (WAV)</button>
+      <label class="upload">Upload audio<input class="file-in" id="file" type="file"
+        accept=".wav,.mp3,.m4a,.mp4,.flac,audio/*"></label>
+      <span class="hint">WAV · MP3 · M4A/MP4 · FLAC</span>
+    </div>
+    <canvas class="wave" id="wave" width="820" height="56" aria-hidden="true"></canvas>
+    <div class="meta" id="src-meta" hidden></div>
+  </section>
+
+  <section class="card disabled-note" id="sign-card">
+    <div class="step-h"><span class="step-n">02</span><h2>Sign it with Content Credentials</h2></div>
+    <div class="row">
+      <button class="primary" id="sign" disabled>Sign</button>
+      <button id="download" disabled>Download signed file</button>
+      <span class="hint">Uses the library’s bundled self-signed cert.</span>
+    </div>
+    <dl class="kv" id="manifest" hidden></dl>
+  </section>
+
+  <section class="card disabled-note" id="verify-card">
+    <div class="step-h"><span class="step-n">03</span><h2>Verify — and try to break it</h2></div>
+    <div id="verdict-slot"></div>
+    <div class="row" style="margin-top:14px">
+      <button id="verify" disabled>Re-verify</button>
+      <button id="tamper" disabled>Flip one audio byte ↯</button>
+      <span class="hint">Tampering breaks the hard-binding hash — that’s the point.</span>
+    </div>
+  </section>
+
+  <footer>
+    <span>MIT · not affiliated with C2PA / CAI</span>
+    <a href="https://github.com/CrispStrobe/c2pa-audio" target="_blank" rel="noopener">GitHub</a>
+    <a href="https://pub.dev/packages/c2pa_audio" target="_blank" rel="noopener">pub.dev</a>
+    <span>WAV/MP3/M4A/FLAC · C · JS · Dart · Python · Go · C#</span>
+  </footer>
+</div>
+
+<script type="module">
+
+const LIB = {};
+{ // default-cert.mjs — bundled self-signed P-256 cert (marks content as
+// AI-generated; NOT a trust anchor — the private key is intentionally public).
+const DEFAULT_CERT_PEM = "-----BEGIN CERTIFICATE-----\nMIIB/TCCAaSgAwIBAgIUMl0G7RMhbZrc3Aqvd+4XSk5c5YcwCgYIKoZIzj0EAwIw\nQjEtMCsGA1UEAwwkQ3Jpc3BBU1IgKEFJLWdlbmVyYXRlZCwgc2VsZi1zaWduZWQp\nMREwDwYDVQQKDAhDcmlzcEFTUjAeFw0yNjA3MTUxNTAxMzZaFw0zNjA3MTIxNTAx\nMzZaMEIxLTArBgNVBAMMJENyaXNwQVNSIChBSS1nZW5lcmF0ZWQsIHNlbGYtc2ln\nbmVkKTERMA8GA1UECgwIQ3Jpc3BBU1IwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNC\nAASg+eoWgUhN9yiih4LZ5tPnmUPEhNntVMT2lecs+4ifMxH8Ijsqa/SafmqAQ8Dj\nnEnBKJv05YigE3QG/86KG8lxo3gwdjAMBgNVHRMBAf8EAjAAMA4GA1UdDwEB/wQE\nAwIHgDAWBgNVHSUBAf8EDDAKBggrBgEFBQcDBDAdBgNVHQ4EFgQUROiy0IxEWq+K\ndRMiX4Q191Hf2fowHwYDVR0jBBgwFoAUROiy0IxEWq+KdRMiX4Q191Hf2fowCgYI\nKoZIzj0EAwIDRwAwRAIgFJ3cScgb91EYCeXBAkc6vWuAePi3VpTzaskL+8GSawAC\nIBpjspvSj9n7ndRcGZHiWUG7tNyVFTmf9Hj4Ym/Gop+w\n-----END CERTIFICATE-----";
+const DEFAULT_KEY_PEM = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg/9P4J5n66VxxuGET\n+yu5U+0Z7zKRqZeklaMRurqtwrmhRANCAASg+eoWgUhN9yiih4LZ5tPnmUPEhNnt\nVMT2lecs+4ifMxH8Ijsqa/SafmqAQ8DjnEnBKJv05YigE3QG/86KG8lx\n-----END PRIVATE KEY-----";
+
+  LIB.CERT = DEFAULT_CERT_PEM; LIB.KEY = DEFAULT_KEY_PEM; }
+{ // c2pa.mjs — native JS C2PA signer for WAV (no c2pa-rs / no ~9 MB Rust wasm).
+// Pure WebCrypto: ECDSA P-256 (ES256) + SHA-256; hand-built canonical CBOR,
+// JUMBF box tree, COSE_Sign1, and RIFF chunk embedding. The output is a
+// standard C2PA v2 manifest with a c2pa.actions.v2 (c2pa.created,
+// trainedAlgorithmicMedia) assertion and a c2pa.hash.data hard binding — it
+// validates against the c2pa-rs reference reader (only status:
+// signingCredential.untrusted, expected for a self-signed cert).
+//
+// Runs anywhere WebCrypto exists: browsers, Node ≥16, Deno, Cloudflare
+// Workers, and (crucially) the emscripten wasm build — replacing the c2pa-rs
+// dependency there entirely.
+const crypto = globalThis.crypto;
+const te = new TextEncoder();
+
+// ---- minimal canonical CBOR encoder (RFC 8949 deterministic) ----
+function cborHead(major, n) {
+  if (n < 24) return Uint8Array.of((major << 5) | n);
+  if (n < 0x100) return Uint8Array.of((major << 5) | 24, n);
+  if (n < 0x10000) return Uint8Array.of((major << 5) | 25, n >> 8, n & 255);
+  // 32-bit
+  return Uint8Array.of((major << 5) | 26, (n >>> 24) & 255, (n >> 16) & 255, (n >> 8) & 255, n & 255);
+}
+function cat(arrs) {
+  let len = 0; for (const a of arrs) len += a.length;
+  const out = new Uint8Array(len); let o = 0; for (const a of arrs) { out.set(a, o); o += a.length; }
+  return out;
+}
+function cbor(v) {
+  if (v === null) return Uint8Array.of(0xf6);
+  if (typeof v === 'boolean') return Uint8Array.of(v ? 0xf5 : 0xf4);
+  if (typeof v === 'number' && Number.isInteger(v)) {
+    if (v >= 0) return cborHead(0, v);
+    return cborHead(1, -v - 1);
+  }
+  if (typeof v === 'string') { const b = te.encode(v); return cat([cborHead(3, b.length), b]); }
+  if (v instanceof Uint8Array) return cat([cborHead(2, v.length), v]);
+  if (Array.isArray(v)) return cat([cborHead(4, v.length), ...v.map(cbor)]);
+  if (v && v.__tag !== undefined) return cat([cborHead(6, v.__tag), cbor(v.value)]);
+  if (v && typeof v === 'object') {
+    // canonical: sort keys by encoded-key bytes (length then lexicographic)
+    const entries = Object.entries(v).map(([k, val]) => [cbor(isNaN(+k) || k === '' ? k : (v.__intKeys ? +k : k)), cbor(val), k]);
+    // (keys here are always strings for our maps except COSE header which uses intKey())
+    entries.sort((a, b) => a[0].length - b[0].length || cmp(a[0], b[0]));
+    return cat([cborHead(5, entries.length), ...entries.flatMap(e => [e[0], e[1]])]);
+  }
+  throw new Error('cbor: unsupported ' + typeof v);
+}
+function cmp(a, b) { const n = Math.min(a.length, b.length); for (let i = 0; i < n; i++) if (a[i] !== b[i]) return a[i] - b[i]; return a.length - b.length; }
+// COSE protected header uses integer keys — encode directly
+function coseProtected(certDer) {
+  // { 1: -7 (ES256), 33: [certDer] }  (canonical: key 1 before key 33)
+  return cat([cborHead(5, 2),
+    cbor(1), cbor(-7),
+    cbor(33), cat([cborHead(4, 1), cat([cborHead(2, certDer.length), certDer])])]);
+}
+function tag(t, value) { return { __tag: t, value }; }
+
+// ---- JUMBF boxes ----
+const UUID_SUFFIX = hexToBytes('00110010800000aa00389b71');
+function boxType(ascii) { return cat([te.encode(ascii), UUID_SUFFIX]); } // 16-byte JUMBF type UUID
+function u32be(n) { return Uint8Array.of((n >>> 24) & 255, (n >> 16) & 255, (n >> 8) & 255, n & 255); }
+function box(type4, payload) { const sz = 8 + payload.length; return cat([u32be(sz), te.encode(type4), payload]); }
+// jumd description box: [16-byte type-uuid][toggles=0x03][label\0]
+function jumd(typeUuid, label) {
+  return box('jumd', cat([typeUuid, Uint8Array.of(0x03), te.encode(label), Uint8Array.of(0)]));
+}
+// a jumb superbox: jumd(desc) + content boxes
+function jumb(typeAscii, label, contentBoxes) {
+  return box('jumb', cat([jumd(boxType(typeAscii), label), ...contentBoxes]));
+}
+function cborBox(cborBytes) { return box('cbor', cborBytes); }
+
+function hexToBytes(h) { const a = new Uint8Array(h.length / 2); for (let i = 0; i < a.length; i++) a[i] = parseInt(h.substr(i * 2, 2), 16); return a; }
+function bytesToHex(b) { return [...b].map(x => x.toString(16).padStart(2, '0')).join(''); }
+async function sha256(bytes) { return new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)); }
+
+// Parse PEM cert -> DER bytes; PEM EC private key -> CryptoKey (PKCS8).
+function pemToDer(pem, kind) {
+  const re = new RegExp(`-----BEGIN ${kind}-----([\\s\\S]*?)-----END ${kind}-----`);
+  const m = pem.match(re); if (!m) throw new Error('no ' + kind + ' in PEM');
+  return Uint8Array.from(atob(m[1].replace(/\s+/g, '')), c => c.charCodeAt(0));
+}
+
+// Sign PCM-derived WAV bytes (already a WAV container) with a C2PA manifest.
+// certPem/keyPem: PEM strings. Returns signed WAV Uint8Array.
+// Container-agnostic manifest-store builder (JUMBF/CBOR/COSE/ES256). Returns
+// { assemble(fileHash, exclStart, exclLen, hashDataAssnHash) -> {store,hashDataBox},
+//   assertionHash }. WAV and MP3 reuse this; only the embedding differs.
+async function makeManifestBuilder(certPem, keyPem, opts) {
+  const gen = opts.generator || { name: 'CrispASR', version: '0.6' };
+  const manifestUrn = 'urn:c2pa:' + crypto.randomUUID();
+  const instanceID = 'xmp:iid:' + crypto.randomUUID();
+  const actionsCbor = cbor({ actions: [{ action: 'c2pa.created', softwareAgent: opts.softwareAgent || 'CrispASR TTS', digitalSourceType: 'http://cv.iptc.org/newscodes/digitalsourcetype/trainedAlgorithmicMedia' }] });
+  const actionsBox = jumb('cbor', 'c2pa.actions.v2', [cborBox(actionsCbor)]);
+  // c2pa hashed-URI: hash of the assertion box WITHOUT its 8-byte outer header.
+  const assertionHash = (box) => sha256(box.subarray(8));
+  const actionsHash = await assertionHash(actionsBox);
+  function hashDataCbor(fileHash, exclStart, exclLen) {
+    return cbor({ exclusions: [{ start: exclStart, length: exclLen }], name: 'jumbf manifest', alg: 'sha256', hash: fileHash, pad: new Uint8Array(8) });
+  }
+  function buildClaim(hardLabel, hardAssnHash) {
+    return cbor({
+      instanceID,
+      claim_generator_info: gen,
+      signature: `self#jumbf=/c2pa/${manifestUrn}/c2pa.signature`,
+      created_assertions: [{ url: 'self#jumbf=c2pa.assertions/' + hardLabel, hash: hardAssnHash }],
+      gathered_assertions: [{ url: 'self#jumbf=c2pa.assertions/c2pa.actions.v2', hash: actionsHash }],
+      alg: 'sha256',
+    });
+  }
+  const certDer = pemToDer(certPem, 'CERTIFICATE');
+  const key = await crypto.subtle.importKey('pkcs8', pemToDer(keyPem, 'PRIVATE KEY'), { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
+  const protectedHdr = coseProtected(certDer);
+  async function buildCoseBox(claimBytes) {
+    const sigStructure = cbor(['Signature1', protectedHdr, new Uint8Array(0), claimBytes]);
+    const sig = new Uint8Array(await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, sigStructure));
+    const cose = tag(18, [protectedHdr, {}, null, sig]); // COSE_Sign1
+    return jumb('c2cs', 'c2pa.signature', [cborBox(cbor(cose))]);
+  }
+  // Generic: assemble the store around a caller-built hard-binding box.
+  async function assembleWith(hardBox, hardLabel, hardAssnHash) {
+    const assertionsBox = jumb('c2as', 'c2pa.assertions', [actionsBox, hardBox]);
+    const claimBytes = buildClaim(hardLabel, hardAssnHash);
+    const claimBox = jumb('c2cl', 'c2pa.claim.v2', [cborBox(claimBytes)]);
+    const sigBox = await buildCoseBox(claimBytes);
+    const manifestBox = jumb('c2ma', manifestUrn, [assertionsBox, claimBox, sigBox]);
+    return jumb('c2pa', 'c2pa', [manifestBox]); // top c2pa superbox
+  }
+  async function assemble(fileHash, exclStart, exclLen, hashDataAssnHash) {
+    const hashDataBox = jumb('cbor', 'c2pa.hash.data', [cborBox(hashDataCbor(fileHash, exclStart, exclLen))]);
+    const store = await assembleWith(hashDataBox, 'c2pa.hash.data', hashDataAssnHash);
+    return { store, hashDataBox };
+  }
+  return { assemble, assembleWith, assertionHash };
+}
+
+const C2PA_UUID = Uint8Array.of(0xd8, 0xfe, 0xc3, 0xd6, 0x1b, 0x0e, 0x48, 0x3c, 0x92, 0x97, 0x58, 0x28, 0x87, 0x7e, 0xc4, 0x81);
+// Build the c2pa.hash.bmff.v3 assertion CBOR (box-path exclusions + BMFF hash).
+function bmffV3Cbor(bmffHash) {
+  return cbor({
+    exclusions: [
+      { xpath: '/uuid', data: [{ offset: 8, value: C2PA_UUID }] },
+      { xpath: '/ftyp' }, { xpath: '/mfra' }, { xpath: '/free' }, { xpath: '/skip' },
+    ],
+    alg: 'sha256', hash: bmffHash, name: 'jumbf manifest',
+  });
+}
+
+// Run the 4-pass fixed-point protocol given container callbacks.
+//   exclStartFor(store) -> byte offset of the excluded region in the assembled file
+//   exclLenFor(store)   -> length of the excluded region (== store-derived)
+//   assembleFile(store) -> the full container bytes
+async function signWithLayout(builder, exclStartFor, exclLenFor, assembleFile) {
+  const { assemble, assertionHash } = builder;
+  const ZERO = new Uint8Array(32);
+  // fixed point on the exclusion (store size feeds back through its CBOR width)
+  let exclStart = exclStartFor(new Uint8Array(0)), exclLen = 0;
+  for (let i = 0; i < 6; i++) {
+    const st = (await assemble(ZERO, exclStart, exclLen, ZERO)).store;
+    const es = exclStartFor(st), el = exclLenFor(st);
+    if (es === exclStart && el === exclLen) break;
+    exclStart = es; exclLen = el;
+  }
+  const fileHashExcluding = async (full) => sha256(cat([full.subarray(0, exclStart), full.subarray(exclStart + exclLen)]));
+  const tmp = assembleFile((await assemble(ZERO, exclStart, exclLen, ZERO)).store);
+  const fileHash = await fileHashExcluding(tmp);
+  let a = await assemble(fileHash, exclStart, exclLen, ZERO);
+  const hashDataAssnHash = await assertionHash(a.hashDataBox);
+  a = await assemble(fileHash, exclStart, exclLen, hashDataAssnHash);
+  return assembleFile(a.store);
+}
+
+// Sign a WAV (RIFF 'C2PA' chunk appended at the end).
+async function c2paSignWav(wavBytes, certPem, keyPem, opts = {}) {
+  const builder = await makeManifestBuilder(certPem, keyPem, opts);
+  const chunkStart = wavBytes.length;
+  const withChunk = (store) => {
+    const pad = (store.length & 1) ? Uint8Array.of(0) : new Uint8Array(0);
+    const chunk = cat([te.encode('C2PA'), u32beLE(store.length), store, pad]);
+    const out = cat([wavBytes.subarray(0, chunkStart), chunk]);
+    new DataView(out.buffer).setUint32(4, out.length - 8, true); // RIFF size = total - 8
+    return out;
+  };
+  return signWithLayout(builder, () => chunkStart, (store) => 8 + store.length + (store.length & 1), withChunk);
+}
+
+// Sign an MP3 (manifest store in an ID3v2.4 GEOB frame). Preserves existing
+// ID3v2.4 frames. The data-hash exclusion covers exactly the GEOB object.
+// Sign a FLAC — same ID3v2 GEOB container mechanism as MP3 (c2pa-rs does this too).
+async function c2paSignFlac(flacBytes, certPem, keyPem, opts = {}) {
+  if (flacBytes.length < 4 || flacBytes[0] !== 0x66 || flacBytes[1] !== 0x4c || flacBytes[2] !== 0x61 || flacBytes[3] !== 0x43) throw new Error("not a FLAC file");
+  return c2paSignMp3(flacBytes, certPem, keyPem, opts);
+}
+async function c2paSignMp3(mp3Bytes, certPem, keyPem, opts = {}) {
+  const builder = await makeManifestBuilder(certPem, keyPem, opts);
+  const synchsafe = (b, o) => (b[o] << 21) | (b[o + 1] << 14) | (b[o + 2] << 7) | b[o + 3];
+  const ssBytes = (n) => Uint8Array.of((n >> 21) & 0x7f, (n >> 14) & 0x7f, (n >> 7) & 0x7f, n & 0x7f);
+
+  let existingFrames = new Uint8Array(0), audioStart = 0;
+  if (mp3Bytes.length >= 10 && mp3Bytes[0] === 0x49 && mp3Bytes[1] === 0x44 && mp3Bytes[2] === 0x33 && mp3Bytes[3] === 4) {
+    const tagEnd = 10 + synchsafe(mp3Bytes, 6);
+    if (tagEnd <= mp3Bytes.length) {
+      audioStart = tagEnd;
+      const frames = [];
+      let o = 10;
+      while (o + 10 <= tagEnd) {
+        if (mp3Bytes[o] === 0) break; // padding
+        const fsz = synchsafe(mp3Bytes, o + 4);
+        if (o + 10 + fsz > tagEnd) break;
+        frames.push(mp3Bytes.subarray(o, o + 10 + fsz));
+        o += 10 + fsz;
+      }
+      existingFrames = cat(frames);
+    }
+  }
+  const audio = mp3Bytes.subarray(audioStart);
+  const geobPrefix = cat([Uint8Array.of(0), te.encode('application/c2pa'), Uint8Array.of(0), Uint8Array.of(0), te.encode('c2pa manifest store'), Uint8Array.of(0)]);
+  const exclStart = 10 + existingFrames.length + 10 + geobPrefix.length;
+
+  const assembleFile = (store) => {
+    const geobBody = cat([geobPrefix, store]);
+    const geob = cat([te.encode('GEOB'), ssBytes(geobBody.length), Uint8Array.of(0, 0), geobBody]);
+    const frames = cat([existingFrames, geob]);
+    return cat([te.encode('ID3'), Uint8Array.of(4, 0, 0), ssBytes(frames.length), frames, audio]);
+  };
+  return signWithLayout(builder, () => exclStart, (store) => store.length, assembleFile);
+}
+
+// ---- ISO BMFF (M4A/MP4) helpers ----
+function be32(b, o) { return ((b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]) >>> 0; }
+function be64bytes(n) { const a = new Uint8Array(8); for (let i = 0; i < 8; i++) a[i] = Number((BigInt(n) >> BigInt(56 - i * 8)) & 0xffn); return a; }
+function bmffBox(b, o) { // -> {size, hdr}
+  let size = be32(b, o), hdr = 8;
+  if (size === 1) { size = Number(new DataView(b.buffer, b.byteOffset + o + 8, 8).getBigUint64(0)); hdr = 16; }
+  else if (size === 0) size = b.length - o;
+  return { size, hdr };
+}
+function memeq(b, o, ascii) { for (let i = 0; i < ascii.length; i++) if (b[o + i] !== ascii.charCodeAt(i)) return false; return true; }
+function isC2paUuid(b, o) { for (let i = 0; i < 16; i++) if (b[o + i] !== C2PA_UUID[i]) return false; return true; }
+// SHA-256 over each non-excluded top-level box: BE64(offset) ++ box bytes.
+async function bmffV3Hash(file) {
+  const parts = [];
+  let o = 0;
+  while (o + 8 <= file.length) {
+    const { size, hdr } = bmffBox(file, o);
+    if (size < hdr || o + size > file.length) break;
+    let excl = memeq(file, o + 4, 'ftyp') || memeq(file, o + 4, 'free') || memeq(file, o + 4, 'mfra') || memeq(file, o + 4, 'skip');
+    if (memeq(file, o + 4, 'uuid') && o + hdr + 16 <= file.length && isC2paUuid(file, o + hdr)) excl = true;
+    if (!excl) { parts.push(be64bytes(o)); parts.push(file.subarray(o, o + size)); }
+    o += size;
+  }
+  return sha256(cat(parts));
+}
+// Adjust stco/co64 offsets by +delta within [start,end) (recurses moov path).
+function adjustChunkOffsets(out, start, end, delta) {
+  let o = start;
+  while (o + 8 <= end) {
+    const { size, hdr } = bmffBox(out, o);
+    if (size < hdr || o + size > end) break;
+    if (memeq(out, o + 4, 'stco') || memeq(out, o + 4, 'co64')) {
+      const is64 = memeq(out, o + 4, 'co64');
+      let p = o + hdr + 4;
+      const count = be32(out, p); p += 4;
+      const dv = new DataView(out.buffer, out.byteOffset);
+      for (let i = 0; i < count; i++) {
+        if (is64) { dv.setBigUint64(p, dv.getBigUint64(p) + BigInt(delta)); p += 8; }
+        else { dv.setUint32(p, (dv.getUint32(p) + delta) >>> 0); p += 4; }
+      }
+    } else if (memeq(out, o + 4, 'moov') || memeq(out, o + 4, 'trak') || memeq(out, o + 4, 'mdia') || memeq(out, o + 4, 'minf') || memeq(out, o + 4, 'stbl')) {
+      adjustChunkOffsets(out, o + hdr, o + size, delta);
+    }
+    o += size;
+  }
+}
+
+// Sign an M4A/MP4 (ISO BMFF): insert a C2PA 'uuid' box after 'ftyp' and bind
+// with a c2pa.hash.bmff.v3 assertion (offset-prepend hash + stco/co64 fixups).
+async function c2paSignM4a(m4aBytes, certPem, keyPem, opts = {}) {
+  if (m4aBytes.length < 16 || !memeq(m4aBytes, 4, 'ftyp')) throw new Error('not an ISO BMFF (M4A) file');
+  const builder = await makeManifestBuilder(certPem, keyPem, opts);
+  const { assembleWith, assertionHash } = builder;
+  const ZERO = new Uint8Array(32);
+  const ftyp = bmffBox(m4aBytes, 0);
+  const insertAt = ftyp.size;
+  const uuidBox = (store) => {
+    const sz = 8 + 16 + 4 + 9 + 8 + store.length;
+    return cat([u32be(sz), te.encode('uuid'), C2PA_UUID, new Uint8Array(4), te.encode('manifest'), Uint8Array.of(0), new Uint8Array(8), store]);
+  };
+  const buildFile = (store) => {
+    const ub = uuidBox(store);
+    const out = cat([m4aBytes.subarray(0, insertAt), ub, m4aBytes.subarray(insertAt)]);
+    adjustChunkOffsets(out, insertAt + ub.length, out.length, ub.length);
+    return out;
+  };
+  const assembleBmff = async (bmffHash, hardAssnHash) => {
+    const box = jumb('cbor', 'c2pa.hash.bmff.v3', [cborBox(bmffV3Cbor(bmffHash))]);
+    return { store: await assembleWith(box, 'c2pa.hash.bmff.v3', hardAssnHash), hardBox: box };
+  };
+  const placeholder = (await assembleBmff(ZERO, ZERO)).store;
+  const bhash = await bmffV3Hash(buildFile(placeholder));
+  const a3 = await assembleBmff(bhash, ZERO);
+  const hardAssnHash = await assertionHash(a3.hardBox);
+  const a4 = await assembleBmff(bhash, hardAssnHash);
+  return buildFile(a4.store);
+}
+function u32beLE(n) { return Uint8Array.of(n & 255, (n >> 8) & 255, (n >> 16) & 255, (n >>> 24) & 255); } // little-endian for RIFF
+
+// Internals exported for unit tests / advanced callers. Not part of the stable
+// public API — use c2paSignWav().
+const _internal = { cbor, cborHead, coseProtected, boxType, jumb, jumd, cborBox, sha256, pemToDer, cat, hexToBytes, bytesToHex };
+
+  LIB.signWav = c2paSignWav; LIB.signMp3 = c2paSignMp3; LIB.signM4a = c2paSignM4a; LIB.signFlac = c2paSignFlac; }
+{ // c2pa-verify.mjs — native JS C2PA verifier for WAV (no c2pa-rs). The twin of
+// c2pa.mjs: parses the RIFF C2PA chunk + JUMBF tree, decodes the CBOR claim /
+// assertions / COSE_Sign1, verifies the ES256 signature against the embedded
+// certificate's public key (WebCrypto), and recomputes the hard-binding data
+// hash + assertion hashedURIs. Pure WebCrypto — runs in browsers, Node, Deno,
+// Workers.
+//
+// c2paVerifyWav(wavBytes) -> {
+//   valid,            // signature + all hash bindings check out
+//   signatureValid,   // COSE ES256 verified against the embedded cert
+//   dataHashValid,    // hard binding matches the audio
+//   assertionsValid,  // every claimed assertion hash matches
+//   trusted,          // false for self-signed (no trust-anchor checking here)
+//   errors: [string], // human-readable failures
+//   manifest: { generatorName, instanceID, actions:[...], alg },
+// }
+const crypto = globalThis.crypto;
+const td = new TextDecoder();
+
+// ------------------------------------------------------------- minimal CBOR decode
+function cborDecode(bytes) {
+  let pos = 0;
+  function u(n) { let v = 0; for (let i = 0; i < n; i++) v = v * 256 + bytes[pos++]; return v; }
+  function head() {
+    const ib = bytes[pos++];
+    const major = ib >> 5, ai = ib & 0x1f;
+    let len;
+    if (ai < 24) len = ai;
+    else if (ai === 24) len = bytes[pos++];
+    else if (ai === 25) len = u(2);
+    else if (ai === 26) len = u(4);
+    else if (ai === 27) len = u(8);
+    else len = ai; // 31 = indefinite (unused here)
+    return { major, ai, len };
+  }
+  function value(depth = 0) {
+    if (depth > 64 || pos >= bytes.length) throw new Error('cbor: nesting/truncation');
+    const h = head();
+    switch (h.major) {
+      case 0: return h.len;                 // uint
+      case 1: return -1 - h.len;            // negative
+      case 2: { const b = bytes.slice(pos, pos + h.len); pos += h.len; return b; } // bstr
+      case 3: { const b = bytes.slice(pos, pos + h.len); pos += h.len; return td.decode(b); } // tstr
+      // array/map: each element is >=1 byte, so a length exceeding what remains
+      // is invalid — stop early rather than loop on a bogus huge length.
+      case 4: { const a = []; for (let i = 0; i < h.len && pos < bytes.length; i++) a.push(value(depth + 1)); return a; }
+      case 5: { const m = new Map(); for (let i = 0; i < h.len && pos < bytes.length; i++) { const k = value(depth + 1); m.set(typeof k === 'string' || typeof k === 'number' ? k : JSON.stringify(k), value(depth + 1)); } return m; }
+      case 6: return { __tag: h.len, value: value(depth + 1) };  // tag
+      case 7:
+        if (h.ai === 20) return false;
+        if (h.ai === 21) return true;
+        if (h.ai === 22) return null;
+        return undefined;
+      default: throw new Error('cbor: bad major ' + h.major);
+    }
+  }
+  const v = value();
+  return v;
+}
+
+// ------------------------------------------------- container store extraction
+// Locate the C2PA manifest store — RIFF 'C2PA' chunk (WAV) or ID3v2 GEOB frame
+// (MP3). Returns { body } holding the store bytes, or null.
+function findC2paChunk(file) {
+  // WAV RIFF
+  if (file.length >= 12 && file[0] === 0x52 && file[1] === 0x49 && file[2] === 0x46 && file[3] === 0x46) {
+    const dv = new DataView(file.buffer, file.byteOffset, file.byteLength);
+    let off = 12;
+    while (off + 8 <= file.length) {
+      const id = String.fromCharCode(file[off], file[off + 1], file[off + 2], file[off + 3]);
+      const sz = dv.getUint32(off + 4, true);
+      if (id === 'C2PA') return { start: off, size: sz, body: file.subarray(off + 8, off + 8 + sz) };
+      off += 8 + sz + (sz & 1);
+    }
+    return null;
+  }
+  // MP3 ID3v2 GEOB frame with mime "application/c2pa"
+  if (file.length >= 10 && file[0] === 0x49 && file[1] === 0x44 && file[2] === 0x33) {
+    const ss = (o) => (file[o] << 21) | (file[o + 1] << 14) | (file[o + 2] << 7) | file[o + 3];
+    const end = Math.min(file.length, 10 + ss(6));
+    for (let o = 10; o + 10 <= end;) {
+      if (file[o] === 0) break; // padding
+      const fsz = ss(o + 4);
+      if (o + 10 + fsz > end) break;
+      const id = String.fromCharCode(file[o], file[o + 1], file[o + 2], file[o + 3]);
+      if (id === 'GEOB') {
+        const body = file.subarray(o + 10, o + 10 + fsz);
+        let p = 1; // skip encoding byte
+        const nul = () => { while (p < body.length && body[p] !== 0) p++; const s = p; p++; return s; };
+        const mimeEnd = nul(); const mime = String.fromCharCode(...body.subarray(1, mimeEnd));
+        nul(); nul(); // filename, description
+        if (mime === 'application/c2pa') return { start: o, size: fsz, body: body.subarray(p) };
+      }
+      o += 10 + fsz;
+    }
+    return null;
+  }
+  // ISO BMFF (M4A/MP4): store in a top-level 'uuid' box with the C2PA uuid
+  if (file.length >= 8 && file[4] === 0x66 && file[5] === 0x74 && file[6] === 0x79 && file[7] === 0x70) { // 'ftyp'
+    const UUID = [0xd8, 0xfe, 0xc3, 0xd6, 0x1b, 0x0e, 0x48, 0x3c, 0x92, 0x97, 0x58, 0x28, 0x87, 0x7e, 0xc4, 0x81];
+    let o = 0;
+    while (o + 8 <= file.length) {
+      let size = ((file[o] << 24) | (file[o + 1] << 16) | (file[o + 2] << 8) | file[o + 3]) >>> 0, hdr = 8;
+      if (size === 1) { size = Number(new DataView(file.buffer, file.byteOffset + o + 8, 8).getBigUint64(0)); hdr = 16; }
+      else if (size === 0) size = file.length - o;
+      if (size < hdr || o + size > file.length) break;
+      if (file[o + 4] === 0x75 && file[o + 5] === 0x75 && file[o + 6] === 0x69 && file[o + 7] === 0x64) { // 'uuid'
+        let match = o + hdr + 16 <= file.length;
+        for (let i = 0; match && i < 16; i++) if (file[o + hdr + i] !== UUID[i]) match = false;
+        if (match) {
+          const sstart = o + hdr + 16 + 4 + 9 + 8; // reserved + "manifest\0" + merkle offset
+          if (sstart <= o + size) return { start: o, size, body: file.subarray(sstart, o + size) };
+        }
+      }
+      o += size;
+    }
+    return null;
+  }
+  return null;
+}
+function rd32be(b, o) { return ((b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]) >>> 0; }
+// Walk the JUMBF tree; collect { label -> {box, contentCbor} }.
+function walkJumbf(body) {
+  const boxes = {};
+  let count = 0;
+  // Bound recursion depth + box count: real manifests nest ~5 deep with a
+  // handful of boxes, but a hostile file must not blow the stack or wedge us.
+  function walk(b, depth) {
+    if (depth > 32 || count > 4096) return;
+    let o = 0;
+    while (o + 8 <= b.length) {
+      const sz = rd32be(b, o);
+      const typ = String.fromCharCode(b[o + 4], b[o + 5], b[o + 6], b[o + 7]);
+      if (sz < 8 || o + sz > b.length) break;
+      if (typ === 'jumb') {
+        const payload = b.subarray(o + 8, o + sz);
+        const jsz = rd32be(payload, 0);
+        const lblStart = 8 + 16 + 1; // jumd hdr + type uuid + toggles
+        const lblEnd = Math.min(jsz, payload.length); // bound by BOTH
+        let e = lblStart; while (e < lblEnd && payload[e] !== 0) e++;
+        const label = e > lblStart ? String.fromCharCode(...payload.subarray(lblStart, e)) : '';
+        // find a cbor content box (first level under the jumd)
+        let content = null, po = jsz;
+        while (po + 8 <= payload.length) {
+          const psz = rd32be(payload, po);
+          const pt = String.fromCharCode(payload[po + 4], payload[po + 5], payload[po + 6], payload[po + 7]);
+          if (psz < 8 || po + psz > payload.length) break;
+          if (pt === 'cbor') content = payload.subarray(po + 8, po + psz);
+          po += psz;
+        }
+        boxes[label] = { box: b.subarray(o, o + sz), content };
+        if (++count > 4096) return;
+        walk(payload, depth + 1);
+      }
+      o += sz;
+    }
+  }
+  walk(body, 0);
+  return boxes;
+}
+
+// ------------------------------------------------------------------- crypto helpers
+async function sha256(bytes) { return new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)); }
+function eq(a, b) { if (a.length !== b.length) return false; for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false; return true; }
+function concat(a, b) { const o = new Uint8Array(a.length + b.length); o.set(a, 0); o.set(b, a.length); return o; }
+// Extract the 65-byte uncompressed EC point (04||x||y) from an X.509 P-256 cert
+// DER: locate the SubjectPublicKeyInfo BIT STRING `03 42 00 04 <64>`.
+function extractEcPoint(certDer) {
+  for (let i = 0; i + 4 + 65 <= certDer.length; i++) {
+    if (certDer[i] === 0x03 && certDer[i + 1] === 0x42 && certDer[i + 2] === 0x00 && certDer[i + 3] === 0x04) {
+      return certDer.slice(i + 3, i + 3 + 65); // 04 || x || y
+    }
+  }
+  return null;
+}
+// Re-encode canonical CBOR bstr/tstr/array head + payload for the Sig_structure.
+function cborHead(major, n) {
+  if (n < 24) return Uint8Array.of((major << 5) | n);
+  if (n < 0x100) return Uint8Array.of((major << 5) | 24, n);
+  if (n < 0x10000) return Uint8Array.of((major << 5) | 25, n >> 8, n & 255);
+  return Uint8Array.of((major << 5) | 26, (n >>> 24) & 255, (n >> 16) & 255, (n >> 8) & 255, n & 255);
+}
+function bstr(b) { return concat(cborHead(2, b.length), b); }
+function tstr(s) { const b = new TextEncoder().encode(s); return concat(cborHead(3, b.length), b); }
+
+// ------------------------------------------------------------------------ verify
+async function c2paVerifyWav(wavBytes) {
+  const errors = [];
+  const res = { valid: false, signatureValid: false, dataHashValid: false, assertionsValid: false, trusted: false, errors, manifest: null };
+  try {
+    const chunk = findC2paChunk(wavBytes);
+    if (!chunk) { errors.push('no C2PA chunk in RIFF'); return res; }
+    const boxes = walkJumbf(chunk.body);
+    for (const need of ['c2pa.claim.v2', 'c2pa.signature', 'c2pa.actions.v2']) {
+      if (!boxes[need]) { errors.push('missing JUMBF box: ' + need); return res; }
+    }
+    if (!boxes['c2pa.hash.data'] && !boxes['c2pa.hash.bmff.v3']) { errors.push('missing hard-binding assertion'); return res; }
+
+    // --- decode claim + signature ---
+    const claimBytes = boxes['c2pa.claim.v2'].content;
+    const claim = cborDecode(claimBytes);
+    const cget = (k) => (claim instanceof Map ? claim.get(k) : claim[k]);
+    const cose = cborDecode(boxes['c2pa.signature'].content); // tag(18,[protected,unprotected,payload,sig])
+    const coseArr = cose.__tag !== undefined ? cose.value : cose;
+    const protectedBstr = coseArr[0];       // serialized protected header (bytes)
+    const signature = coseArr[3];           // raw r||s (64)
+    const protMap = cborDecode(protectedBstr);
+    const certChain = protMap.get(33) || protMap.get('33');
+    const certDer = Array.isArray(certChain) ? certChain[0] : certChain;
+    if (!certDer) { errors.push('no certificate in COSE protected header'); return res; }
+
+    // --- verify COSE_Sign1 ES256 ---
+    const point = extractEcPoint(certDer);
+    if (!point) { errors.push('could not extract EC public key from certificate'); return res; }
+    const key = await crypto.subtle.importKey('raw', point, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
+    // Sig_structure = ["Signature1", protected, external_aad(empty), payload(claim)]
+    const sigStructure = concat(cborHead(4, 4), concat(concat(tstr('Signature1'), bstr(protectedBstr)), concat(bstr(new Uint8Array(0)), bstr(claimBytes))));
+    res.signatureValid = await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, key, signature, sigStructure);
+    if (!res.signatureValid) errors.push('COSE ES256 signature does not verify');
+
+    // --- verify assertion hashedURIs (hash = sha256(box without 8-byte header)) ---
+    const created = cget('created_assertions') || [];
+    const gathered = cget('gathered_assertions') || [];
+    let assertionsOk = true;
+    for (const a of [...created, ...gathered]) {
+      const url = a instanceof Map ? a.get('url') : a.url;
+      const storedHash = a instanceof Map ? a.get('hash') : a.hash;
+      const label = String(url).split('/').pop();
+      const bx = boxes[label];
+      if (!bx) { errors.push('assertion box not found: ' + label); assertionsOk = false; continue; }
+      const h = await sha256(bx.box.subarray(8));
+      if (!eq(h, storedHash)) { errors.push('assertion hash mismatch: ' + label); assertionsOk = false; }
+    }
+    res.assertionsValid = assertionsOk;
+
+    // --- verify hard binding ---
+    if (boxes['c2pa.hash.data']) {
+      // byte-range data hash (WAV/MP3)
+      const hd = cborDecode(boxes['c2pa.hash.data'].content);
+      const hget = (k) => (hd instanceof Map ? hd.get(k) : hd[k]);
+      const excl = (hget('exclusions') || [])[0];
+      const exStart = excl ? (excl instanceof Map ? excl.get('start') : excl.start) : chunk.start;
+      const exLen = excl ? (excl instanceof Map ? excl.get('length') : excl.length) : (8 + chunk.size + (chunk.size & 1));
+      const storedFileHash = hget('hash');
+      const fileHash = await sha256(concat(wavBytes.subarray(0, exStart), wavBytes.subarray(exStart + exLen)));
+      res.dataHashValid = eq(fileHash, storedFileHash);
+    } else {
+      // BMFF v3 (M4A/MP4): SHA-256 over BE64(offset)++box for each non-excluded top box
+      const bh = cborDecode(boxes['c2pa.hash.bmff.v3'].content);
+      const bget = (k) => (bh instanceof Map ? bh.get(k) : bh[k]);
+      const storedFileHash = bget('hash');
+      const excls = bget('exclusions') || [];
+      const parts = [];
+      let o = 0;
+      while (o + 8 <= wavBytes.length) {
+        let size = ((wavBytes[o] << 24) | (wavBytes[o + 1] << 16) | (wavBytes[o + 2] << 8) | wavBytes[o + 3]) >>> 0, hdr = 8;
+        if (size === 1) { size = Number(new DataView(wavBytes.buffer, wavBytes.byteOffset + o + 8, 8).getBigUint64(0)); hdr = 16; }
+        else if (size === 0) size = wavBytes.length - o;
+        if (size < hdr || o + size > wavBytes.length) break;
+        const btype = '/' + String.fromCharCode(wavBytes[o + 4], wavBytes[o + 5], wavBytes[o + 6], wavBytes[o + 7]);
+        let excluded = false;
+        for (const ex of excls) {
+          const xp = ex instanceof Map ? ex.get('xpath') : ex.xpath;
+          if (xp !== btype) continue;
+          const dm = ex instanceof Map ? ex.get('data') : ex.data;
+          let matches = true;
+          if (dm) for (const d of dm) {
+            const off = d instanceof Map ? d.get('offset') : d.offset;
+            const val = d instanceof Map ? d.get('value') : d.value;
+            if (o + off + val.length > o + size) { matches = false; break; }
+            for (let i = 0; i < val.length; i++) if (wavBytes[o + off + i] !== val[i]) { matches = false; break; }
+            if (!matches) break;
+          }
+          if (matches) { excluded = true; break; }
+        }
+        if (!excluded) {
+          const be = new Uint8Array(8);
+          for (let i = 0; i < 8; i++) be[i] = Number((BigInt(o) >> BigInt(56 - i * 8)) & 0xffn);
+          parts.push(be); parts.push(wavBytes.subarray(o, o + size));
+        }
+        o += size;
+      }
+      let all = new Uint8Array(0);
+      for (const p of parts) all = concat(all, p);
+      res.dataHashValid = eq(await sha256(all), storedFileHash);
+    }
+    if (!res.dataHashValid) errors.push('data hash (hard binding) mismatch');
+
+    // --- surface manifest content ---
+    const actionsCbor = cborDecode(boxes['c2pa.actions.v2'].content);
+    const actions = (actionsCbor instanceof Map ? actionsCbor.get('actions') : actionsCbor.actions) || [];
+    const gen = cget('claim_generator_info');
+    res.manifest = {
+      generatorName: gen ? (gen instanceof Map ? gen.get('name') : gen.name) : undefined,
+      instanceID: cget('instanceID'),
+      alg: cget('alg'),
+      actions: actions.map((ac) => ({
+        action: ac instanceof Map ? ac.get('action') : ac.action,
+        digitalSourceType: ac instanceof Map ? ac.get('digitalSourceType') : ac.digitalSourceType,
+        softwareAgent: ac instanceof Map ? ac.get('softwareAgent') : ac.softwareAgent,
+      })),
+    };
+
+    res.valid = res.signatureValid && res.dataHashValid && res.assertionsValid;
+    res.trusted = false; // self-signed: no trust-anchor evaluation here
+    return res;
+  } catch (e) {
+    errors.push('verify exception: ' + (e && e.message ? e.message : String(e)));
+    return res;
+  }
+}
+
+  LIB.verify = c2paVerifyWav; }
+
+
+// ---------------------------------------------------------------- demo state
+const $ = (id) => document.getElementById(id);
+const enc = new TextEncoder();
+let current = null;   // { bytes: Uint8Array, name, mime, signed?:Uint8Array }
+const MIME = { wav:'audio/wav', mp3:'audio/mpeg', m4a:'audio/mp4', mp4:'audio/mp4', flac:'audio/flac' };
+const signerFor = { 'audio/wav':LIB.signWav, 'audio/mpeg':LIB.signMp3, 'audio/mp4':LIB.signM4a, 'audio/flac':LIB.signFlac };
+const hex = (b, n) => [...b.subarray(0, n)].map((x) => x.toString(16).padStart(2, '0')).join(' ');
+
+function toneWav(seconds = 1, sr = 24000, freq = 220) {
+  const n = seconds * sr, buf = new ArrayBuffer(44 + n * 2), dv = new DataView(buf);
+  const put = (o, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
+  put(0, 'RIFF'); dv.setUint32(4, 36 + n * 2, true); put(8, 'WAVE'); put(12, 'fmt ');
+  dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+  dv.setUint32(24, sr, true); dv.setUint32(28, sr * 2, true); dv.setUint16(32, 2, true);
+  dv.setUint16(34, 16, true); put(36, 'data'); dv.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) {
+    const env = Math.min(1, i / 800, (n - i) / 800);
+    dv.setInt16(44 + i * 2, Math.round(9000 * env * Math.sin((2 * Math.PI * freq * i) / sr) * (1 + 0.3 * Math.sin(2 * Math.PI * 3 * i / sr))), true);
+  }
+  return new Uint8Array(buf);
+}
+
+function drawWave(bytes, mark = -1) {
+  const c = $('wave'), ctx = c.getContext('2d'), W = c.width, H = c.height;
+  ctx.clearRect(0, 0, W, H);
+  const css = getComputedStyle(document.documentElement);
+  ctx.strokeStyle = css.getPropertyValue('--accent').trim() || '#0d9488';
+  ctx.globalAlpha = 0.9; ctx.lineWidth = 1;
+  ctx.beginPath();
+  const step = Math.max(1, Math.floor(bytes.length / W));
+  for (let x = 0; x < W; x++) {
+    let lo = 255, hi = 0;
+    for (let k = 0; k < step; k++) { const v = bytes[x * step + k] || 128; if (v < lo) lo = v; if (v > hi) hi = v; }
+    const y0 = H / 2 - ((hi - 128) / 128) * (H / 2 - 3);
+    const y1 = H / 2 - ((lo - 128) / 128) * (H / 2 - 3);
+    ctx.moveTo(x + 0.5, y0); ctx.lineTo(x + 0.5, y1);
+  }
+  ctx.stroke();
+  if (mark >= 0) {
+    const x = Math.floor((mark / bytes.length) * W);
+    ctx.globalAlpha = 1; ctx.fillStyle = css.getPropertyValue('--bad').trim() || '#e11d48';
+    ctx.fillRect(x - 1, 0, 3, H);
+  }
+}
+
+function loadAudio(bytes, name, mime) {
+  current = { bytes, name, mime };
+  drawWave(bytes);
+  const m = $('src-meta'); m.hidden = false;
+  m.innerHTML = '<span><b>' + name + '</b></span><span>' + mime + '</span><span>' + bytes.length.toLocaleString() + ' bytes</span><span>first bytes: <b>' + hex(bytes, 8) + '</b></span>';
+  $('sign').disabled = false; $('sign-card').classList.remove('disabled-note');
+  $('manifest').hidden = true; $('verdict-slot').innerHTML = '';
+  $('verify').disabled = $('tamper').disabled = $('download').disabled = true;
+  $('verify-card').classList.add('disabled-note');
+}
+
+function detectMime(name, bytes) {
+  const ext = (name.split('.').pop() || '').toLowerCase();
+  if (MIME[ext]) return MIME[ext];
+  const s = String.fromCharCode(...bytes.subarray(0, 4));
+  if (s === 'RIFF') return 'audio/wav';
+  if (s === 'fLaC') return 'audio/flac';
+  if (s.startsWith('ID3') || (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0)) return 'audio/mpeg';
+  if (String.fromCharCode(...bytes.subarray(4, 8)) === 'ftyp') return 'audio/mp4';
+  return 'audio/wav';
+}
+
+async function sign() {
+  if (!current) return;
+  const fn = signerFor[current.mime];
+  if (!fn) { alert('Unsupported container for signing.'); return; }
+  $('sign').disabled = true; $('sign').textContent = 'Signing…';
+  try {
+    current.signed = await fn(current.bytes, LIB.CERT, LIB.KEY);
+    showManifest(current.signed);
+    $('download').disabled = false;
+    await verify();
+    $('verify').disabled = $('tamper').disabled = false;
+    $('verify-card').classList.remove('disabled-note');
+  } catch (e) { alert('Sign failed: ' + e.message); }
+  $('sign').disabled = false; $('sign').textContent = 'Sign';
+}
+
+async function showManifest(signed) {
+  const r = await LIB.verify(signed);
+  const man = r.manifest || {};
+  const act = (man.actions || [])[0] || {};
+  const dl = $('manifest'); dl.hidden = false;
+  const grew = signed.length - current.bytes.length;
+  dl.innerHTML = [
+    ['manifest', 'C2PA v2 · JUMBF store (+' + grew.toLocaleString() + ' bytes)'],
+    ['generator', man.generatorName || '—'],
+    ['action', (act.action || '—') + '  ·  ' + ((act.digitalSourceType || '').split('/').pop() || '—')],
+    ['signature', 'COSE_Sign1 · ES256 (ECDSA P-256)'],
+    ['signer', 'self-signed (untrusted anchor — marks provenance, not identity)'],
+  ].map(([k, v]) => '<dt>' + k + '</dt><dd>' + v + '</dd>').join('');
+}
+
+async function verify() {
+  const r = await LIB.verify(current.signed);
+  const ok = r.valid;
+  const slot = $('verdict-slot');
+  const checks = [
+    ['COSE ES256 signature', r.signatureValid],
+    ['hard binding (audio hash)', r.dataHashValid],
+    ['assertion hashes', r.assertionsValid],
+  ];
+  slot.innerHTML =
+    '<div class="verdict ' + (ok ? 'ok' : 'bad') + ' fade">' +
+      '<div class="glyph">' + (ok ? '✓' : '✗') + '</div>' +
+      '<div><div class="title">' + (ok ? 'Valid Content Credentials' : 'Tampered — verification failed') + '</div>' +
+        '<div class="sub">' + (ok
+          ? 'Verified in-browser against the embedded certificate. (Self-signed ⇒ “untrusted signer”, as expected.)'
+          : 'The audio no longer matches the signed hash — exactly what a manifest is supposed to catch.') + '</div>' +
+        '<ul class="checks">' + checks.map(([label, pass]) =>
+          '<li class="' + (pass ? 'pass' : 'fail') + '"><span class="dot"></span>' + label + '  ' + (pass ? 'ok' : 'FAIL') + '</li>').join('') +
+        '</ul>' +
+      '</div>' +
+    '</div>';
+}
+
+function tamper() {
+  if (!current || !current.signed) return;
+  // flip a byte deep in the audio payload (past the prepended/embedded manifest)
+  const i = Math.floor(current.signed.length * 0.82);
+  current.signed[i] ^= 0xff;
+  drawWave(current.signed, i);
+  verify();
+  $('tamper').disabled = true; $('tamper').textContent = 'Byte flipped ↯';
+}
+
+$('gen').onclick = () => loadAudio(toneWav(), 'tone.wav', 'audio/wav');
+$('file').onchange = async (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  const bytes = new Uint8Array(await f.arrayBuffer());
+  loadAudio(bytes, f.name, detectMime(f.name, bytes));
+};
+$('sign').onclick = sign;
+$('verify').onclick = verify;
+$('tamper').onclick = tamper;
+$('download').onclick = () => {
+  const blob = new Blob([current.signed], { type: current.mime });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+  a.download = (current.name.replace(/\.[^.]+$/, '')) + '.signed' + (current.name.match(/\.[^.]+$/) || ['.wav'])[0];
+  a.click(); URL.revokeObjectURL(a.href);
+};
+$('theme').onclick = () => {
+  const cur = document.documentElement.getAttribute('data-theme')
+    || (matchMedia('(prefers-color-scheme:dark)').matches ? 'dark' : 'light');
+  document.documentElement.setAttribute('data-theme', cur === 'dark' ? 'light' : 'dark');
+  if (current) drawWave(current.signed || current.bytes);
+};
+
+// start with something on screen
+loadAudio(toneWav(), 'tone.wav', 'audio/wav');
+</script>

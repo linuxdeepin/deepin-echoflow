@@ -1,0 +1,18 @@
+{
+  "name": "c2pa-audio",
+  "version": "0.2.0",
+  "description": "Native C2PA (Content Credentials) signing & verification for WAV/MP3/M4A/FLAC in pure WebCrypto — no c2pa-rs. Interoperable with the reference implementation.",
+  "type": "module",
+  "exports": {
+    ".": "./c2pa.mjs",
+    "./sign": "./c2pa.mjs",
+    "./verify": "./c2pa-verify.mjs"
+  },
+  "files": ["c2pa.mjs", "c2pa-verify.mjs", "default-cert.mjs", "README.md"],
+  "keywords": ["c2pa", "content-credentials", "provenance", "audio", "webcrypto", "watermark"],
+  "scripts": { "test": "node --test *.test.mjs" },
+  "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/CrispStrobe/c2pa-audio.git", "directory": "js" },
+  "homepage": "https://github.com/CrispStrobe/c2pa-audio#readme",
+  "engines": { "node": ">=16" }
+}

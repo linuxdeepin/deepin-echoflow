@@ -1,0 +1,30 @@
+Reference shape — line numbers relative to our vendored ggml snapshot
+(src/ggml-metal/ggml-metal.cpp). Re-derive against current master before
+filing; do not `git am` this directly.
+
+--- a/src/ggml-metal/ggml-metal.cpp
++++ b/src/ggml-metal/ggml-metal.cpp
+@@ -66,11 +66,17 @@ static void ggml_backend_metal_buffer_shared_get_tensor(...) {
+ static bool ggml_backend_metal_buffer_shared_cpy_tensor(ggml_backend_buffer_t buffer, const ggml_tensor * src, ggml_tensor * dst) {
+     ggml_metal_buffer_t ctx = (ggml_metal_buffer_t)buffer->context;
+
+     GGML_ASSERT(ggml_metal_buffer_is_shared(ctx));
+
+-    GGML_UNUSED(buffer);
+-    GGML_UNUSED(src);
+-    GGML_UNUSED(dst);
+-
+-    return false;
++    // dst lives in this shared (unified-memory) buffer. If the source is
++    // also host-addressable (a host buffer, or another Metal shared buffer
++    // of the same type), the copy is a plain memcpy with no host staging —
++    // strictly cheaper than ggml_backend_tensor_copy's malloc + get + set
++    // fallback. Inherits the same ordering contract as get_tensor/set_tensor.
++    if (ggml_backend_buffer_is_host(src->buffer) ||
++        src->buffer->buft == dst->buffer->buft) {
++        memcpy(dst->data, src->data, ggml_nbytes(src));
++        return true;
++    }
++
++    return false;
+ }

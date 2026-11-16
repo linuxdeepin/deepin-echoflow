@@ -1,0 +1,15 @@
+{
+  "id": "${KAGGLE_ACCOUNT}/tada-3b-ml-reference-dump-gguf-conversion",
+  "title": "tada-3b-ml-reference-dump-gguf-conversion",
+  "code_file": "tada-ref-and-convert.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "competition_sources": [],
+  "dataset_sources": ["${KAGGLE_ACCOUNT}/crispasr-hf-token"],
+  "kernel_sources": [],
+  "model_sources": []
+}

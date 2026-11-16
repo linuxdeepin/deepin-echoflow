@@ -1,0 +1,169 @@
+name: Diag — ARM SVE core_adaln
+
+# Dispatch-only diagnostic. Not part of CI; nothing runs it automatically.
+#
+# WHY IT EXISTS. test-core-adaln compares the modulate6 + apply_norm_modulation
+# ggml graph against a plain-float reference (tolerance 1e-4) and failed in
+# build.yml's `ubuntu-22-clang` legs with max|Δ| 0.658 / 1.962 — four orders out,
+# so not rounding. It passes everywhere else.
+#
+# It took a while to see why, because the job name is misleading. `ubuntu-22-clang`
+# has a matrix whose `include:` entries do not key on `build:`, so GitHub merges
+# them and the LAST one wins — every "ubuntu-22-clang" job actually ran on
+# `ubuntu-22.04-arm`. Its cmake output gives the game away:
+#
+#   -- Adding CPU backend variant ggml-cpu: -mcpu=native+dotprod+i8mm+sve+nosme
+#
+# So this was never x86: it is aarch64 with SVE. That is why an x86 box could not
+# reproduce it no matter which AVX-512 flags were thrown at it, and why
+# GGML_NATIVE=OFF cures it (it drops the +sve). Note ubuntu-22-gcc-arm64 in the
+# same workflow ALREADY pins -DGGML_NATIVE=OFF -DGGML_CPU_ARM_ARCH=armv8-a — someone
+# had hit ARM trouble there before and worked around it.
+#
+# WHAT THIS BISECTS. One variable at a time on real SVE hardware, so the failing
+# ISA feature is identified rather than guessed:
+#
+#   native-on        -mcpu=native (+sve)          reproduce
+#   no-sve           explicit arch WITHOUT +sve   does dropping SVE alone fix it?
+#   baseline         GGML_NATIVE=OFF              known-good control
+#
+# test-core-adaln links only Catch2 + ggml, so each config is a small build.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  arm-sve-adaln:
+    runs-on: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends cmake ninja-build clang
+
+      - name: CPU features (does this box actually have SVE?)
+        run: |
+          lscpu | grep -iE 'Architecture|Model name|Flags' || true
+          echo "--- /proc/cpuinfo Features ---"
+          grep -m1 -i '^Features' /proc/cpuinfo || true
+          echo "--- clang ---"; clang --version | head -1
+
+      # Per-stage dump: the six modulation views ARE the projection output, so if
+      # they diverge the fault is in modulate6's mul_mat; if only `out` diverges it
+      # is the norm chain. Written here rather than committed to tests/ because it
+      # exists purely to localise this one failure.
+      - name: Write the per-stage diagnostic
+        run: |
+          cat > tests/adaln_diag.cpp <<'CPP'
+          #include "core/adaln.h"
+          #include "ggml-backend.h"
+          #include "ggml-cpu.h"
+          #include "ggml.h"
+          #include <cmath>
+          #include <cstdio>
+          #include <vector>
+          namespace {
+          struct Rng { uint64_t s; explicit Rng(uint64_t x):s(x){}
+            uint32_t nx(){ s^=s<<13; s^=s>>7; s^=s<<17; return (uint32_t)(s>>11);}
+            float sym(){ return (float)((nx()%20001)/10000.0-1.0);} };
+          float silu(float v){ return v/(1.0f+std::exp(-v)); }
+          void dump(const char* t, const std::vector<float>& v){
+            std::printf("%-14s", t); for(float e:v) std::printf(" % .6f", e); std::printf("\n"); }
+          }
+          int main(){
+            const int dim=6, cond_dim=dim, T_x=3;
+            Rng rng(0xADA1FULL);
+            std::vector<float> temb(cond_dim), w((size_t)cond_dim*6*dim), b(6*dim), x((size_t)dim*T_x);
+            for (auto* v : {&temb,&w,&b,&x}) for (auto& e : *v) e = rng.sym();
+            for (int mode=1; mode>=0; mode--){
+              const bool apply_silu = mode==1;
+              std::printf("\n===== apply_silu=%s =====\n", apply_silu?"true":"false");
+              std::vector<uint8_t> meta(4*1024*1024);
+              ggml_init_params ip{meta.size(), meta.data(), true};
+              ggml_context* ctx = ggml_init(ip);
+              ggml_tensor* t_temb=ggml_new_tensor_2d(ctx,GGML_TYPE_F32,cond_dim,1);
+              ggml_tensor* t_w=ggml_new_tensor_2d(ctx,GGML_TYPE_F32,cond_dim,6*dim);
+              ggml_tensor* t_b=ggml_new_tensor_1d(ctx,GGML_TYPE_F32,6*dim);
+              ggml_tensor* t_x=ggml_new_tensor_2d(ctx,GGML_TYPE_F32,dim,T_x);
+              for (auto* t : {t_temb,t_w,t_b,t_x}) ggml_set_input(t);
+              ggml_set_name(t_temb,"temb"); ggml_set_name(t_w,"w");
+              ggml_set_name(t_b,"b"); ggml_set_name(t_x,"x");
+              auto m = core_adaln::modulate6(ctx,t_temb,t_w,t_b,apply_silu);
+              ggml_tensor* views[6]={m.shift_msa,m.scale_msa,m.gate_msa,m.shift_mlp,m.scale_mlp,m.gate_mlp};
+              const char* vn[6]={"shift_msa","scale_msa","gate_msa","shift_mlp","scale_mlp","gate_mlp"};
+              ggml_tensor* vc[6];
+              for(int i=0;i<6;i++){ vc[i]=ggml_cont(ctx,views[i]); ggml_set_output(vc[i]); ggml_set_name(vc[i],vn[i]); }
+              ggml_tensor* out = core_adaln::apply_norm_modulation(ctx,t_x,m.scale_msa,m.shift_msa,1e-6f);
+              ggml_set_output(out); ggml_set_name(out,"out");
+              ggml_cgraph* gf=ggml_new_graph(ctx);
+              for(int i=0;i<6;i++) ggml_build_forward_expand(gf,vc[i]);
+              ggml_build_forward_expand(gf,out);
+              ggml_backend_t be=ggml_backend_cpu_init();
+              ggml_backend_sched_t sch=ggml_backend_sched_new(&be,nullptr,1,2048,false,false);
+              ggml_backend_sched_reset(sch); ggml_backend_sched_alloc_graph(sch,gf);
+              ggml_backend_tensor_set(ggml_graph_get_tensor(gf,"temb"),temb.data(),0,temb.size()*4);
+              ggml_backend_tensor_set(ggml_graph_get_tensor(gf,"w"),w.data(),0,w.size()*4);
+              ggml_backend_tensor_set(ggml_graph_get_tensor(gf,"b"),b.data(),0,b.size()*4);
+              ggml_backend_tensor_set(ggml_graph_get_tensor(gf,"x"),x.data(),0,x.size()*4);
+              ggml_backend_sched_graph_compute(sch,gf);
+              std::vector<float> emb(cond_dim);
+              for(int i=0;i<cond_dim;i++) emb[i]= apply_silu? silu(temb[i]) : temb[i];
+              std::vector<float> proj(6*dim);
+              for(int o=0;o<6*dim;o++){ float a=0; for(int i=0;i<cond_dim;i++) a+=w[(size_t)o*cond_dim+i]*emb[i]; proj[o]=a+b[o]; }
+              for(int i=0;i<6;i++){
+                std::vector<float> got(dim);
+                ggml_backend_tensor_get(ggml_graph_get_tensor(gf,vn[i]),got.data(),0,got.size()*4);
+                std::vector<float> ref(proj.begin()+(size_t)i*dim, proj.begin()+(size_t)(i+1)*dim);
+                float md=0; for(int d=0;d<dim;d++) md=std::fmax(md,std::fabs(got[d]-ref[d]));
+                std::printf("-- %-10s max|d| = %.6f %s\n", vn[i], md, md<1e-4f?"OK":"<<<< DIVERGES");
+                dump("   graph",got); dump("   reference",ref);
+              }
+              const float* shift=proj.data(); const float* scale=proj.data()+dim;
+              std::vector<float> refout((size_t)dim*T_x);
+              for(int t=0;t<T_x;t++){
+                float mean=0; for(int d=0;d<dim;d++) mean+=x[(size_t)t*dim+d]; mean/=dim;
+                float var=0; for(int d=0;d<dim;d++){ float c=x[(size_t)t*dim+d]-mean; var+=c*c; } var/=dim;
+                float inv=1.0f/std::sqrt(var+1e-6f);
+                for(int d=0;d<dim;d++){ float nx=(x[(size_t)t*dim+d]-mean)*inv;
+                  refout[(size_t)t*dim+d]=nx*(1.0f+scale[d])+shift[d]; }
+              }
+              std::vector<float> gotout((size_t)dim*T_x);
+              ggml_backend_tensor_get(ggml_graph_get_tensor(gf,"out"),gotout.data(),0,gotout.size()*4);
+              float md=0; for(size_t i=0;i<gotout.size();i++) md=std::fmax(md,std::fabs(gotout[i]-refout[i]));
+              std::printf("-- %-10s max|d| = %.6f %s\n","out",md, md<1e-4f?"OK":"<<<< DIVERGES");
+              dump("   graph",gotout); dump("   reference",refout);
+              ggml_backend_sched_free(sch); ggml_backend_free(be); ggml_free(ctx);
+            }
+            return 0;
+          }
+          CPP
+          cat >> tests/CMakeLists.txt <<'CM'
+
+          add_executable(adaln-diag adaln_diag.cpp)
+          target_include_directories(adaln-diag PRIVATE
+              ${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/ggml/include ${PROJECT_SOURCE_DIR}/include)
+          target_link_libraries(adaln-diag PRIVATE ggml ggml-base ggml-cpu)
+          CM
+
+      - name: Bisect the ISA
+        run: |
+          set +e
+          run_cfg () {
+            name="$1"; shift
+            echo ""
+            echo "=============================================================="
+            echo "== $name    $*"
+            echo "=============================================================="
+            cmake -S . -B "build-$name" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+              -DCRISPASR_BUILD_TESTS=ON "$@" 2>&1 | grep -E "CPU backend variant|ARM|SVE" || true
+            cmake --build "build-$name" -j "$(nproc)" --target test-core-adaln adaln-diag >/dev/null 2>&1
+            if [ ! -x "build-$name/bin/test-core-adaln" ]; then echo "BUILD FAILED"; return; fi
+            "./build-$name/bin/test-core-adaln"; echo "test rc=$?"
+            "./build-$name/bin/adaln-diag" | grep -E "=====|max\|d\|"
+          }
+          run_cfg native-on  -DGGML_NATIVE=ON
+          run_cfg no-sve     -DGGML_NATIVE=OFF -DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod+i8mm
+          run_cfg baseline   -DGGML_NATIVE=OFF

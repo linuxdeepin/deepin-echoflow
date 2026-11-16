@@ -1,0 +1,19 @@
+#!/bin/bash
+# pre-commit hook — auto-sync Go CGO LDFLAGS when CMake targets change.
+#
+# Install: cp tools/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+# Or:      git config core.hooksPath tools/hooks
+#
+# When any CMakeLists.txt is staged, runs sync_go_cgo_ldflags.py --check.
+# If out of sync, auto-fixes and re-stages bindings/go/whisper.go.
+
+if git diff --cached --name-only | grep -q 'CMakeLists.txt'; then
+    if command -v python3 &>/dev/null && [ -f tools/sync_go_cgo_ldflags.py ]; then
+        if ! python3 tools/sync_go_cgo_ldflags.py --check 2>/dev/null; then
+            echo "[pre-commit] Go CGO LDFLAGS out of sync — auto-fixing..."
+            python3 tools/sync_go_cgo_ldflags.py 2>/dev/null
+            git add bindings/go/whisper.go
+            echo "[pre-commit] Updated bindings/go/whisper.go"
+        fi
+    fi
+fi

@@ -1,0 +1,138 @@
+# CI for the CrispASR fork of ggml.
+#
+# Upstream's ci.yml runs its CUDA / Vulkan / Metal jobs on SELF-HOSTED runners,
+# which this fork does not have — so on our branches those jobs never execute and
+# the backends we actually ship go completely unbuilt. That is not hypothetical:
+# the v0.10.2 -> v0.17.0 merge left duplicate declarations in ggml-cpu.c,
+# ggml-metal-*, and ggml-vulkan.cpp that only surfaced when someone compiled each
+# backend by hand.
+#
+# This workflow builds every backend CrispASR ships on GitHub-hosted runners, and
+# guards the patches this fork carries on top of upstream.
+
+name: crispasr-ops
+
+on:
+  push:
+    branches: [crispstrobe-ops]
+  pull_request:
+    branches: [crispstrobe-ops]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Cheapest and most important job: an upstream merge can drop one of our
+  # patches without producing a single compile error.
+  patches:
+    name: carried patches present
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./ci/check-crispasr-patches.sh
+
+  cpu:
+    name: cpu-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-latest
+          # arm64 is not redundant: our SVE/NEON paths (and the F16 vec_dot
+          # patch) only compile and run here.
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: install deps
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build
+      - name: build
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j$(nproc)
+      - name: ctest
+        run: ctest --test-dir build --output-on-failure --timeout 900
+      - name: test-backend-ops
+        run: ./build/bin/test-backend-ops
+
+  metal:
+    name: metal
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: build
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_METAL=ON
+          cmake --build build -j$(sysctl -n hw.ncpu)
+      - name: test-backend-ops
+        run: ./build/bin/test-backend-ops
+
+  vulkan:
+    name: vulkan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install deps
+        run: |
+          sudo apt-get update
+          # spirv-headers is required by src/ggml-vulkan/CMakeLists.txt's
+          # find_package(SPIRV-Headers CONFIG REQUIRED) — libvulkan-dev alone
+          # satisfies find_package(Vulkan) but not that.
+          sudo apt-get install -y cmake ninja-build glslc libvulkan-dev \
+                                  spirv-headers vulkan-tools mesa-vulkan-drivers
+      - name: build
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=ON
+          cmake --build build -j$(nproc)
+      # lavapipe is a software Vulkan device, so the kernels actually execute on
+      # a hosted runner — a compile-only check would miss miscomputes.
+      # Until 2026-09 this step tested ONLY the CPU backend ("Backend 1/1: CPU"):
+      # the ICD path it named (lvp_icd.x86_64.json) does not exist in this Mesa
+      # (lvp_icd.json), and ggml skips CPU-type Vulkan devices unless
+      # GGML_VK_VISIBLE_DEVICES selects one. Discover the ICD, force the device,
+      # and fail if Vulkan0 was not in the run.
+      - name: test-backend-ops (lavapipe)
+        env:
+          GGML_VK_VISIBLE_DEVICES: "0"
+        run: |
+          export VK_ICD_FILENAMES=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -1)
+          ./build/bin/test-backend-ops -b Vulkan0 2>&1 | tee tbo.log
+          rc=${PIPESTATUS[0]}
+          grep -q "Backend .*: Vulkan0" tbo.log || { echo "::error::Vulkan0 was not tested"; exit 1; }
+          exit $rc
+
+  cuda:
+    name: cuda (compile)
+    runs-on: ubuntu-latest
+    # CUDA 12.x, not 13: nvcc 13 dropped sm_60/61/70 and hard-errors on them.
+    container: nvidia/cuda:12.6.2-devel-ubuntu24.04
+    steps:
+      - name: install deps
+        run: |
+          apt-get update
+          apt-get install -y cmake ninja-build git build-essential
+      # A devel container ships only the libcuda STUB, whose SONAME is
+      # libcuda.so.1 — a file that does not exist here because there is no
+      # driver. CMake links the stub fine, but every executable that links
+      # libggml-cuda.so then fails to resolve its DT_NEEDED. On any real machine
+      # libcuda.so.1 ships with the driver, so this is a container gap, not
+      # something to work around in CMake: give the container the SONAME.
+      - name: provide libcuda SONAME for the stub
+        run: |
+          STUBS=/usr/local/cuda/lib64/stubs
+          ln -sf "$STUBS/libcuda.so" "$STUBS/libcuda.so.1"
+          echo "$STUBS" > /etc/ld.so.conf.d/cuda-stubs.conf
+          ldconfig
+      - uses: actions/checkout@v4
+      # No GPU on hosted runners, so this is a compile check — which is exactly
+      # what catches the merge-duplicate class of breakage.
+      - name: build
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                -DGGML_CUDA=ON -DGGML_CUDA_CRISPASR_FA_PERHEAD_MASK=ON \
+                -DCMAKE_CUDA_ARCHITECTURES="75;86"
+          cmake --build build -j$(nproc)

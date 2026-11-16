@@ -1,0 +1,308 @@
+From: <author>
+Subject: [PATCH] metal : Q8_0 x F32 bit-match mul_mat under GGML_PREC_F32
+
+Adds the Q8_0-weight counterpart to the existing Q4_K x Q8_K
+GGML_PREC_F32 dispatch path. When an op carries GGML_PREC_F32 with
+Q8_0 weights x F32 input, pre-quantise the F32 input column to Q8_0
+blocks via kernel_quantize_q8_0_f32, then run a scalar integer-dot
+kernel_mul_mv_q8_0_q8_0 that mirrors ggml_vec_dot_q8_0_q8_0_generic
+bit-for-bit. Without this path, GGML_PREC_F32 + Q8_0 weights routes
+through kernel_mul_mv_ext_q8_0_f32_* whose float accumulator does
+not match CPU's int-dot-then-scale output to bit-equivalence.
+
+Quantize rounding uses rint() (round-to-nearest-even, IEEE default),
+matching the ARM NEON quantize_row_q8_0's vcvtnq_s32_f32. id is
+computed from the unrounded F32 d (rounding d through F16 first
+shifts the quantization grid imperceptibly but enough to break
+bit-equivalence on borderline values).
+
+Dispatch slots in after the existing Q4_K branch in
+ggml_metal_op_mul_mat, with the same scratch-buffer mechanism: a new
+ggml_metal_op_mul_mat_extra_q8_0 helper reserves trailing scratch
+for the quantised input, and the buffer-type alloc-size function adds
+it to GGML_OP_MUL_MAT alongside the Q4_K reservation.
+
+Only the slow integer-dot path is added; the standard Q8_0
+kernel_mul_mm and kernel_mul_mv_ext code remain unchanged for the
+default precision case.
+
+diff --git a/ggml/src/ggml-metal/ggml-metal-impl.h b/ggml/src/ggml-metal/ggml-metal-impl.h
+--- a/ggml/src/ggml-metal/ggml-metal-impl.h
++++ b/ggml/src/ggml-metal/ggml-metal-impl.h
+@@ -525,6 +525,33 @@ typedef struct {
+     int16_t  r3;
+ } ggml_metal_kargs_mul_mv_q4_K_q8_K;
+
++// kargs for Q8_0 input quantize + Q8_0 x Q8_0 matmul. Pre-step
++// kernel_quantize_q8_0_f32 packs F32 input into block_q8_0 format matching
++// CPU's quantize_row_q8_0 output (32-elem blocks, F16 scale). Main kernel
++// kernel_mul_mv_q8_0_q8_0 mirrors ggml_vec_dot_q8_0_q8_0_generic bit-for-bit.
++// Used when an op carries GGML_PREC_F32.
++typedef struct {
++    int32_t  ne00;     // hidden dim (must be % 32 == 0)
++    int32_t  ne01;     // num input rows = ne11 of the parent matmul
++    int32_t  ne02;
++    uint64_t nb01;     // input row stride (bytes), src
++    uint64_t nb02;
++    uint64_t nb03;
++    int32_t  num_blocks_per_row; // ne00 / 32
++} ggml_metal_kargs_quantize_q8_0;
++
++typedef struct {
++    int32_t  ne00;     // K dim (hidden)
++    int32_t  ne01;     // M dim (output rows)
++    int32_t  ne02;
++    uint64_t nb01;     // weight row stride (bytes), src0
++    uint64_t nb02;
++    uint64_t nb03;
++    int32_t  ne11;     // N dim (input cols / output cols)
++    int32_t  ne12;
++    int32_t  ne0;      // dst stride along M
++    int32_t  ne1;      // dst stride along N (== ne11)
++    int16_t  r2;
++    int16_t  r3;
++} ggml_metal_kargs_mul_mv_q8_0_q8_0;
++
+
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.h b/ggml/src/ggml-metal/ggml-metal-ops.h
+--- a/ggml/src/ggml-metal/ggml-metal-ops.h
++++ b/ggml/src/ggml-metal/ggml-metal-ops.h
+@@ -46,6 +46,11 @@ size_t ggml_metal_op_flash_attn_ext_extra_tmp(const struct ggml_tensor * op);
+ // kernel_quantize_q8_K_f32 + kernel_mul_mv_q4_K_q8_K dispatch path.
+ size_t ggml_metal_op_mul_mat_extra_q8_K(const struct ggml_tensor * op);
+
++// Extra Q8_0-quantized input buffer when an op carries GGML_PREC_F32 with
++// Q8_0 weights x F32 input. Used by the kernel_quantize_q8_0_f32 +
++// kernel_mul_mv_q8_0_q8_0 dispatch path.
++size_t ggml_metal_op_mul_mat_extra_q8_0(const struct ggml_tensor * op);
++
+
+diff --git a/ggml/src/ggml-metal/ggml-metal.cpp b/ggml/src/ggml-metal/ggml-metal.cpp
+--- a/ggml/src/ggml-metal/ggml-metal.cpp
++++ b/ggml/src/ggml-metal/ggml-metal.cpp
+@@ -215,7 +215,10 @@ static size_t ggml_backend_metal_buffer_type_get_alloc_size(...) {
+         case GGML_OP_MUL_MAT:
+             {
++                // Q8_K-quantised input scratch (Q4_K weights x F32).
+                 res += ggml_metal_op_mul_mat_extra_q8_K(tensor);
++                // Q8_0-quantised input scratch (Q8_0 weights x F32).
++                res += ggml_metal_op_mul_mat_extra_q8_0(tensor);
+             } break;
+
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+--- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+@@ -2160,6 +2160,98 @@
+         return 1;
+     }
+
++    // Q8_0 weights x F32 input with PREC_F32 -- mirror CPU's
++    // ggml_vec_dot_q8_0_q8_0_generic. Pre-quantise the F32 input column
++    // to Q8_0 (32-elem blocks, F16 scale, round-to-nearest-even int8
++    // quants), then run an integer-dot mat-vec. Bit-identical to CPU.
++    if (prec_f32 &&
++        op->src[0]->type == GGML_TYPE_Q8_0 &&
++        op->src[1]->type == GGML_TYPE_F32 &&
++        ne00 % 32 == 0) {
++        const int nb_per_row = ne00 / 32;
++
++        ggml_metal_buffer_id bid_dst  = ggml_metal_get_buffer_id(op);
++        ggml_metal_buffer_id bid_src0 = ggml_metal_get_buffer_id(op->src[0]);
++        ggml_metal_buffer_id bid_src1 = ggml_metal_get_buffer_id(op->src[1]);
++        ggml_metal_buffer_id bid_tmp  = bid_dst;
++        bid_tmp.offs += ggml_nbytes(op);
++
++        // Step 1: F32 input -> Q8_0 blocks.
++        {
++            ggml_metal_kargs_quantize_q8_0 args_q = {
++                ne00, ne11, ne12, nb11, nb12, nb13, nb_per_row,
++            };
++            ggml_metal_pipeline_with_params p_q =
++                ggml_metal_library_get_pipeline(lib, "kernel_quantize_q8_0_f32");
++            if (!p_q.pipeline) {
++                p_q = ggml_metal_library_compile_pipeline(
++                    lib, "kernel_quantize_q8_0_f32", "kernel_quantize_q8_0_f32", nullptr);
++            }
++            ggml_metal_encoder_set_pipeline(enc, p_q);
++            ggml_metal_encoder_set_bytes  (enc, &args_q, sizeof(args_q), 0);
++            ggml_metal_encoder_set_buffer (enc, bid_src1, 1);
++            ggml_metal_encoder_set_buffer (enc, bid_tmp,  2);
++            ggml_metal_encoder_dispatch_threadgroups(
++                enc, nb_per_row, ne11, ne12 * ne13, 32, 1, 1);
++        }
++
++        ggml_metal_op_concurrency_reset(ctx);
++
++        // Step 2: Q8_0 weights x Q8_0 input -> F32 output.
++        {
++            ggml_metal_kargs_mul_mv_q8_0_q8_0 args_m = {
++                ne00, ne01, ne02, nb01, nb02, nb03,
++                ne11, ne12, ne0, ne1, r2, r3,
++            };
++            ggml_metal_pipeline_with_params p_m =
++                ggml_metal_library_get_pipeline(lib, "kernel_mul_mv_q8_0_q8_0");
++            if (!p_m.pipeline) {
++                p_m = ggml_metal_library_compile_pipeline(
++                    lib, "kernel_mul_mv_q8_0_q8_0", "kernel_mul_mv_q8_0_q8_0", nullptr);
++            }
++            ggml_metal_encoder_set_pipeline(enc, p_m);
++            ggml_metal_encoder_set_bytes  (enc, &args_m, sizeof(args_m), 0);
++            ggml_metal_encoder_set_buffer (enc, bid_src0, 1);
++            ggml_metal_encoder_set_buffer (enc, bid_tmp,  2);
++            ggml_metal_encoder_set_buffer (enc, bid_dst,  3);
++            constexpr int TPG = 32;
++            const int n_groups_x = (ne01 + TPG - 1) / TPG;
++            ggml_metal_encoder_dispatch_threadgroups(
++                enc, n_groups_x, ne11, ne12 * ne13, TPG, 1, 1);
++        }
++
++        return 1;
++    }
++
+
+@@ -2400,6 +2492,33 @@ size_t ggml_metal_op_mul_mat_extra_q8_K(const ggml_tensor * op) {
+     return (size_t)ne11 * ne12 * ne13 * nb * ggml_type_size(GGML_TYPE_Q8_K);
+ }
+
++size_t ggml_metal_op_mul_mat_extra_q8_0(const ggml_tensor * op) {
++    if (op->op != GGML_OP_MUL_MAT) {
++        return 0;
++    }
++    if (op->src[0]->type != GGML_TYPE_Q8_0) {
++        return 0;
++    }
++    if (op->src[1]->type != GGML_TYPE_F32) {
++        return 0;
++    }
++    if (op->src[0]->ne[0] % 32 != 0) {
++        return 0;
++    }
++    const enum ggml_prec prec = (enum ggml_prec) ggml_get_op_params_i32(op, 0);
++    if (prec != GGML_PREC_F32) {
++        return 0;
++    }
++
++    const int64_t nb   = op->src[0]->ne[0] / 32;
++    const int64_t ne11 = op->src[1]->ne[1];
++    const int64_t ne12 = op->src[1]->ne[2];
++    const int64_t ne13 = op->src[1]->ne[3];
++    return (size_t)ne11 * ne12 * ne13 * nb * ggml_type_size(GGML_TYPE_Q8_0);
++}
++
+
+diff --git a/ggml/src/ggml-metal/ggml-metal.metal b/ggml/src/ggml-metal/ggml-metal.metal
+--- a/ggml/src/ggml-metal/ggml-metal.metal
++++ b/ggml/src/ggml-metal/ggml-metal.metal
+@@ -8570,6 +8570,124 @@ kernel void kernel_mul_mv_q4_K_q8_K(
+     dst_f32[(uint64_t)batch * args.ne0 * args.ne1 + (uint64_t)col * args.ne0 + row] = sumf;
+ }
+
++// F32 -> Q8_0 input quantize, mirrors quantize_row_q8_0 (ARM NEON path):
++// 32-elem block, F16 scale, round-to-nearest-even int8 quants. Pre-step
++// for kernel_mul_mv_q8_0_q8_0 below.
++//
++// One block (32 elements) per simdgroup; one element per thread.
++// dispatch grid: (num_blocks_per_row, ne01_input_rows, ne02 * ne03_batches).
++// dispatch threads: 32 per group.
++[[host_name("kernel_quantize_q8_0_f32")]]
++kernel void kernel_quantize_q8_0_f32(
++        constant ggml_metal_kargs_quantize_q8_0 & args,
++        device const char * src,
++        device       char * dst,
++        uint3   tgpig [[threadgroup_position_in_grid]],
++        ushort  tiisg [[thread_index_in_simdgroup]]) {
++    constexpr int QK = 32;
++
++    const uint block_idx = tgpig.x;
++    const uint col       = tgpig.y;
++    const uint batch     = tgpig.z;
++
++    const uint64_t src_off = batch * args.nb03 + col * args.nb01
++                           + (uint64_t)block_idx * QK * sizeof(float);
++    device const float * x = (device const float *)(src + src_off);
++
++    const float my_x = x[tiisg];
++    float       my_a = fabs(my_x);
++
++    for (int offset = 16; offset > 0; offset >>= 1) {
++        const float oa = simd_shuffle_xor(my_a, offset);
++        if (oa > my_a) my_a = oa;
++    }
++    const float amax = simd_broadcast(my_a, 0);
++
++    // Use ORIGINAL F32 d for id, not F16-rounded -- matches CPU.
++    const float d  = amax / 127.0f;
++    const float id = (d != 0.0f) ? (1.0f / d) : 0.0f;
++
++    const uint64_t out_blocks_per_col = (uint64_t)args.num_blocks_per_row;
++    const uint64_t out_off =
++        (((uint64_t)batch * args.ne01 + col) * out_blocks_per_col + block_idx)
++        * sizeof(block_q8_0);
++    device block_q8_0 * out = (device block_q8_0 *)(dst + out_off);
++
++    if (tiisg == 0) {
++        out->d = (half)d;
++    }
++
++    // rint() rounds to nearest integer under default IEEE round-to-nearest-even,
++    // matching ARM NEON vcvtnq_s32_f32.
++    out->qs[tiisg] = (int8_t)rint(my_x * id);
++}
++
++// Q8_0 x Q8_0 mat-vec multiply, F32 output. Mirrors
++// ggml_vec_dot_q8_0_q8_0_generic (ggml-cpu/quants.c) exactly: per 32-elem
++// block, int8 x int8 -> int32 accumulator, then multiply by (x.d_f32 *
++// y.d_f32) and accumulate into F32 sumf. Pure scalar integer arithmetic
++// per output element; no simdgroup matmul. Slow vs the legacy F32-input
++// kernel but bit-identical to CPU.
++//
++// dispatch grid: (ceil(ne01/TG), ne11, ne02*ne03).
++// dispatch threads: 32 per group. row = tgpig.x*32 + tiitg.
++[[host_name("kernel_mul_mv_q8_0_q8_0")]]
++kernel void kernel_mul_mv_q8_0_q8_0(
++        constant ggml_metal_kargs_mul_mv_q8_0_q8_0 & args,
++        device const char * src0,
++        device const char * src1,
++        device       char * dst,
++        uint3   tgpig [[threadgroup_position_in_grid]],
++        ushort  tiitg [[thread_index_in_threadgroup]]) {
++    constexpr int QK = 32;
++    constexpr int TPG = 32;
++
++    const uint row   = tgpig.x * TPG + tiitg;
++    const uint col   = tgpig.y;
++    const uint batch = tgpig.z;
++
++    if ((int)row >= args.ne01) {
++        return;
++    }
++
++    const int nb = args.ne00 / QK;
++
++    const uint i12 = batch % args.ne12;
++    const uint i13 = batch / args.ne12;
++
++    device const block_q8_0 * x = (device const block_q8_0 *)
++        (src0 + (uint64_t)row * args.nb01
++              + (uint64_t)(i12 / args.r2) * args.nb02
++              + (uint64_t)(i13 / args.r3) * args.nb03);
++
++    device const block_q8_0 * y = (device const block_q8_0 *)
++        (src1 + ((uint64_t)batch * args.ne11 + col) * (uint64_t)nb * sizeof(block_q8_0));
++
++    float sumf = 0.0f;
++
++    for (int i = 0; i < nb; ++i) {
++        int sumi = 0;
++        device const int8_t * xq = x[i].qs;
++        device const int8_t * yq = y[i].qs;
++        for (int j = 0; j < QK; ++j) {
++            sumi += (int)xq[j] * (int)yq[j];
++        }
++        sumf += (float)sumi * ((float)x[i].d * (float)y[i].d);
++    }
++
++    device float * dst_f32 = (device float *)dst;
++    dst_f32[(uint64_t)batch * args.ne0 * args.ne1 + (uint64_t)col * args.ne0 + row] = sumf;
++}
++

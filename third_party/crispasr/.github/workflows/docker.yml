@@ -1,0 +1,114 @@
+name: Publish Docker image
+
+# Silenced for everyday pushes — this workflow takes ~45 min per image,
+# 5 images in parallel, and was failing/timing out repeatedly. Re-enable
+# the per-push trigger by uncommenting the `branches:` block below.
+# Until then, fire it explicitly via:
+#   - a v* tag push (release flow)
+#   - GitHub Actions UI → Run workflow (workflow_dispatch)
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+  # pull_request:
+  # push:
+  #   branches:
+  #     - master
+  #     - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  push_to_registry:
+    name: Push Docker image to Docker Hub
+    if: github.event.pull_request.draft == false
+
+    runs-on: ubuntu-22.04
+    env:
+      COMMIT_SHA: ${{ github.sha }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - { tag: "main", dockerfile: ".devops/main.Dockerfile", platform: "linux/amd64" }
+          - { tag: "main-musa", dockerfile: ".devops/main-musa.Dockerfile", platform: "linux/amd64" }
+          - { tag: "main-intel", dockerfile: ".devops/main-intel.Dockerfile", platform: "linux/amd64" }
+          - { tag: "main-cuda", dockerfile: ".devops/main-cuda.Dockerfile", platform: "linux/amd64" }
+          # main-cuda-portable = same CUDA GPU build as main-cuda, but the CPU ggml backend
+          # is generic SSE2 (every optional ISA OFF). For pre-Haswell CPUs where the stock
+          # main-cuda image SIGILLs at startup on a BMI2 instruction inside ggml_cpu_init()
+          # (#261). Slower CPU kernels; GPU ASR is identical.
+          - { tag: "main-cuda-portable", dockerfile: ".devops/main-cuda-portable.Dockerfile", platform: "linux/amd64" }
+          # main-cuda-12 = legacy CUDA 12.4 build for hosts with NVIDIA driver R510-R534
+          # (RHEL/older Ubuntu/enterprise clusters). main-cuda needs R535+. Caps at sm_90;
+          # RTX 50xx (sm_120, Blackwell) is unsupported here — those users want main-cuda.
+          - { tag: "main-cuda-12", dockerfile: ".devops/main-cuda-12.Dockerfile", platform: "linux/amd64" }
+          - { tag: "main-vulkan", dockerfile: ".devops/main-vulkan.Dockerfile", platform: "linux/amd64" }
+
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+        with:
+          image: tonistiigi/binfmt:qemu-v7.0.0-28
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Free up disk space
+        run: |
+          sudo apt-get remove -y '^dotnet-.*' '^llvm-.*' '^mysql-.*' '^postgresql-.*'
+          sudo apt-get autoremove -y
+          sudo apt-get autoclean
+
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+
+          docker system prune -af
+
+          df -h
+
+      - name: Generate tags
+        id: tags
+        run: |
+          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          TAGS="ghcr.io/${REPO}:${{ matrix.config.tag }}"
+          if [ "${{ github.event_name }}" == "push" ]; then
+            TAGS="$TAGS,ghcr.io/${REPO}:${{ matrix.config.tag }}-${{ env.COMMIT_SHA }}"
+          fi
+          echo "tags=$TAGS" >> $GITHUB_OUTPUT
+
+      - name: Build and push Docker image (tagged)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ github.event_name == 'push' }}
+          platforms: ${{ matrix.config.platform }}
+          tags: ${{ steps.tags.outputs.tags }}
+          file: ${{ matrix.config.dockerfile }}
+          # Surface SHA + ref + build date to the image so users hitting
+          # GPU-init failures can answer "which build am I on?" via
+          # `docker run --rm <image> crispasr --version` (#31).
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            GIT_REF=${{ github.ref_name }}
+            BUILD_DATE=${{ github.event.repository.updated_at }}

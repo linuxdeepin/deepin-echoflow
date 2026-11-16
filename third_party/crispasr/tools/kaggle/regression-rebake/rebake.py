@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+"""Bake the missing regression reference dumps ($KAGGLE_ACCOUNT).
+
+38 of the 45 entries in tests/regression/manifest.json are `skip_diff: true` —
+transcript-only, because their ref dump was never produced. A transcript check
+catches a backend that breaks loudly; it cannot catch a stage that drifts. This
+runs the canonical suite in rebake mode so those entries can become full
+stage-by-stage cosine diffs.
+
+WHY A WRAPPER. `kaggle kernels push` uploads ONLY `code_file` (kaggle_usage.md,
+"What gets uploaded" — proven by a ModuleNotFoundError, not inferred), so the
+800-line canonical script cannot be shipped as a bundled sibling. It is fetched
+from the repo at runtime, which is also how the C++ under test arrives.
+
+The canonical script is driven entirely by environment variables and defaults to
+MODE=validate; a kernel push cannot set env vars, so they are set here before it
+is executed. That is the whole reason this file exists.
+"""
+import os, subprocess, sys, pathlib, time
+
+# rebake + upload. UPLOAD=1 needs HF_TOKEN, which the harness resolves from the
+# $KAGGLE_ACCOUNT token dataset (see gotcha #13: private datasets are per-account, so
+# this kernel MUST be pushed by $KAGGLE_ACCOUNT and reference $KAGGLE_ACCOUNT's copies).
+os.environ["CRISPASR_REGRESSION_MODE"] = "rebake"
+# UPLOAD off: the suite's HF token resolution came back anonymous on both
+# accounts (2026-09-27), so refs stage to /kaggle/working/rebake-stage/ and are
+# pulled with `kaggle kernels output --file-pattern 'rebake-stage'` and uploaded
+# from a machine with write auth, after they are checked.
+os.environ["CRISPASR_REGRESSION_UPLOAD"] = "0"  # flipped to 1 below once a token resolves
+# Ref for both the bootstrap clone and the suite's own checkout.
+os.environ["CRISPASR_REF"] = os.environ.get("CRISPASR_REF", "main")
+os.environ["CRISPASR_REGRESSION_BUILD"] = os.environ.get("CRISPASR_REGRESSION_BUILD", "cpu")
+
+# HIDE THE GPU FROM TORCH. v2 lost 8 backends to
+#   torch.AcceleratorError: CUDA error: no kernel image is available
+# which is kaggle_usage.md gotcha #23: Kaggle's preinstalled torch has dropped
+# sm_60, so a P100 draw is fatal to any torch code — and P100 is effectively the
+# only draw right now (#21). nemotron, canary-1b-v2, parakeet-tdt-0.6b-ja,
+# granite-4.1-*, voxtral4b and vibevoice each downloaded their model, loaded it,
+# and died on the first kernel launch, ~100 s each.
+#
+# Reference dumps do not need a GPU — the canonical regression kernel is
+# deliberately enable_gpu:false. But a CPU-only Kaggle worker loses internet
+# (gotcha #3) and this job must pull from HF, so the kernel keeps its GPU and
+# simply does not show it to torch. Same effect, without giving up the network.
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
+os.environ["CRISPASR_REF_DEVICE"] = "cpu"
+
+# Bake in batches (2026-09-27; batch 1 baked funasr-nano, batch 2 retries the
+# three whose failures the harness now handles): one kernel run per group keeps a failure or a
+# timeout from costing the whole set. Batch 1 = nightly skip_diff entries that
+# have both a reference module and a crispasr-diff entry.
+BATCH = ["qwen3-asr-0.6b", "granite-speech-4.1-2b", "mini-omni2", "kyutai-stt-1b",
+         "nemotron-3.5-asr-streaming-0.6b", "parakeet-tdt-0.6b-en", "parakeet-tdt_ctc-1.1b"]
+os.environ["CRISPASR_REGRESSION_BACKENDS"] = os.environ.get("CRISPASR_REGRESSION_BACKENDS", ",".join(BATCH))
+
+SCRIPT_VERSION = "2026-09-27-rebake-8-batch4"
+WORK = pathlib.Path("/kaggle/working")
+
+# Clone into a SEPARATE bootstrap dir: the canonical script manages its own
+# WORK/CrispASR checkout and pulls it, so pre-populating that path would have
+# two owners for one directory.
+BOOT = WORK / "_bootstrap"
+if not BOOT.exists():
+    subprocess.check_call(["git", "clone", "--depth", "1", "-b", os.environ["CRISPASR_REF"],
+                           "https://github.com/CrispStrobe/CrispASR.git", str(BOOT)])
+
+sha = "unknown"
+try:
+    sha = subprocess.check_output(["git", "-C", str(BOOT), "rev-parse", "--short", "HEAD"],
+                                  text=True).strip()
+except Exception:
+    pass
+# Gotcha #24: the kernel script is frozen at the last push while the repo is
+# fresh, so a run can score new code with an old harness. Say both out loud.
+print(f"[rebake] script_version={SCRIPT_VERSION}  bootstrap_clone={sha}  "
+      f"mode={os.environ['CRISPASR_REGRESSION_MODE']} upload={os.environ['CRISPASR_REGRESSION_UPLOAD']}",
+      flush=True)
+
+# Resolve the HF token with the harness from the clone (it scans both dataset
+# mount layouts) and hand it to the suite as HF_TOKEN: the suite's own inline
+# lookup ran before any clone and came back anonymous on current workers, so
+# batches 1-3 could not upload. With a token, upload directly.
+sys.path.insert(0, str(BOOT / "tools" / "kaggle"))
+try:
+    import kaggle_harness as kh
+    _tok = kh.resolve_hf_token()
+except Exception as e:  # never let token plumbing kill the bake
+    _tok = None
+    print(f"[rebake] token resolution failed: {e}", flush=True)
+if _tok:
+    os.environ["HF_TOKEN"] = _tok
+    os.environ["CRISPASR_REGRESSION_UPLOAD"] = "1"
+print(f"[rebake] HF token {'resolved' if _tok else 'NOT resolved'}; upload={os.environ['CRISPASR_REGRESSION_UPLOAD']}", flush=True)
+
+target = BOOT / "tools" / "kaggle" / "crispasr-regression.py"
+if not target.is_file():
+    raise SystemExit(f"canonical suite not found at {target}")
+
+t0 = time.time()
+rc = subprocess.call([sys.executable, str(target)])
+print(f"[rebake] canonical suite exited {rc} after {time.time()-t0:.0f}s", flush=True)
+# Keep /kaggle/working small: a listing over the checkout + build tree + ccache
+# made `kaggle kernels output` answer 429 on both accounts, stranding the staged
+# refs. Only rebake-stage/, results and progress logs are worth downloading.
+import shutil
+for _d in ("CrispASR", "_bootstrap", ".ccache", "hf_cache", "_mini-omni2", "build"):
+    shutil.rmtree(WORK / _d, ignore_errors=True)
+sys.exit(rc)

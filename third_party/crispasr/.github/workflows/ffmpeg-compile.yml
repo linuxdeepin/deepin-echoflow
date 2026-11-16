@@ -1,0 +1,51 @@
+name: FFmpeg TU compile (#297 guard)
+
+# ffmpeg-transcode.cpp is the only source gated behind -DCRISPASR_FFMPEG=ON, and
+# NOTHING in CI built with it on. That is exactly how #297 shipped: the #265 env
+# refactor put a C++ header (crispasr_env.h → <mutex>/<ratio>) inside the file's
+# `extern "C"` block, which GCC 15 rejects with "template with C linkage" — but no
+# job ever recompiled the TU. This job syntax-checks that one translation unit
+# with GCC (the reporter's compiler) + real FFmpeg headers, so the regression
+# can't return silently. It is deliberately a single -fsyntax-only compile, not a
+# full build, to stay fast.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'examples/ffmpeg-transcode.cpp'
+      - 'src/core/crispasr_env.h'
+      - '.github/workflows/ffmpeg-compile.yml'
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'examples/ffmpeg-transcode.cpp'
+      - 'src/core/crispasr_env.h'
+      - '.github/workflows/ffmpeg-compile.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gcc-syntax:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install GCC + FFmpeg dev headers
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            g++ pkg-config \
+            libavformat-dev libavcodec-dev libavutil-dev libswresample-dev
+
+      - name: Syntax-check ffmpeg-transcode.cpp with -DCRISPASR_FFMPEG
+        run: |
+          g++ --version
+          g++ -std=c++17 -fsyntax-only -DCRISPASR_FFMPEG \
+            -I include -I src -I ggml/include \
+            $(pkg-config --cflags libavformat libavcodec libavutil libswresample) \
+            examples/ffmpeg-transcode.cpp
+          echo "ffmpeg-transcode.cpp compiles under GCC with FFmpeg on."

@@ -1,0 +1,384 @@
+// Unit tests for the pyannote-seg → ASR-segment speaker scoring logic,
+// the meat of --diarize-method pyannote (issue #107).
+//
+// We don't load the model or any audio here; we drive
+// `assign_speakers_from_log_posteriors` with hand-crafted log-softmax
+// posteriors and check the resulting speaker labels.
+//
+// pyannote-seg-3.0 class layout:
+//   0 = silence
+//   1 = spk0,        2 = spk1,        3 = spk2,
+//   4 = spk0 + spk1, 5 = spk0 + spk2, 6 = spk1 + spk2.
+// (Powerset ordered by subset size: all singletons, then all pairs.)
+
+#include "../src/crispasr_diarize.h"
+#include "../src/crispasr_diarize_internal.h"
+
+#include <catch2/catch_test_macros.hpp>
+
+#include <cmath>
+#include <cstdint>
+#include <vector>
+
+using crispasr_diarize_internal::assign_speakers_from_log_posteriors;
+using crispasr_diarize_internal::group_words_into_speaker_runs;
+using crispasr_diarize_internal::score_speaker_for_range;
+using crispasr_diarize_internal::SpeakerRun;
+
+namespace {
+
+// Build a [T,7] log-softmax frame from a target class. The target class
+// gets ~unit probability (logp ≈ 0), others get a tiny floor (logp = -8
+// → p ≈ 3e-4). Realistic enough for the scoring logic — true pyannote
+// outputs are not one-hot but the dominant class is usually >0.9.
+void push_frame(std::vector<float>& probs, int target_class, float target_logp = -0.001f) {
+    const float floor_logp = -8.0f;
+    for (int c = 0; c < 7; c++)
+        probs.push_back(c == target_class ? target_logp : floor_logp);
+}
+
+// pyannote-seg-3.0 frame duration. 270 samples / 16 kHz = 16.875 ms.
+constexpr double kFrameDurS = 270.0 / 16000.0;
+
+// Convert a frame count to cs. Half-open: frame [0, n) covers cs [0, ceil(n*frame_dur_s*100)).
+int64_t frames_to_cs(int n_frames) {
+    return (int64_t)std::ceil((double)n_frames * kFrameDurS * 100.0);
+}
+
+} // namespace
+
+TEST_CASE("apply_pyannote: silence segment leaves speaker = -1", "[unit][diarize][pyannote]") {
+    std::vector<float> probs;
+    const int T = 200;
+    for (int f = 0; f < T; f++)
+        push_frame(probs, 0); // pure silence
+
+    std::vector<CrispasrDiarizeSegment> segs = {{0, frames_to_cs(T), -1}};
+    assign_speakers_from_log_posteriors(probs.data(), T, kFrameDurS, 0, segs);
+
+    REQUIRE(segs[0].speaker == -1);
+}
+
+TEST_CASE("apply_pyannote: pure-spk0 frames assign segment to spk 0", "[unit][diarize][pyannote]") {
+    std::vector<float> probs;
+    const int T = 100;
+    for (int f = 0; f < T; f++)
+        push_frame(probs, 1); // spk0
+
+    std::vector<CrispasrDiarizeSegment> segs = {{0, frames_to_cs(T), -1}};
+    assign_speakers_from_log_posteriors(probs.data(), T, kFrameDurS, 0, segs);
+
+    REQUIRE(segs[0].speaker == 0);
+}
+
+TEST_CASE("apply_pyannote: pure-spk1 frames assign segment to spk 1", "[unit][diarize][pyannote]") {
+    std::vector<float> probs;
+    const int T = 100;
+    for (int f = 0; f < T; f++)
+        push_frame(probs, 2); // spk1
+
+    std::vector<CrispasrDiarizeSegment> segs = {{0, frames_to_cs(T), -1}};
+    assign_speakers_from_log_posteriors(probs.data(), T, kFrameDurS, 0, segs);
+
+    REQUIRE(segs[0].speaker == 1);
+}
+
+TEST_CASE("apply_pyannote: pure-spk2 frames assign segment to spk 2", "[unit][diarize][pyannote]") {
+    std::vector<float> probs;
+    const int T = 100;
+    for (int f = 0; f < T; f++)
+        push_frame(probs, 3); // spk2
+
+    std::vector<CrispasrDiarizeSegment> segs = {{0, frames_to_cs(T), -1}};
+    assign_speakers_from_log_posteriors(probs.data(), T, kFrameDurS, 0, segs);
+
+    REQUIRE(segs[0].speaker == 2);
+}
+
+TEST_CASE("apply_pyannote: minority-speaker turn within a segment can still surface", "[unit][diarize][pyannote]") {
+    // First 30 frames spk0, next 70 frames spk1. Old logic argmaxed per
+    // frame then counted classes → spk1 wins with 70 vs 30 (correct
+    // here, just on counts). Make sure the new posterior-weighted
+    // accumulator also lands on spk1.
+    std::vector<float> probs;
+    const int T_spk0 = 30, T_spk1 = 70;
+    for (int f = 0; f < T_spk0; f++)
+        push_frame(probs, 1); // spk0
+    for (int f = 0; f < T_spk1; f++)
+        push_frame(probs, 2); // spk1
+    const int T = T_spk0 + T_spk1;
+
+    std::vector<CrispasrDiarizeSegment> segs = {{0, frames_to_cs(T), -1}};
+    assign_speakers_from_log_posteriors(probs.data(), T, kFrameDurS, 0, segs);
+
+    REQUIRE(segs[0].speaker == 1);
+}
+
+TEST_CASE("apply_pyannote: overlap class spk0+spk1 with extra spk1 frames tips to spk1 (regression vs. old LUT)",
+          "[unit][diarize][pyannote]") {
+    // Old behavior: class_to_speaker[]={...,0,1,0,...} maps class 4
+    // (spk0+spk1) to spk0 ONLY, ignoring spk1's coexistence. So 30
+    // frames of overlap + 25 frames of pure spk1 would tally as
+    // spk0=30, spk1=25 → spk0 wins. New behavior: overlap class
+    // contributes to both spk0 and spk1, so spk1's total is
+    // 30 (overlap) + 25 (pure) = 55 while spk0 is 30 (overlap) →
+    // spk1 wins.
+    std::vector<float> probs;
+    const int T_overlap = 30, T_spk1_only = 25;
+    for (int f = 0; f < T_overlap; f++)
+        push_frame(probs, 4); // spk0 + spk1
+    for (int f = 0; f < T_spk1_only; f++)
+        push_frame(probs, 2); // spk1
+    const int T = T_overlap + T_spk1_only;
+
+    std::vector<CrispasrDiarizeSegment> segs = {{0, frames_to_cs(T), -1}};
+    assign_speakers_from_log_posteriors(probs.data(), T, kFrameDurS, 0, segs);
+
+    REQUIRE(segs[0].speaker == 1);
+}
+
+TEST_CASE("apply_pyannote: multiple ASR segments get independent labels by frame range", "[unit][diarize][pyannote]") {
+    // Frame 0..49 = spk0, 50..99 = spk1, 100..149 = spk2.
+    // Three ASR segments aligned to each block.
+    std::vector<float> probs;
+    for (int f = 0; f < 50; f++)
+        push_frame(probs, 1); // spk0
+    for (int f = 0; f < 50; f++)
+        push_frame(probs, 2); // spk1
+    for (int f = 0; f < 50; f++)
+        push_frame(probs, 3); // spk2
+    const int T = 150;
+
+    std::vector<CrispasrDiarizeSegment> segs = {
+        {0, frames_to_cs(50), -1},
+        {frames_to_cs(50), frames_to_cs(100), -1},
+        {frames_to_cs(100), frames_to_cs(150), -1},
+    };
+    assign_speakers_from_log_posteriors(probs.data(), T, kFrameDurS, 0, segs);
+
+    REQUIRE(segs[0].speaker == 0);
+    REQUIRE(segs[1].speaker == 1);
+    REQUIRE(segs[2].speaker == 2);
+}
+
+TEST_CASE("apply_pyannote: slice_t0_cs offset is honored", "[unit][diarize][pyannote]") {
+    std::vector<float> probs;
+    const int T = 100;
+    for (int f = 0; f < T; f++)
+        push_frame(probs, 2); // spk1
+
+    // Segment expressed in absolute cs; slice starts at cs=500. So the
+    // segment cs=[500, 500+frames_to_cs(T)) maps to local frames [0, T).
+    const int64_t slice_t0 = 500;
+    std::vector<CrispasrDiarizeSegment> segs = {{slice_t0, slice_t0 + frames_to_cs(T), -1}};
+    assign_speakers_from_log_posteriors(probs.data(), T, kFrameDurS, slice_t0, segs);
+
+    REQUIRE(segs[0].speaker == 1);
+}
+
+TEST_CASE("apply_pyannote: empty/invalid inputs are no-ops", "[unit][diarize][pyannote]") {
+    std::vector<CrispasrDiarizeSegment> segs = {{0, 1000, -1}};
+
+    // Null probs.
+    assign_speakers_from_log_posteriors(nullptr, 100, kFrameDurS, 0, segs);
+    REQUIRE(segs[0].speaker == -1);
+
+    // T = 0.
+    float p = -0.0f;
+    assign_speakers_from_log_posteriors(&p, 0, kFrameDurS, 0, segs);
+    REQUIRE(segs[0].speaker == -1);
+
+    // Bogus frame duration.
+    assign_speakers_from_log_posteriors(&p, 1, 0.0, 0, segs);
+    REQUIRE(segs[0].speaker == -1);
+}
+
+TEST_CASE("apply_pyannote: posterior weight beats one-hot count when overlap is sustained but uncertain",
+          "[unit][diarize][pyannote]") {
+    // Build 100 frames where the per-frame argmax is class 1 (spk0)
+    // but class 2 (spk1) is only marginally lower — so a one-hot
+    // count assigns 100 to spk0 and 0 to spk1, while a posterior-
+    // weighted sum gives spk0 ~ 100*0.55 = 55 and spk1 ~ 100*0.45 = 45.
+    // Then add 60 frames where class 2 dominates strongly. The
+    // posterior-weighted total becomes spk1 ~ 45 + 60 = 105 > spk0 ~ 55.
+    // (We mostly assert that the new logic doesn't break the obvious
+    // case: 100 frames where spk0 is consistently the top class but
+    // never with full confidence still loses to 60 frames of strong
+    // spk1.)
+    std::vector<float> probs;
+    // 100 frames: class 1 logp = log(0.55) ≈ -0.598, class 2 logp = log(0.45) ≈ -0.799.
+    for (int f = 0; f < 100; f++) {
+        probs.push_back(-8.0f);   // 0
+        probs.push_back(-0.598f); // 1 (spk0)
+        probs.push_back(-0.799f); // 2 (spk1)
+        probs.push_back(-8.0f);   // 3
+        probs.push_back(-8.0f);   // 4
+        probs.push_back(-8.0f);   // 5
+        probs.push_back(-8.0f);   // 6
+    }
+    // 60 frames of strong spk1.
+    for (int f = 0; f < 60; f++)
+        push_frame(probs, 2);
+    const int T = 160;
+
+    std::vector<CrispasrDiarizeSegment> segs = {{0, frames_to_cs(T), -1}};
+    assign_speakers_from_log_posteriors(probs.data(), T, kFrameDurS, 0, segs);
+
+    REQUIRE(segs[0].speaker == 1);
+}
+
+// -----------------------------------------------------------------------
+// score_speaker_for_range — the per-range scoring used by both
+// segment-level assignment (above) and word-level splitting (#107 P2e).
+// -----------------------------------------------------------------------
+
+TEST_CASE("score_speaker_for_range: picks the dominant speaker within an arbitrary subrange",
+          "[unit][diarize][pyannote]") {
+    // Frame 0..49 = spk0, 50..99 = spk1, 100..149 = spk2.
+    std::vector<float> probs;
+    for (int f = 0; f < 50; f++)
+        push_frame(probs, 1);
+    for (int f = 0; f < 50; f++)
+        push_frame(probs, 2);
+    for (int f = 0; f < 50; f++)
+        push_frame(probs, 3);
+    const int T = 150;
+
+    REQUIRE(score_speaker_for_range(probs.data(), T, kFrameDurS, 0, frames_to_cs(50)) == 0);
+    REQUIRE(score_speaker_for_range(probs.data(), T, kFrameDurS, frames_to_cs(50), frames_to_cs(100)) == 1);
+    REQUIRE(score_speaker_for_range(probs.data(), T, kFrameDurS, frames_to_cs(100), frames_to_cs(150)) == 2);
+    // A sub-range fully inside spk1's block -> spk1.
+    REQUIRE(score_speaker_for_range(probs.data(), T, kFrameDurS, frames_to_cs(60), frames_to_cs(80)) == 1);
+}
+
+TEST_CASE("score_speaker_for_range: silence range -> -1", "[unit][diarize][pyannote]") {
+    std::vector<float> probs;
+    const int T = 50;
+    for (int f = 0; f < T; f++)
+        push_frame(probs, 0);
+
+    REQUIRE(score_speaker_for_range(probs.data(), T, kFrameDurS, 0, frames_to_cs(T)) == -1);
+}
+
+TEST_CASE("score_speaker_for_range: empty / out-of-range -> -1", "[unit][diarize][pyannote]") {
+    std::vector<float> probs;
+    const int T = 50;
+    for (int f = 0; f < T; f++)
+        push_frame(probs, 1);
+
+    REQUIRE(score_speaker_for_range(probs.data(), T, kFrameDurS, 200, 100) == -1);
+    REQUIRE(score_speaker_for_range(probs.data(), T, kFrameDurS, 10000, 20000) == -1);
+}
+
+TEST_CASE("score_speaker_for_range: invalid inputs -> -1", "[unit][diarize][pyannote]") {
+    float p = -0.001f;
+    REQUIRE(score_speaker_for_range(nullptr, 10, kFrameDurS, 0, 100) == -1);
+    REQUIRE(score_speaker_for_range(&p, 0, kFrameDurS, 0, 100) == -1);
+    REQUIRE(score_speaker_for_range(&p, 1, 0.0, 0, 100) == -1);
+}
+
+// -----------------------------------------------------------------------
+// group_words_into_speaker_runs — word→speaker-turn grouping + short-run
+// stability fold shared by the pyannote / sherpa segment splitters. This
+// is the logic issue #267 relies on: once external CTC alignment (-am)
+// has populated seg.words, a segment straddling a speaker turn is split
+// into single-speaker runs here. Pure; no model, no audio.
+// -----------------------------------------------------------------------
+
+namespace {
+// Build back-to-back words of `dur_cs` each; word i covers [i*dur, (i+1)*dur).
+void make_words(size_t n, int64_t dur_cs, std::vector<int64_t>& t0, std::vector<int64_t>& t1) {
+    t0.resize(n);
+    t1.resize(n);
+    for (size_t i = 0; i < n; i++) {
+        t0[i] = (int64_t)i * dur_cs;
+        t1[i] = (int64_t)(i + 1) * dur_cs;
+    }
+}
+} // namespace
+
+TEST_CASE("group_words: single speaker yields one run", "[unit][diarize][words]") {
+    std::vector<int64_t> t0, t1;
+    make_words(3, 30, t0, t1);
+    const auto runs = group_words_into_speaker_runs({1, 1, 1}, t0, t1, 50);
+    REQUIRE(runs.size() == 1);
+    REQUIRE(runs[0].start == 0);
+    REQUIRE(runs[0].end == 3);
+    REQUIRE(runs[0].speaker == 1);
+}
+
+TEST_CASE("group_words: two sustained speakers keep a genuine turn", "[unit][diarize][words]") {
+    std::vector<int64_t> t0, t1;
+    make_words(6, 30, t0, t1); // each run spans 90 cs >= 50, no fold
+    const auto runs = group_words_into_speaker_runs({1, 1, 1, 2, 2, 2}, t0, t1, 50);
+    REQUIRE(runs.size() == 2);
+    REQUIRE(runs[0].speaker == 1);
+    REQUIRE(runs[0].start == 0);
+    REQUIRE(runs[0].end == 3);
+    REQUIRE(runs[1].speaker == 2);
+    REQUIRE(runs[1].start == 3);
+    REQUIRE(runs[1].end == 6);
+}
+
+TEST_CASE("group_words: a lone short mid-phrase flip is folded away", "[unit][diarize][words]") {
+    // spk1 spk1 [spk2] spk1 spk1 — the single 30 cs spk2 word is < 50 cs
+    // and gets absorbed, so the phrase does not fragment into a spurious
+    // "(speaker 2)" stub. Result: same-speaker runs (no genuine turn).
+    std::vector<int64_t> t0, t1;
+    make_words(5, 30, t0, t1);
+    const auto runs = group_words_into_speaker_runs({1, 1, 2, 1, 1}, t0, t1, 50);
+    for (const auto& r : runs)
+        REQUIRE(r.speaker == 1);
+    // No two distinct speakers survive -> caller treats as single-speaker.
+    bool multi = false;
+    int first = -1;
+    for (const auto& r : runs) {
+        if (r.speaker < 0)
+            continue;
+        if (first < 0)
+            first = r.speaker;
+        else if (r.speaker != first)
+            multi = true;
+    }
+    REQUIRE_FALSE(multi);
+}
+
+TEST_CASE("group_words: leading short flip folds into its only neighbour", "[unit][diarize][words]") {
+    // [spk2] spk1 spk1 spk1 — the boundary spk2 word (30 cs < 50) folds
+    // forward into the spk1 run.
+    std::vector<int64_t> t0, t1;
+    make_words(4, 30, t0, t1);
+    const auto runs = group_words_into_speaker_runs({2, 1, 1, 1}, t0, t1, 50);
+    REQUIRE(runs.size() == 1);
+    REQUIRE(runs[0].speaker == 1);
+    REQUIRE(runs[0].start == 0);
+    REQUIRE(runs[0].end == 4);
+}
+
+TEST_CASE("group_words: min_run_cs <= 0 disables folding (split on every change)", "[unit][diarize][words]") {
+    std::vector<int64_t> t0, t1;
+    make_words(3, 30, t0, t1);
+    const auto runs = group_words_into_speaker_runs({1, 2, 1}, t0, t1, 0);
+    REQUIRE(runs.size() == 3);
+    REQUIRE(runs[0].speaker == 1);
+    REQUIRE(runs[1].speaker == 2);
+    REQUIRE(runs[2].speaker == 1);
+}
+
+TEST_CASE("group_words: empty input yields no runs", "[unit][diarize][words]") {
+    const auto runs = group_words_into_speaker_runs({}, {}, {}, 50);
+    REQUIRE(runs.empty());
+}
+
+TEST_CASE("group_words: a real two-speaker turn survives the fold", "[unit][diarize][words]") {
+    // Longer words so both sides clear MIN_RUN — the #267 target case:
+    // one ASR segment "…project | I will now present…" splits in two.
+    std::vector<int64_t> t0, t1;
+    make_words(4, 60, t0, t1); // 60 cs words -> each 2-word run spans 120 cs
+    const auto runs = group_words_into_speaker_runs({0, 0, 1, 1}, t0, t1, 50);
+    REQUIRE(runs.size() == 2);
+    REQUIRE(runs[0].speaker == 0);
+    REQUIRE(runs[1].speaker == 1);
+    REQUIRE(runs[1].start == 2);
+    REQUIRE(runs[1].end == 4);
+}

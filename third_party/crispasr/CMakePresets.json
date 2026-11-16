@@ -1,0 +1,184 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "default",
+      "displayName": "Default",
+      "description": "Default build — Release, no ccache warning, tests off, OpenMP optional",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "GGML_CCACHE":      "OFF",
+        "GGML_OPENMP":      "OFF",
+        "CRISPASR_BUILD_TESTS": "OFF"
+      }
+    },
+    {
+      "name": "debug",
+      "displayName": "Debug",
+      "inherits": "default",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "linux",
+      "displayName": "Linux (with OpenMP)",
+      "inherits": "default",
+      "cacheVariables": {
+        "GGML_OPENMP": "ON"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "asan",
+      "displayName": "AddressSanitizer",
+      "description": "Debug build with ASan — catches heap/stack/global buffer overflows and use-after-free",
+      "inherits": "debug",
+      "binaryDir": "${sourceDir}/build-asan",
+      "cacheVariables": {
+        "CRISPASR_SANITIZE_ADDRESS":   "ON",
+        "CRISPASR_SANITIZE_UNDEFINED": "OFF",
+        "CRISPASR_SANITIZE_THREAD":    "OFF"
+      }
+    },
+    {
+      "name": "ubsan",
+      "displayName": "UndefinedBehaviourSanitizer",
+      "description": "Debug build with UBSan — catches integer overflow, bad casts, null dereferences, etc.",
+      "inherits": "debug",
+      "binaryDir": "${sourceDir}/build-ubsan",
+      "cacheVariables": {
+        "CRISPASR_SANITIZE_ADDRESS":   "OFF",
+        "CRISPASR_SANITIZE_UNDEFINED": "ON",
+        "CRISPASR_SANITIZE_THREAD":    "OFF"
+      }
+    },
+    {
+      "name": "sanitize",
+      "displayName": "ASan + UBSan",
+      "description": "Debug build with both AddressSanitizer and UndefinedBehaviourSanitizer enabled together",
+      "inherits": "debug",
+      "binaryDir": "${sourceDir}/build-sanitize",
+      "cacheVariables": {
+        "CRISPASR_SANITIZE_ADDRESS":   "ON",
+        "CRISPASR_SANITIZE_UNDEFINED": "ON",
+        "CRISPASR_SANITIZE_THREAD":    "OFF"
+      }
+    },
+    {
+      "name": "tsan",
+      "displayName": "ThreadSanitizer",
+      "description": "Debug build with TSan — catches data races. Cannot be combined with ASan/UBSan.",
+      "inherits": "debug",
+      "binaryDir": "${sourceDir}/build-tsan",
+      "cacheVariables": {
+        "CRISPASR_SANITIZE_ADDRESS":   "OFF",
+        "CRISPASR_SANITIZE_UNDEFINED": "OFF",
+        "CRISPASR_SANITIZE_THREAD":    "ON"
+      }
+    },
+    {
+      "name": "coverage",
+      "displayName": "Coverage (gcov/lcov)",
+      "description": "Debug build instrumented for line/branch coverage. Run lcov/genhtml after ctest to get an HTML report.",
+      "inherits": "debug",
+      "binaryDir": "${sourceDir}/build-coverage",
+      "cacheVariables": {
+        "CMAKE_C_FLAGS":   "-O0 --coverage",
+        "CMAKE_CXX_FLAGS": "-O0 --coverage",
+        "CMAKE_EXE_LINKER_FLAGS": "--coverage"
+      },
+      "condition": {
+        "type": "notEquals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "tidy",
+      "displayName": "clang-tidy analysis",
+      "description": "Release build that runs clang-tidy on every compiled TU via CMAKE_CXX_CLANG_TIDY. Requires clang-tidy on PATH.",
+      "inherits": "default",
+      "binaryDir": "${sourceDir}/build-tidy",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE":    "Debug",
+        "CMAKE_CXX_CLANG_TIDY": "clang-tidy;--use-color",
+        "CMAKE_C_CLANG_TIDY":   "clang-tidy;--use-color"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "default",
+      "configurePreset": "default"
+    },
+    {
+      "name": "debug",
+      "configurePreset": "debug"
+    },
+    {
+      "name": "asan",
+      "configurePreset": "asan"
+    },
+    {
+      "name": "ubsan",
+      "configurePreset": "ubsan"
+    },
+    {
+      "name": "sanitize",
+      "configurePreset": "sanitize"
+    },
+    {
+      "name": "tsan",
+      "configurePreset": "tsan"
+    },
+    {
+      "name": "coverage",
+      "configurePreset": "coverage"
+    },
+    {
+      "name": "tidy",
+      "configurePreset": "tidy"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "default",
+      "configurePreset": "default",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "debug",
+      "configurePreset": "debug",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "asan",
+      "configurePreset": "asan",
+      "output": { "outputOnFailure": true },
+      "environment": {
+        "ASAN_OPTIONS": "detect_leaks=1:abort_on_error=1",
+        "UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=1"
+      }
+    },
+    {
+      "name": "sanitize",
+      "configurePreset": "sanitize",
+      "output": { "outputOnFailure": true },
+      "environment": {
+        "ASAN_OPTIONS":  "detect_leaks=1:abort_on_error=1",
+        "UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=1"
+      }
+    },
+    {
+      "name": "coverage",
+      "configurePreset": "coverage",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}

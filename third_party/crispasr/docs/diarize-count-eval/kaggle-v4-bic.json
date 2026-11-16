@@ -1,0 +1,322 @@
+[
+ {
+  "file": "025537ba",
+  "split": "tune",
+  "gt": 2,
+  "hyp_k": 2,
+  "der": 0.04084735455098307,
+  "unwinnable": false
+ },
+ {
+  "file": "039fdc98",
+  "split": "tune",
+  "gt": 8,
+  "hyp_k": 8,
+  "der": 0.08282063416942706,
+  "unwinnable": false
+ },
+ {
+  "file": "08adef28",
+  "split": "tune",
+  "gt": 3,
+  "hyp_k": 1,
+  "der": 9.600000000000003,
+  "unwinnable": false
+ },
+ {
+  "file": "0d8c5882",
+  "split": "tune",
+  "gt": 6,
+  "hyp_k": 5,
+  "der": 0.14032738095238087,
+  "unwinnable": false
+ },
+ {
+  "file": "0db62bbc",
+  "split": "tune",
+  "gt": 3,
+  "hyp_k": 2,
+  "der": 0.027128515595064427,
+  "unwinnable": false
+ },
+ {
+  "file": "13a32599",
+  "split": "tune",
+  "gt": 3,
+  "hyp_k": 4,
+  "der": 0.09874014931563643,
+  "unwinnable": false
+ },
+ {
+  "file": "1a9a818a",
+  "split": "tune",
+  "gt": 3,
+  "hyp_k": 3,
+  "der": 0.38236656246381834,
+  "unwinnable": false
+ },
+ {
+  "file": "23491c7e",
+  "split": "tune",
+  "gt": 1,
+  "hyp_k": 1,
+  "der": 0.0451083075458225,
+  "unwinnable": false
+ },
+ {
+  "file": "235fcf64",
+  "split": "tune",
+  "gt": 4,
+  "hyp_k": 2,
+  "der": 0.0407151819322459,
+  "unwinnable": false
+ },
+ {
+  "file": "27e60640",
+  "split": "tune",
+  "gt": 1,
+  "hyp_k": 2,
+  "der": 0.18605059732958532,
+  "unwinnable": false
+ },
+ {
+  "file": "2b51ca45",
+  "split": "tune",
+  "gt": 3,
+  "hyp_k": 3,
+  "der": 0.06095646955638607,
+  "unwinnable": false
+ },
+ {
+  "file": "2fd4333b",
+  "split": "tune",
+  "gt": 5,
+  "hyp_k": 6,
+  "der": 0.14855508005962403,
+  "unwinnable": false
+ },
+ {
+  "file": "30ba2d11",
+  "split": "tune",
+  "gt": 3,
+  "hyp_k": 2,
+  "der": 0.01496872207327975,
+  "unwinnable": false
+ },
+ {
+  "file": "3626e4c5",
+  "split": "tune",
+  "gt": 5,
+  "hyp_k": 2,
+  "der": 0.06958449023332891,
+  "unwinnable": false
+ },
+ {
+  "file": "377d384c",
+  "split": "tune",
+  "gt": 5,
+  "hyp_k": 4,
+  "der": 0.08260430686406421,
+  "unwinnable": false
+ },
+ {
+  "file": "37e69141",
+  "split": "tune",
+  "gt": 8,
+  "hyp_k": 7,
+  "der": 0.08010790523105789,
+  "unwinnable": false
+ },
+ {
+  "file": "3a7fdda7",
+  "split": "tune",
+  "gt": 5,
+  "hyp_k": 6,
+  "der": 0.10386297376093317,
+  "unwinnable": false
+ },
+ {
+  "file": "3ad79581",
+  "split": "tune",
+  "gt": 6,
+  "hyp_k": 7,
+  "der": 0.07311320754716977,
+  "unwinnable": false
+ },
+ {
+  "file": "3b88b90d",
+  "split": "tune",
+  "gt": 20,
+  "hyp_k": 5,
+  "der": 0.38088754684424764,
+  "unwinnable": true
+ },
+ {
+  "file": "3d077c58",
+  "split": "tune",
+  "gt": 5,
+  "hyp_k": 5,
+  "der": 0.023017948626088497,
+  "unwinnable": false
+ },
+ {
+  "file": "45313f95",
+  "split": "tune",
+  "gt": 7,
+  "hyp_k": 7,
+  "der": 0.05383273940404918,
+  "unwinnable": false
+ },
+ {
+  "file": "45aadfda",
+  "split": "tune",
+  "gt": 2,
+  "hyp_k": 2,
+  "der": 0.005455128890790437,
+  "unwinnable": false
+ },
+ {
+  "file": "488cb1ac",
+  "split": "tune",
+  "gt": 4,
+  "hyp_k": 4,
+  "der": 0.051447053670698684,
+  "unwinnable": false
+ },
+ {
+  "file": "49fc69c3",
+  "split": "tune",
+  "gt": 4,
+  "hyp_k": 4,
+  "der": 0.2036114570361146,
+  "unwinnable": false
+ },
+ {
+  "file": "4ed31aed",
+  "split": "tune",
+  "gt": 1,
+  "hyp_k": 2,
+  "der": 0.19269548050483085,
+  "unwinnable": false
+ },
+ {
+  "file": "4ff990f6",
+  "split": "tune",
+  "gt": 8,
+  "hyp_k": 7,
+  "der": 0.07583859990277114,
+  "unwinnable": false
+ },
+ {
+  "file": "522a2d77",
+  "split": "tune",
+  "gt": 1,
+  "hyp_k": 1,
+  "der": 0.03455480552876886,
+  "unwinnable": false
+ },
+ {
+  "file": "554468c2",
+  "split": "tune",
+  "gt": 7,
+  "hyp_k": 7,
+  "der": 0.017811314972995828,
+  "unwinnable": false
+ },
+ {
+  "file": "55cc9ade",
+  "split": "tune",
+  "gt": 7,
+  "hyp_k": 6,
+  "der": 0.03496619749528996,
+  "unwinnable": false
+ },
+ {
+  "file": "56e41b02",
+  "split": "tune",
+  "gt": 6,
+  "hyp_k": 5,
+  "der": 0.11874178213816147,
+  "unwinnable": false
+ },
+ {
+  "file": "5998ca70",
+  "split": "tune",
+  "gt": 8,
+  "hyp_k": 8,
+  "der": 0.21423562412342192,
+  "unwinnable": false
+ },
+ {
+  "file": "5ba8b32a",
+  "split": "tune",
+  "gt": 4,
+  "hyp_k": 3,
+  "der": 0.045303342309520406,
+  "unwinnable": false
+ },
+ {
+  "file": "6747461d",
+  "split": "tune",
+  "gt": 1,
+  "hyp_k": 1,
+  "der": 0.0,
+  "unwinnable": false
+ },
+ {
+  "file": "694703dd",
+  "split": "tune",
+  "gt": 2,
+  "hyp_k": 2,
+  "der": 0.03810461192350945,
+  "unwinnable": false
+ },
+ {
+  "file": "6a014591",
+  "split": "tune",
+  "gt": 6,
+  "hyp_k": 2,
+  "der": 0.11549881235154391,
+  "unwinnable": false
+ },
+ {
+  "file": "6af183df",
+  "split": "tune",
+  "gt": 3,
+  "hyp_k": 3,
+  "der": 0.05513988288874398,
+  "unwinnable": false
+ },
+ {
+  "file": "6b9eaf47",
+  "split": "tune",
+  "gt": 3,
+  "hyp_k": 3,
+  "der": 0.05449735449735487,
+  "unwinnable": false
+ },
+ {
+  "file": "6efb8ab7",
+  "split": "tune",
+  "gt": 4,
+  "hyp_k": 2,
+  "der": 0.14773729062591834,
+  "unwinnable": false
+ },
+ {
+  "file": "74775de6",
+  "split": "tune",
+  "gt": 2,
+  "hyp_k": 3,
+  "der": 0.016952780512864432,
+  "unwinnable": false
+ },
+ {
+  "file": "792d770e",
+  "split": "tune",
+  "gt": 2,
+  "hyp_k": 2,
+  "der": 0.064415219611848,
+  "unwinnable": false
+ }
+]

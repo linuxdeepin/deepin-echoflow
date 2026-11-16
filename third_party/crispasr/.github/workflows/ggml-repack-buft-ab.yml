@@ -1,0 +1,456 @@
+# Does selecting ggml's CPU repack extra buffer type make quantised matmul
+# faster, and on which ISAs? Closes item 1 of
+# docs/ggml-optimisation-playbook.md §8. Full write-up:
+# docs/ggml-repack-buft-evaluation.md.
+#
+# WHY THIS RUNS ON CI RATHER THAN THE DEV VPS. The VPS is a 4-vCPU shared box
+# that has carried a load average of 6 to 40 all night. Interleaving the arms
+# controls for *some* of that, but not for memory pressure or cache thrash, and
+# no amount of repetition rescues a timing number from a ten-times
+# oversubscribed machine. BASIC_PITCH_CONV_PERF.md makes exactly this contrast:
+# a threading win invisible on the VPS measured 3.6-3.8x on a clean runner.
+#
+# The other reason is ISA coverage, which is the real variable here:
+#
+#   * The VPS is Skylake-SP  — AVX-512F/DQ/CD/BW/VL, NO VNNI, NO AMX.
+#   * A Kaggle CPU worker    — AVX2 only, NO AVX-512, NO VNNI, NO AMX.
+#   * GitHub ubuntu-24.04 x64 is Ice Lake / Cascade Lake class and MAY have
+#     AVX-512 VNNI — the int8 dot-product instruction neither other machine
+#     has, and the one ggml's repacked kernels can use where present.
+#   * GitHub macos-14 is arm64 with dotprod and i8mm, where ggml's repack type
+#     table INVERTS: q8_0 gets a kernel there and q4_K's AVX2 one does not
+#     apply. Since every quantised GGUF in this tree is q8_0, the arm64 answer
+#     is the one that decides whether this lever helps a phone build.
+#
+# So the first thing every leg prints is the ISA it actually got. A number
+# without its machine is worthless, and a negative on one ISA says nothing
+# about another.
+#
+# workflow_dispatch is deliberate: CrispASR CI runs get cancelled by
+# concurrency-group supersession when other sessions push, and a superseded
+# perf run is worse than no perf run because it looks like a failure.
+name: ggml repack buft A/B
+
+on:
+  workflow_dispatch:
+    inputs:
+      end_to_end:
+        description: "Also build the CLI and re-measure hFT / O&F on a clean runner"
+        type: boolean
+        default: false
+  push:
+    paths:
+      - .github/workflows/ggml-repack-buft-ab.yml
+      - examples/cli/crispasr_repack_probe.cpp
+      - src/core/gguf_loader.cpp
+
+# One run per workflow per branch: a newer push cancels the older run. On
+# main nothing is cancelled (every main commit keeps its verdict).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  # Cheap gate: on a branch push, run the heavy job only when the BRANCH ITSELF
+  # changes a watched path (vs its merge-base with main). A rebase onto a main
+  # that touched CMakeLists.txt no longer queues one heavy run per branch.
+  # main, pull requests and manual dispatch always run. See the script's header.
+  scope:
+    runs-on: ubuntu-latest
+    outputs:
+      relevant: ${{ steps.scope.outputs.relevant }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: scope
+        run: |
+          if [ "${{ github.event_name }}" != "push" ] || [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          else
+            git fetch --no-tags origin main || true   # no base -> script answers true
+            python3 .github/scripts/branch_touches_paths.py "$GITHUB_WORKFLOW_REF_PATH" origin/main >> "$GITHUB_OUTPUT" \
+              || echo "relevant=true" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GITHUB_WORKFLOW_REF_PATH: .github/workflows/ggml-repack-buft-ab.yml
+
+  ab:
+    needs: scope
+    if: needs.scope.outputs.relevant == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04,     name: linux-x86_64 }
+          - { os: ubuntu-24.04-arm, name: linux-arm64 }
+          - { os: macos-14,         name: macos-arm64 }
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Host ISA — report this with every number below
+        run: |
+          echo "runner: ${{ matrix.os }} (${{ matrix.name }})  arch=$RUNNER_ARCH"
+          echo "!! GitHub's ubuntu-24.04 pool is HETEROGENEOUS: it hands out both"
+          echo "!! AMD EPYC 7763 (AVX2, no VNNI) and Intel Xeon Platinum 8573C"
+          echo "!! (AVX-512 VNNI + AMX-INT8). Read the model name below before"
+          echo "!! comparing this run to any other."
+          echo "nproc : $(getconf _NPROCESSORS_ONLN)"
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            grep -m1 'model name' /proc/cpuinfo || true
+            echo "--- the flags that decide this question ---"
+            for f in avx2 avx512f avx512vl avx512bw avx512_vnni avx_vnni amx_int8 \
+                     asimddp i8mm sve; do
+              if grep -qw "$f" /proc/cpuinfo; then echo "  $f = 1"; else echo "  $f = 0"; fi
+            done
+            uptime
+            free -g || true
+          else
+            sysctl -n machdep.cpu.brand_string || true
+            sysctl -a 2>/dev/null | grep -E 'hw.optional.(arm64|arm.FEAT_DotProd|arm.FEAT_I8MM)' || true
+            sysctl -n vm.loadavg
+          fi
+
+      # Only ggml and the probe, not the whole tree — the probe links ggml
+      # directly for exactly this reason. GGML_NATIVE=ON so the runner's own
+      # ISA is used, which is the point.
+      - name: Build ggml + probe
+        run: |
+          set -e
+          cmake -S ggml -B bld -DCMAKE_BUILD_TYPE=Release \
+                -DGGML_NATIVE=ON -DGGML_CPU_REPACK=ON \
+                -DGGML_BUILD_TESTS=OFF -DGGML_BUILD_EXAMPLES=OFF
+          cmake --build bld --target ggml ggml-base ggml-cpu -j "$(getconf _NPROCESSORS_ONLN)"
+          LIBDIR=$(dirname "$(find bld -name 'libggml-cpu.*' | head -1)")
+          echo "LIBDIR=$LIBDIR" >> "$GITHUB_ENV"
+          # GGML_MAX_NAME must match the library's, because ggml_tensor::extra
+          # sits immediately after name[GGML_MAX_NAME]. Compiling the probe with
+          # a different value reads extra at the wrong offset and silently
+          # reports "no repack kernel" for every tensor. This standalone ggml
+          # build takes the header default; read it rather than hard-coding it.
+          MAXNAME=$(sed -n 's/^#[[:space:]]*define[[:space:]]*GGML_MAX_NAME[[:space:]]*\([0-9]*\).*/\1/p' ggml/include/ggml.h | head -1)
+          echo "GGML_MAX_NAME=$MAXNAME"
+          c++ -O2 -std=c++17 -DGGML_MAX_NAME="$MAXNAME" \
+              -I ggml/include examples/cli/crispasr_repack_probe.cpp \
+              -o repack-probe -L "$LIBDIR" -lggml -lggml-base -lggml-cpu \
+              -Wl,-rpath,"$PWD/$LIBDIR"
+          ls -l repack-probe
+
+      # One arm per PROCESS, cold run discarded, median of >= 3 — the same
+      # discipline basic-pitch-conv-ab.yml encodes, and for the same reasons: a
+      # shared process warms caches across arms. (The probe's default in-process
+      # interleave is the right tool on a *contended* box, where between-process
+      # drift dominates. On a clean runner it is not.)
+      #
+      # `--arm ... ` prints one machine-readable ARM line per (type, shape),
+      # with status `ok` or `declined`. `declined` means the repack buffer type
+      # has no kernel for that type on this ISA — a result, not a skip.
+      - name: A/B — separate process per arm
+        env:
+          MKL_NUM_THREADS: "1"          # CrispASR issue #453
+          OPENBLAS_NUM_THREADS: "1"
+        run: |
+          set -e
+          NPROC=$(getconf _NPROCESSORS_ONLN)
+          : > arms.txt
+          for t in 1 "$NPROC"; do
+            for arm in default repack; do
+              for rep in 0 1 2 3; do
+                out=$(./repack-probe --arm "$arm" --threads "$t" --reps 30 | grep '^ARM ')
+                # rep 0 is cold: page faults on the weight buffer and a
+                # first-touch of the repacked layout. Discard it.
+                [ "$rep" = 0 ] || echo "$out" >> arms.txt
+              done
+            done
+          done
+          cat arms.txt
+
+      # The paired in-process view as well, for the human-readable ratio table
+      # and because it cross-checks the separate-process numbers.
+      - name: A/B — interleaved, human-readable
+        env:
+          MKL_NUM_THREADS: "1"
+          OPENBLAS_NUM_THREADS: "1"
+        run: |
+          ./repack-probe --threads 1 --reps 40 | tee ab-t1.txt
+          ./repack-probe --threads "$(getconf _NPROCESSORS_ONLN)" --reps 40 | tee ab-tN.txt
+
+      # Median across the surviving reps, per (arm, type, shape, threads).
+      # python3 rather than awk: the first cut of this was awk and it silently
+      # emitted a header and no rows, which is the worst possible failure for a
+      # perf step -- it looks like "measured, nothing to report".
+      - name: Ratios from the separate-process arms
+        run: |
+          python3 - arms.txt <<'PY' | tee ratios.txt
+          import sys, collections, statistics
+          rows = collections.defaultdict(list); declined = set()
+          for line in open(sys.argv[1]):
+              p = line.split()
+              if len(p) < 10 or p[0] != "ARM":
+                  continue
+              arm, ty, K, N, M, thr = p[1], p[2], p[3], p[4], p[5], p[6]
+              key = (ty, K, N, M, thr)
+              if p[-1] == "declined":
+                  declined.add((key, arm)); continue
+              rows[(key, arm)].append(float(p[7]))      # best-of within the process
+          print(f"{'type':<6} {'shape(K,N,M)':<16} {'thr':<4} {'default':>9} {'repack':>9} {'speedup':>9}")
+          seen = {k for (k, a) in rows} | {k for (k, a) in declined}
+          if not seen:
+              sys.exit("no ARM rows parsed -- the probe printed nothing usable")
+          for k in sorted(seen, key=lambda x: (int(x[4]), x[1], x[0])):
+              d = rows.get((k, "default"))
+              if not d:
+                  continue
+              dm = statistics.median(d)
+              r = rows.get((k, "repack"))
+              shape = f"{k[1]},{k[2]},{k[3]}"
+              if r:
+                  rm = statistics.median(r)
+                  print(f"{k[0]:<6} {shape:<16} {k[4]:<4} {dm:9.4f} {rm:9.4f} {dm/rm:8.2f}x")
+              else:
+                  print(f"{k[0]:<6} {shape:<16} {k[4]:<4} {dm:9.4f} {'-':>9} {'declined':>9}")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: repack-ab-${{ matrix.name }}
+          path: |
+            ab-t1.txt
+            ab-tN.txt
+            arms.txt
+            ratios.txt
+
+  # ===========================================================================
+  # End-to-end, on a clean runner. Optional: it builds the CLI, which the
+  # hermetic job above deliberately does not.
+  #
+  # This exists because everything in docs/music-transcription/*_PERF.md was
+  # measured on the dev VPS at a load average of 3-20 (and the box hit 40 the
+  # night this was written), and the docs say so in writing. Until today those
+  # numbers could not be re-taken anywhere: the GGUFs were Kaggle outputs
+  # published nowhere a runner could reach. cstr/hft-transformer-GGUF and
+  # cstr/onsets-and-frames-GGUF are now public and in the model registry, so a
+  # runner can fetch them and the figures can be firmed up.
+  #
+  # Two questions in one run:
+  #   1. Does routing hFT's q4_0 weights through the repack buffer type change
+  #      whole-model CPU time? (CRISPASR_GGUF_REPACK=0 is the control.)
+  #   2. What are hFT's and O&F's f32-vs-q8_0 costs on a machine at load ~0,
+  #      against the VPS's 1.29x and 0.96x?
+  # ===========================================================================
+  end-to-end:
+    needs: scope
+    if: needs.scope.outputs.relevant == 'true' && (inputs.end_to_end)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04,     name: linux-x86_64 }
+          - { os: ubuntu-24.04-arm, name: linux-arm64 }
+    runs-on: ${{ matrix.os }}
+    name: end-to-end ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Host ISA
+        run: |
+          grep -m1 'model name' /proc/cpuinfo || true
+          for f in avx2 avx512f avx512_vnni amx_int8 asimddp i8mm sve; do
+            if grep -qw "$f" /proc/cpuinfo; then echo "  $f = 1"; else echo "  $f = 0"; fi
+          done
+          echo "nproc: $(nproc)"; uptime
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake g++
+
+      # GGML_NATIVE=ON, unlike ci.yml: this job is measuring, not checking
+      # portability, and the ISA is the variable under test.
+      - name: Build CLI
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=ON \
+                -DCRISPASR_BUILD_TESTS=OFF -DCRISPASR_BUILD_SERVER=OFF
+          cmake --build build --target crispasr-cli -j "$(nproc)"
+
+      - name: Fetch models
+        run: |
+          set -e
+          mkdir -p m
+          base_h=https://huggingface.co/cstr/hft-transformer-GGUF/resolve/main
+          base_o=https://huggingface.co/cstr/onsets-and-frames-GGUF/resolve/main
+          for q in f32 q8_0 q4_0; do
+            curl -fsSL -o "m/hft-$q.gguf" "$base_h/hft-transformer-$q.gguf"
+            curl -fsSL -o "m/oaf-$q.gguf" "$base_o/onsets-and-frames-$q.gguf" || \
+              echo "::warning::onsets-and-frames-$q.gguf not fetched"
+          done
+          ls -l m
+
+      # Arms interleaved round-robin with a rotating start order, every arm in
+      # its own process, cold rep discarded. CPU seconds (user+sys), not wall:
+      # wall on a 4-core runner conflates the thread-scaling question with the
+      # quantisation one.
+      #
+      # Timing is taken with resource.getrusage(RUSAGE_CHILDREN) rather than
+      # /usr/bin/time, which is NOT installed on GitHub's ubuntu runners --
+      # the first cut used it and every arm silently recorded an empty string,
+      # so the summary printed 0.00 cpu-s for all six and looked like a
+      # measurement rather than a missing binary. getrusage needs no package
+      # and behaves the same on macOS.
+      - name: Interleaved A/B
+        env:
+          MKL_NUM_THREADS: "1"          # CrispASR issue #453
+          OPENBLAS_NUM_THREADS: "1"
+        run: |
+          python3 - <<'PY'
+          import os, resource, statistics, subprocess, pathlib, sys
+          WAV = "samples/jfk.wav"
+          ARMS = [
+              ("hft-f32",          "m/hft-f32.gguf",  "0"),
+              ("hft-q8_0-generic", "m/hft-q8_0.gguf", "0"),
+              # q8_0 + repack is the arm that matters most, and only on arm64:
+              # x86 has no repacked q8_0 kernel, so there it is a duplicate of
+              # the generic arm and the loader falls back (keeping mmap). On
+              # arm64 it is the whole point -- q8_0 is what every quantised
+              # GGUF in this tree actually ships.
+              ("hft-q8_0-repack",  "m/hft-q8_0.gguf", "1"),
+              ("hft-q4_0-generic", "m/hft-q4_0.gguf", "0"),
+              ("hft-q4_0-repack",  "m/hft-q4_0.gguf", "1"),
+              ("oaf-f32",          "m/oaf-f32.gguf",  "0"),
+              ("oaf-q8_0",         "m/oaf-q8_0.gguf", "0"),
+          ]
+          ARMS = [a for a in ARMS if pathlib.Path(a[1]).exists()]
+          times = {n: [] for n, _, _ in ARMS}
+
+          def cpu_of_children():
+              r = resource.getrusage(resource.RUSAGE_CHILDREN)
+              return r.ru_utime + r.ru_stime, r.ru_maxrss
+
+          for rep in range(4):
+              order = ARMS[rep % len(ARMS):] + ARMS[:rep % len(ARMS)]
+              for name, model, repack in order:
+                  env = dict(os.environ, CRISPASR_GGUF_REPACK=repack)
+                  before, _ = cpu_of_children()
+                  with open(f"{name}.notes", "w") as out, open(f"{name}.log", "w") as err:
+                      subprocess.run(["./build/bin/crispasr", "--piano", "-m", model,
+                                      "-t", "1", "-f", WAV],
+                                     stdout=out, stderr=err, env=env, check=False)
+                  after, rss = cpu_of_children()
+                  dt = after - before
+                  # rep 0 is cold: page cache, first touch, dynamic loader.
+                  if rep:
+                      times[name].append(dt)
+                  print(f"rep {rep} {name:<20} {dt:7.2f} cpu-s  (peak child RSS so far {rss//1024} MiB)",
+                        flush=True)
+
+          print()
+          print(f"== CPU seconds (user+sys), median of 3, load {os.getloadavg()[0]:.2f} ==")
+          for name, _, _ in ARMS:
+              v = times[name]
+              if v:
+                  print(f"{name:<20} {statistics.median(v):7.2f} cpu-s (n={len(v)})")
+          for name in ("hft-f32", "hft-q8_0-generic", "hft-q8_0-repack",
+                       "hft-q4_0-generic", "hft-q4_0-repack"):
+              if times.get(name) and times.get("hft-f32"):
+                  base = statistics.median(times["hft-f32"])
+                  if base:
+                      print(f"  {name:<20} {statistics.median(times[name])/base:5.2f}x f32")
+          if times.get("oaf-f32") and times.get("oaf-q8_0"):
+              b = statistics.median(times["oaf-f32"])
+              if b:
+                  print(f"  oaf-q8_0             {statistics.median(times['oaf-q8_0'])/b:5.2f}x f32")
+          PY
+
+      # Two guards on the A/B itself, then one on the answer.
+      - name: Assert the arms were actually different
+        run: |
+          echo "== did the q4_0 repack arm take the fast path? =="
+          grep -h 'extra buffer type' hft-q4_0-repack.log || {
+            echo "::error::the repack arm fell back; its number duplicates the generic arm"; exit 1; }
+          echo "== and its control must NOT have =="
+          if grep -h 'extra buffer type' hft-q4_0-generic.log; then
+            echo "::error::the control arm took the repack path; the A/B compared the wrong thing"
+            exit 1
+          fi
+          echo "control clean"
+
+          # q8_0 is expected to take the fast path on arm64 and to fall back on
+          # x86, so assert the ISA-conditional behaviour rather than a fixed
+          # outcome -- getting this backwards either way would be a real bug.
+          echo
+          echo "== q8_0: fast path on arm64, fallback on x86 =="
+          if grep -qw asimddp /proc/cpuinfo || grep -qw i8mm /proc/cpuinfo; then
+            grep -h 'extra buffer type' hft-q8_0-repack.log || {
+              echo "::error::arm64 has a q8_0 repack kernel but the loader did not use it"; exit 1; }
+            echo "arm64: q8_0 repacked, as expected"
+          else
+            if grep -h 'extra buffer type' hft-q8_0-repack.log; then
+              echo "::error::x86 has no q8_0 repack kernel, yet the loader claims it repacked -- check repack_buft_accepts()"
+              exit 1
+            fi
+            echo "x86: q8_0 correctly declined and fell back to the mmap path"
+          fi
+
+      # Note lines are: onset  offset  midi  name  velocity.
+      #
+      # An exact diff is the WRONG check and the first version of this step got
+      # it wrong. The repacked kernel quantises the activation identically but
+      # accumulates in a different order, so GEMM outputs differ by ~1e-7
+      # relative (measured in the hermetic job). Downstream that moves onsets by
+      # one hop and velocities by a few units on roughly a fifth of the notes --
+      # every time, on every runner. A step that fails on that is crying wolf.
+      #
+      # What a real regression would move is the PITCH SEQUENCE and the NOTE
+      # COUNT. Those are asserted. Note that samples/jfk.wav is speech fed to a
+      # piano transcriber, so nearly every detection is marginal and a
+      # threshold flip costing one short note is expected rather than alarming;
+      # the count tolerance exists for that. Settling it properly means
+      # note-level F1 on MusicNet (tools/hft_musicnet_f1.py), not a byte diff.
+      - name: Decoded-note parity between the repack and generic arms
+        run: |
+          python3 - <<'PY'
+          import sys
+          def load(p):
+              rows = [l.rstrip("\n").split("\t") for l in open(p) if l.strip()]
+              return [(float(r[0]), float(r[1]), int(r[2]), int(r[4])) for r in rows]
+          a, b = load("hft-q4_0-repack.notes"), load("hft-q4_0-generic.notes")
+          print(f"notes: repack={len(a)} generic={len(b)}")
+          pa, pb = [r[2] for r in a], [r[2] for r in b]
+          if pa == pb:
+              print(f"pitch sequence: IDENTICAL across {len(pa)} notes")
+              on = max(abs(x[0] - y[0]) for x, y in zip(a, b)) if a else 0.0
+              off = max(abs(x[1] - y[1]) for x, y in zip(a, b)) if a else 0.0
+              vel = max(abs(x[3] - y[3]) for x, y in zip(a, b)) if a else 0
+              print(f"max onset shift {on*1000:.1f} ms, max offset shift {off*1000:.1f} ms, "
+                    f"max velocity delta {vel}")
+              if on > 0.010 or off > 0.010:
+                  print("::error::onset/offset moved by more than 10 ms -- not a rounding difference")
+                  sys.exit(1)
+              sys.exit(0)
+          # Pitch sequences differ: allow a small number of threshold flips on
+          # this deliberately marginal fixture, but say exactly how many.
+          import difflib
+          sm = difflib.SequenceMatcher(a=pa, b=pb, autojunk=False)
+          changed = sum(max(i2 - i1, j2 - j1)
+                        for tag, i1, i2, j1, j2 in sm.get_opcodes() if tag != "equal")
+          print(f"::warning::pitch sequence differs on {changed} of {max(len(pa), len(pb))} notes")
+          for tag, i1, i2, j1, j2 in sm.get_opcodes():
+              if tag != "equal":
+                  print(f"  {tag}: repack{a[i1:i2]} vs generic{b[j1:j2]}")
+          if changed > max(3, 0.05 * max(len(pa), len(pb))):
+              print("::error::too many notes changed to be threshold noise")
+              sys.exit(1)
+          print("within tolerance for a marginal fixture; confirm with note-level F1 on MusicNet")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: repack-e2e-${{ matrix.name }}
+          path: |
+            *.times
+            *.notes
+            *.log

@@ -1,0 +1,14 @@
+{
+  "id": "${KAGGLE_ACCOUNT}/crispasr-fusion-a-b-norm-affine-siglu-on-t4",
+  "title": "CrispASR — fusion A/B (norm_affine + siglu) on T4",
+  "code_file": "crispasr-fusion-ab.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_internet": "true",
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

@@ -1,0 +1,54 @@
+# backend-components.txt — runtimes in src/ that are SUB-MODULES, not backends.
+#
+# Read by tools/check-backend-wiring.py. It exists to close the last blind spot
+# in that audit: a runtime that is in NEITHER the CLI roster NOR the c_api list
+# is invisible to all three existing checks — exactly the state
+# mel-band-roformer was in while being the default `--separate` model.
+#
+# The obvious signal for that fourth check — "src/*.h declares
+# <x>_init_from_file but no backend is named <x>" — fires on 20 of 82 stems, and
+# 17 of those are legitimate components. A gate with 17 false positives trains
+# everyone to ignore the audit, which is worse than no gate. So each component
+# is listed here ONCE, with its consumer, and the check fails on anything not
+# named. "This is a sub-module, not a backend" becomes a recorded decision
+# instead of a silent omission.
+#
+# NOT listed here, deliberately: canary-ctc, irodori-tts and t5-translate. Those
+# ARE backends, reachable under an alias, and the script's existing cli_resolves()
+# probe asks the binary rather than guessing. Allowlisting them would hide a real
+# regression if the alias ever broke.
+#
+# Adding an entry is a claim you should be able to defend: the runtime is driven
+# by another backend or by a non-`--backend` surface, and it is not something a
+# user selects with `--backend <x>`. If it IS user-selectable, wire it up
+# instead — that is what the audit is asking for.
+#
+# Format: one stem per line (the `<x>` in `<x>_init_from_file`), '#' comments.
+
+# --- Audio codecs / vocoders driven by a parent TTS backend ---
+miocodec            # mini-omni2 audio codec
+mimo_tokenizer      # mini-omni2 / MiMo token front-end
+snac_decoder        # orpheus SNAC vocoder (src/orpheus_snac.h)
+wavtok_decoder      # outetts WavTokenizer (src/outetts_wavtok.h)
+tada_codec          # tada-tts codec
+chatterbox_s3gen    # chatterbox S3Gen flow+vocoder stage
+
+# --- Voice-conversion / speaker stages driven by another backend ---
+openvoice2          # OpenVoice V2 tone-color converter; driven by melotts
+beatrice_phone      # Beatrice v2 phone extractor  (svc pipeline)
+beatrice_pitch      # Beatrice v2 pitch estimator  (svc pipeline)
+wespeaker           # speaker embeddings for the diarization clustering stack
+nemotron3_diar      # Nemotron-3-Diarization; driven by --diarize-method sortformer / diarize ABI method 5 (#466)
+
+# --- Language ID: exposed as crispasr_text_detect_language, not as a backend ---
+text_lid            # dispatcher over the two below (src/text_lid_dispatch.h)
+lid_cld3            # CLD3 text-LID model
+lid_fasttext        # fastText / GlotLID text-LID model
+
+# --- Sub-runtimes of a named backend ---
+granite_speech      # the runtime behind the `granite` backend
+granite_nle         # the runtime behind the granite NAR variant
+
+# --- Not speech models at all ---
+audioseal           # neural watermark embed/detect (provenance, not ASR/TTS)
+ma_sound            # miniaudio playback handle (src/miniaudio.h, --tts-play)

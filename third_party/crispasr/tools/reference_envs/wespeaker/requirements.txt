@@ -1,0 +1,15 @@
+# Reference-dump env for `--backend wespeaker` (WeSpeaker ResNet34-LM).
+# Bootstrap: tools/bootstrap_ref_env.sh wespeaker
+#
+# The dumper imports wenet-e2e/wespeaker (Apache-2.0) purely as an ORACLE to
+# produce reference activations — it is never vendored and nothing it returns
+# is copied into the C++ runtime. If the package is not importable, set
+# WESPEAKER_REPO to a `git clone https://github.com/wenet-e2e/wespeaker`.
+
+numpy>=2.0
+torch>=2.4
+torchaudio>=2.4
+wespeaker
+
+# Always required by the dump driver itself
+gguf>=0.10

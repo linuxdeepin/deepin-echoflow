@@ -1,0 +1,73 @@
+# CrispASR#337: the Vulkan flash-attention shaders read the mask with a row
+# stride of KV instead of the mask's own stride, so any mask wider than KV
+# (legal; CPU and CUDA honour nb[1]) was read shifted row by row.
+#
+# Runs the new mask_pad FLASH_ATTN_EXT cases on lavapipe twice:
+#   before - src/ggml-vulkan at 2dd13edd (the fork before the fix, with the
+#            new tests): the cases
+#            MUST fail, or the test cannot detect the bug (positive control);
+#   after  - HEAD: every FLASH_ATTN_EXT case must pass.
+# GGML_VK_VISIBLE_DEVICES=0 is required: ggml skips CPU-type Vulkan devices
+# (lavapipe) unless a device is chosen explicitly, and test-backend-ops then
+# silently tests only the CPU backend. Each job asserts Vulkan0 ran.
+
+name: vk-fa-mask-stride
+
+on:
+  push:
+    branches: [fix/vk-fa-mask-stride]
+  workflow_dispatch:
+
+jobs:
+  lavapipe:
+    name: ${{ matrix.arm }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arm: [before, after]
+    env:
+      GGML_VK_VISIBLE_DEVICES: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: before = tests without the fix
+        if: matrix.arm == 'before'
+        run: git checkout 2dd13eddc783f2cd0a29324affd78081cc6f0034 -- src/ggml-vulkan && git status --short
+      - name: install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build glslc libvulkan-dev spirv-headers vulkan-tools mesa-vulkan-drivers
+      # The lavapipe ICD file name differs across Mesa versions (lvp_icd.json vs
+      # lvp_icd.x86_64.json); a wrong path gives zero devices and ggml then tests
+      # only the CPU backend without a word.
+      - name: select lavapipe
+        run: |
+          ls /usr/share/vulkan/icd.d/
+          icd=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -1)
+          test -n "$icd"
+          echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
+          VK_ICD_FILENAMES=$icd vulkaninfo --summary | grep -iE "deviceName|deviceType|apiVersion"
+      - name: build
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=ON -DGGML_BUILD_TESTS=ON
+          cmake --build build -j$(nproc) --target test-backend-ops
+      - name: FLASH_ATTN_EXT mask_pad on Vulkan0
+        run: |
+          set +e
+          ./build/bin/test-backend-ops -b Vulkan0 -o FLASH_ATTN_EXT -p mask_pad 2>&1 | tee pad.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          grep -q "Vulkan0" pad.log || { echo "::error::Vulkan0 was not tested"; exit 1; }
+          n_ok=$(grep -c "mask_pad.*OK" pad.log || true)
+          n_fail=$(grep -c "mask_pad.*FAIL" pad.log || true)
+          echo "mask_pad cases: OK=$n_ok FAIL=$n_fail rc=$rc"
+          if [ "${{ matrix.arm }}" = before ]; then
+            [ "$n_fail" -gt 0 ] || { echo "::error::positive control: unfixed shaders passed the wide-mask cases"; exit 1; }
+          else
+            [ "$n_ok" -gt 0 ] && [ "$n_fail" -eq 0 ] && [ "$rc" -eq 0 ] || exit 1
+          fi
+      - name: all FLASH_ATTN_EXT on Vulkan0 (after only)
+        if: matrix.arm == 'after'
+        run: ./build/bin/test-backend-ops -b Vulkan0 -o FLASH_ATTN_EXT 2>&1 | tail -40; test ${PIPESTATUS[0]} -eq 0

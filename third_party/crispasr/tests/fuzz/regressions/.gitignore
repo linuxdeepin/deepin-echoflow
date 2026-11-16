@@ -1,0 +1,15 @@
+# tests/.gitignore excludes *.wav and *.ogg — scratch outputs the test binaries
+# write. Regression seeds are SOURCE, and the parent pattern silently swallowed
+# them: `ogg-huge-comment-count.ogg` was crafted, documented in README.md, and
+# named in ci.yml's copy step, but `git add` ignored it and nobody noticed, so
+# the "deterministic gate" replayed an empty set from the day it was written
+# (`git log --all -- tests/fuzz/regressions/*.ogg` finds no add). Re-include the
+# audio extensions here so a seed cannot be lost that way again.
+!*.ogg
+!*.wav
+!*.webm
+!*.au
+!*.amr
+!*.m4a
+!*.mp3
+!*.flac

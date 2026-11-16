@@ -1,0 +1,51 @@
+name: CUDA CLI and library package pairing
+
+on:
+  workflow_dispatch:
+    inputs:
+      cli_run:
+        description: Successful release dry-run ID for Windows CUDA CLI
+        type: string
+        required: true
+      library_run:
+        description: Successful release dry-run ID for Windows CUDA libraries
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  pair:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        flavor: [cuda, cuda126]
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check resources and fetch actual staged packages
+        env:
+          CLI_RUN: ${{ inputs.cli_run }}
+          LIBRARY_RUN: ${{ inputs.library_run }}
+          FLAVOR: ${{ matrix.flavor }}
+        run: |
+          uptime
+          free -h
+          gh run download "$CLI_RUN" --repo "$GITHUB_REPOSITORY" \
+            --name "crispasr-windows-x86_64-$FLAVOR-split" --dir cli
+          gh run download "$LIBRARY_RUN" --repo "$GITHUB_REPOSITORY" \
+            --name "libcrispasr-windows-x86_64-$FLAVOR" --dir libraries
+      - name: Compare every packaged CUDA DLL to the CLI manifest
+        env:
+          FLAVOR: ${{ matrix.flavor }}
+        run: |
+          python3 tools/ci-heavy/check_cuda_package_pair.py --flavor "$FLAVOR" \
+            --cli cli --libraries libraries --output package-pair.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cuda-package-pair-${{ matrix.flavor }}
+          path: package-pair.json

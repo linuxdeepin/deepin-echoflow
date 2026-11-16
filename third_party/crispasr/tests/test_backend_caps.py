@@ -1,0 +1,303 @@
+#!/usr/bin/env python3
+"""Capability-matrix regression tests (PLAN #74b).
+
+Two test classes:
+
+  TestCapabilityJSON   — static: crispasr --list-backends-json must declare
+                         translate / src-tgt-language / voice-cloning for the
+                         known set of backends.  No model, no network.
+
+  TestTranslateLive    — live: runs --translate -l de on samples/jfk.wav and
+                         asserts non-empty output.  Skipped when the binary or
+                         model file is absent.
+
+Run:
+  python tests/test_backend_caps.py
+  pytest tests/test_backend_caps.py -v
+"""
+
+import json
+import os
+import subprocess
+import sys
+import unittest
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[1]
+BIN = os.environ.get(
+    "CRISPASR_BIN",
+    str(REPO / "build-ninja-compile" / "bin" / "crispasr"),
+)
+SAMPLE = str(REPO / "samples" / "jfk.wav")
+
+# ---------------------------------------------------------------------------
+# Ground-truth caps for backends we care about in this sweep.
+# A backend listed here must declare ALL of the named caps; unlisted backends
+# are ignored so new additions don't break existing tests.
+# ---------------------------------------------------------------------------
+
+_TRANSLATE_BACKENDS = {
+    "whisper",
+    "canary",
+    "granite",
+    "granite-4.1",
+    "granite-4.1-plus",
+    "voxtral",
+    "qwen3",
+    "qwen3-1.7b",
+    "mega-asr",
+    "m2m100",
+    "m2m100-wmt21",
+    "madlad",
+    "gemma4-e2b",
+}
+
+_SRC_TGT_BACKENDS = {
+    # TTS side (#304/#329): for these two the pair means the synthesis
+    # languages — `-tl` is what to SPEAK, `-sl` is what the cloning reference is
+    # spoken in. The bit is what stops crispasr_run's warn_unsupported() from
+    # printing "--target-lang ignored by this backend" and discarding the flag,
+    # which is how #329 came to read as "this engine has no language option".
+    "cosyvoice3-tts",
+    "chatterbox",
+    "chatterbox-turbo",
+    "chatterbox-nano",
+    "chatterbox-finnish-nano",
+    "kartoffelbox-turbo",
+    "lahgtna-chatterbox",
+    "qwen3-tts",
+    "qwen3-tts-1.7b-base",
+    "canary",
+    "granite",
+    "granite-4.1",
+    "granite-4.1-plus",
+    "voxtral",
+    "qwen3",
+    "qwen3-1.7b",
+    "mega-asr",
+    "m2m100",
+    "m2m100-wmt21",
+    "madlad",
+    "gemma4-e2b",
+}
+
+_VOICE_CLONING_BACKENDS = {
+    "chatterbox",
+    "chatterbox-turbo",
+    "chatterbox-nano",
+    "chatterbox-finnish-nano",
+    "kartoffelbox-turbo",
+    "lahgtna-chatterbox",
+    "vibevoice-1.5b",
+    "indextts",
+    "omnivoice",
+    "voxcpm2-tts",
+    "qwen3-tts",
+    "qwen3-tts-1.7b-base",
+}
+
+
+class TestVoiceCloningSessionDispatch(unittest.TestCase):
+    """Voice-cloning capabilities must be reachable through the public session API."""
+
+    @classmethod
+    def setUpClass(cls):
+        source = (REPO / "src" / "crispasr_c_api.cpp").read_text(encoding="utf-8")
+        cls.c_api_source = source
+        cls.set_codec = source.split("CA_EXPORT int crispasr_session_set_codec_path", 1)[1].split(
+            "CA_EXPORT int crispasr_session_set_voice", 1
+        )[0]
+        cls.set_voice = source.split("CA_EXPORT int crispasr_session_set_voice", 1)[1].split(
+            "CA_EXPORT int crispasr_session_tada_set_makeref_models", 1
+        )[0]
+        cls.synthesize = source.split("static float* crispasr_session_synthesize_raw_impl", 1)[1].split(
+            "static int crispasr_session_set_prompt", 1
+        )[0]
+
+    def test_chatterbox_aliases_are_openable_and_advertised_by_the_c_abi(self):
+        for backend in (
+            "chatterbox-turbo",
+            "chatterbox-nano",
+            "chatterbox-finnish-nano",
+            "kartoffelbox-turbo",
+            "lahgtna-chatterbox",
+        ):
+            with self.subTest(backend=backend):
+                self.assertIn(f's->backend == "{backend}"', self.c_api_source)
+                available = self.c_api_source.split("CA_EXPORT int crispasr_session_available_backends", 1)[1]
+                self.assertIn(backend, available)
+
+    def test_pocket_tts_language_variants_are_openable_and_advertised_by_the_c_abi(self):
+        available = self.c_api_source.split("CA_EXPORT int crispasr_session_available_backends", 1)[1]
+        for backend in (
+            "pocket-tts-de",
+            "pocket-tts-es",
+            "pocket-tts-it",
+            "pocket-tts-pt",
+            "pocket-tts-fr",
+        ):
+            with self.subTest(backend=backend):
+                self.assertIn(f's->backend == "{backend}"', self.c_api_source)
+                self.assertIn(backend, available)
+
+    def test_pocket_tts_language_selects_registry_variant_before_download(self):
+        run_source = (REPO / "examples" / "cli" / "crispasr_run.cpp").read_text(encoding="utf-8")
+        route = run_source.index("#411 — Pocket-TTS")
+        resolve = run_source.index("crispasr_resolve_model_cli", route)
+        for language, backend in (
+            ("de", "pocket-tts-de"),
+            ("es", "pocket-tts-es"),
+            ("it", "pocket-tts-it"),
+            ("pt", "pocket-tts-pt"),
+            ("fr", "pocket-tts-fr"),
+        ):
+            self.assertIn(f'params.language == "{language}"', run_source[route:resolve])
+            self.assertIn(f'routed = "{backend}"', run_source[route:resolve])
+
+    def test_pocket_tts_french_preview_keeps_all_24_layers(self):
+        converter = (REPO / "models" / "convert-pocket-tts-to-gguf.py").read_text(encoding="utf-8")
+        self.assertIn('lang == "french_24l"', converter)
+        self.assertIn('hparams["num_layers"] = 24', converter)
+
+    def test_omnivoice_dispatches_audio_tokenizer(self):
+        self.assertIn(
+            "omnivoice_set_tokenizer_path(s->omnivoice_ctx, path)",
+            self.set_codec,
+        )
+
+    def test_chatterbox_dispatches_s3gen(self):
+        self.assertIn(
+            "chatterbox_set_s3gen_path(s->chatterbox_ctx, path)",
+            self.set_codec,
+        )
+
+    def test_chatterbox_dispatches_to_native_voice_loader(self):
+        self.assertIn(
+            "chatterbox_set_voice_from_wav(s->chatterbox_ctx, path)",
+            self.set_voice,
+        )
+
+    def test_chatterbox_16khz_voice_clone_installs_all_conditionals_atomically(self):
+        source = (REPO / "src" / "chatterbox.cpp").read_text(encoding="utf-8")
+        voice_loader = source.split('extern "C" int chatterbox_set_voice_from_wav', 1)[1].split(
+            'extern "C" void chatterbox_set_exaggeration', 1
+        )[0]
+        self.assertIn("resample_polyphase(pcm_16k, n_16k, 16000, 24000)", voice_loader)
+        self.assertIn("atomic_path = !pcm_24k.empty()", voice_loader)
+        self.assertIn("chatterbox_install_native_voice", voice_loader)
+        self.assertNotIn("partial native WAV clone", voice_loader)
+
+    def test_chatterbox_synthesis_wires_languages_and_cross_lingual_cfg(self):
+        self.assertIn(
+            "chatterbox_set_language((chatterbox_context*)s->chatterbox_ctx",
+            self.synthesize,
+        )
+        self.assertIn(
+            "core_tts_lang::is_cross_lingual(output_lang, s->tts_reference_language)",
+            self.synthesize,
+        )
+
+    def test_finnish_nano_does_not_inject_a_nonexistent_language_token(self):
+        source = (REPO / "examples" / "cli" / "crispasr_backend_chatterbox.cpp").read_text(encoding="utf-8")
+        self.assertIn('contains_ci(params.backend, "finnish-nano")', source)
+        self.assertIn("if (!finnish_nano && !output_lang.empty()", source)
+
+    def test_omnivoice_dispatches_wav_and_reference_text(self):
+        self.assertIn(
+            "omnivoice_set_voice_prompt(s->omnivoice_ctx, path, ref_text_or_null)",
+            self.set_voice,
+        )
+
+# Backends that must NOT declare voice-cloning (preset-speaker, not reference-WAV cloning).
+_NO_VOICE_CLONING_BACKENDS = {
+    "qwen3-tts-customvoice",
+    "qwen3-tts-1.7b-customvoice",
+    "qwen3-tts-1.7b-voicedesign",
+    "vibevoice",
+    "vibevoice-streaming",
+}
+
+
+@unittest.skipUnless(os.path.exists(BIN), f"crispasr binary not found at {BIN} — set CRISPASR_BIN or build first")
+class TestCapabilityJSON(unittest.TestCase):
+    """crispasr --list-backends-json must declare translate / voice-cloning caps correctly."""
+
+    @classmethod
+    def setUpClass(cls):
+        result = subprocess.run(
+            [BIN, "--list-backends-json"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        cls.data = json.loads(result.stdout)
+        cls.by_name = {b["name"]: set(b.get("caps", [])) for b in cls.data["backends"]}
+
+    def test_translate_backends_declare_translate(self):
+        for name in _TRANSLATE_BACKENDS:
+            if name not in self.by_name:
+                continue
+            self.assertIn("translate", self.by_name[name], f"{name} missing 'translate' cap")
+
+    def test_src_tgt_backends_declare_src_tgt_language(self):
+        for name in _SRC_TGT_BACKENDS:
+            if name not in self.by_name:
+                continue
+            self.assertIn("src-tgt-language", self.by_name[name], f"{name} missing 'src-tgt-language' cap")
+
+    def test_voice_cloning_backends_declare_voice_cloning(self):
+        for name in _VOICE_CLONING_BACKENDS:
+            if name not in self.by_name:
+                continue
+            self.assertIn("voice-cloning", self.by_name[name], f"{name} missing 'voice-cloning' cap")
+
+    def test_no_voice_cloning_backends_omit_voice_cloning(self):
+        for name in _NO_VOICE_CLONING_BACKENDS:
+            if name not in self.by_name:
+                continue
+            self.assertNotIn("voice-cloning", self.by_name[name],
+                             f"{name} must NOT declare 'voice-cloning' (preset-speaker, not reference-WAV)")
+
+    def test_whisper_does_not_declare_src_tgt_language(self):
+        if "whisper" not in self.by_name:
+            return
+        self.assertNotIn("src-tgt-language", self.by_name["whisper"],
+                         "whisper uses --language for target; src-tgt-language is for separate -sl/-tl flags")
+
+    def test_vibevoice_streaming_declares_only_its_real_mode(self):
+        if "vibevoice-streaming" not in self.by_name:
+            return
+        caps = self.by_name["vibevoice-streaming"]
+        self.assertIn("streaming", caps)
+        self.assertNotIn("tts", caps, "the 1.5B streaming checkpoint has no TTS decoder")
+
+
+@unittest.skipUnless(os.path.exists(BIN), f"crispasr binary not found — set CRISPASR_BIN or build first")
+@unittest.skipUnless(os.path.exists(SAMPLE), f"sample file not found: {SAMPLE}")
+class TestTranslateLive(unittest.TestCase):
+    """Live translation smoke-test — skipped when model files are absent."""
+
+    _WHISPER_MODEL = os.environ.get(
+        "CRISPASR_WHISPER_MODEL",
+        "/Volumes/backups/ai/crispasr/ggml-tiny.bin",
+    )
+
+    @unittest.skipUnless(
+        os.path.exists(os.environ.get("CRISPASR_WHISPER_MODEL", "/Volumes/backups/ai/crispasr/ggml-tiny.bin")),
+        "whisper-tiny model not found — set CRISPASR_WHISPER_MODEL",
+    )
+    def test_whisper_translate_to_german(self):
+        result = subprocess.run(
+            [BIN, "--backend", "whisper", "-m", self._WHISPER_MODEL,
+             "--translate", "-l", "de", SAMPLE],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, f"crispasr failed:\n{result.stderr}")
+        combined = result.stdout + result.stderr
+        self.assertTrue(len(combined.strip()) > 0, "translate produced no output")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

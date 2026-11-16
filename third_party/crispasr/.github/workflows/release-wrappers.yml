@@ -1,0 +1,310 @@
+name: Release language wrappers
+
+# Publishes the Python, Rust, and Dart wrappers to their language-native
+# registries on every `v*` tag push. The native library is *not* bundled —
+# wrappers are thin FFI/ctypes shims over the C ABI in `src/crispasr_c_api.cpp`,
+# matching whisper.cpp's binding pattern. Users install `libcrispasr` separately
+# (Homebrew, apt, or build from source).
+#
+# IMPORTANT: registries reject the very first publish from a CI flow because
+# they have no prior owner to verify against — the first version of each
+# package must be uploaded manually. Bootstrap procedure + per-registry
+# config requirements are documented in PLAN.md §66. After bootstrap, every
+# tag push auto-publishes via this workflow.
+#
+# Prerequisites (one-time setup before the first tag):
+#   - PyPI:     add the `PYPI_API_TOKEN` repository secret with a PyPI token
+#               scoped to the `crispasr` project.
+#   - crates.io: add `CARGO_REGISTRY_TOKEN` repo secret (cargo login token)
+#               AND manually `cargo publish` v0 of crispasr-sys + crispasr
+#               from a workstation first.
+#   - pub.dev:  manually `dart pub publish` v0 from `flutter/crispasr`
+#               (interactive: browser login + accept). Then enable
+#               automated publishing at
+#               https://pub.dev/packages/crispasr/admin pointing to this repo
+#               + tag pattern `v{{version}}`.
+#
+#               (The pattern was `{{package}}-v{{version}}` — pub.dev's monorepo
+#               default — until 2026-07-28, which rejected every `v*` tag and is
+#               why 0.8.23 and 0.8.24 did not publish. Now `v{{version}}`.)
+#
+#   ⚠ RE-RUNNING A PUBLISH BY HAND: dispatch with `--ref <the tag>`, NOT
+#     `--ref main`:
+#         gh workflow run "Release language wrappers" --ref v0.8.24 -f tag=v0.8.24
+#     pub.dev authenticates via the OIDC claim of the ref the RUN is on, not the
+#     ref that gets checked out. A dispatch from main checks out the right tag and
+#     still fails with "publishing is only allowed from 'tag' refType, this token
+#     has 'branch' refType". crates.io does not care, which is what makes this
+#     easy to miss — the Rust half succeeds and only the Dart half fails.
+#
+# The non-PyPI jobs use `continue-on-error: true` so a single misconfigured
+# registry doesn't fail the whole workflow — the others still attempt to
+# publish. Each job also runs a fast precheck that prints a clear
+# "skipping: <registry> not configured" message instead of letting `cargo`
+# / `twine` emit cryptic auth errors deep in the log.
+#
+# `publish-summary` (last job) then re-fails the RUN if any registry did not
+# publish. Without it, continue-on-error made the workflow report success while
+# both publishes failed — which is precisely what happened on v0.8.24.
+
+# Bootstrap is complete (crispasr-sys + crispasr on crates.io, crispasr on
+# pub.dev — all first-published manually 2026-07), so the tag trigger is live:
+# every `v*` tag auto-publishes the Rust + Dart wrappers. The Python wrapper is
+# published by `release-python-wheels.yml` (bundled CPU wheels + sdist to PyPI,
+# GPU wheels to the Pages index) — NOT here — to avoid a double PyPI upload.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to publish (e.g. v0.5.1)'
+        required: true
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # NOTE: the Python wrapper (PyPI) is published by release-python-wheels.yml,
+  # not here — see the header comment.
+
+  publish-crates-io:
+    name: Publish Rust wrapper to crates.io
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    outputs:
+      status: ${{ steps.record.outputs.status }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          ref: ${{ inputs.tag || github.ref }}
+
+      # Fail fast (and clearly) if the token isn't set, instead of letting
+      # cargo emit the obscure "please provide a non-empty token" message.
+      # crates.io's API returns 403 to requests without a User-Agent, so the
+      # probe MUST send one — otherwise it always reads as "does not exist".
+      - name: crates.io config check
+        id: cfg
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::warning::CARGO_REGISTRY_TOKEN secret not set — see PLAN.md §66 for setup."
+            echo "skipping crates.io publish."
+            exit 78  # neutral exit (some setups treat as 'skipped')
+          fi
+          UA="crispasr-release-ci (https://github.com/${{ github.repository }})"
+          if ! curl -sf -o /dev/null -H "User-Agent: $UA" https://crates.io/api/v1/crates/crispasr-sys; then
+            echo "::warning::crates.io package 'crispasr-sys' does not exist yet."
+            echo "::warning::First publish must be manual (see PLAN.md §66 bootstrap)."
+            echo "skipping crates.io publish."
+            exit 78
+          fi
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # Skip cleanly if this exact version is already on crates.io (a re-run of
+      # an already-published tag), so the job is idempotent.
+      - name: Determine crate version + whether it is already published
+        id: crate_ver
+        run: |
+          UA="crispasr-release-ci (https://github.com/${{ github.repository }})"
+          VER=$(grep -m1 '^version' crispasr-sys/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          if curl -sf -H "User-Agent: $UA" "https://crates.io/api/v1/crates/crispasr-sys/$VER" >/dev/null 2>&1; then
+            echo "sys_exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "sys_exists=false" >> "$GITHUB_OUTPUT"
+          fi
+          if curl -sf -H "User-Agent: $UA" "https://crates.io/api/v1/crates/crispasr/$VER" >/dev/null 2>&1; then
+            echo "wrap_exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "wrap_exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # --no-verify is REQUIRED, not a shortcut. `cargo publish` verifies by
+      # unpacking the tarball to target/package/ and building it there — but the
+      # package deliberately does NOT vendor the C/C++ sources, so build.rs finds
+      # no parent CMakeLists.txt and panics with the actionable message added in
+      # 6ad6d444 ("set CRISPASR_LIB_DIR, or depend via git"). That message is
+      # correct for a crates.io consumer and fatal for the verification build, so
+      # making off-repo consumers work is exactly what broke publishing: v0.8.24
+      # failed here with "failed to verify package tarball".
+      #
+      # A tarball that cannot self-build is the documented contract for this
+      # crate, so there is nothing for verification to prove. What DOES need
+      # proving — that the FFI compiles against the real ABI — is covered by CI
+      # by .github/workflows/bindings-rust.yml (cargo check on both crates plus
+      # cargo test on the wrapper), not by this step. That workflow is named
+      # here deliberately: this comment asserted the check existed for months
+      # while no workflow in the repo invoked cargo at all, and it is
+      # load-bearing — it is the stated reason publishing may use --no-verify.
+      #
+      # crispasr-sys must be on crates.io before the high-level crate's version
+      # dep resolves, hence the ordering and the index wait below.
+      - name: Publish crispasr-sys
+        id: pub_sys
+        if: steps.crate_ver.outputs.sys_exists != 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --no-verify --manifest-path crispasr-sys/Cargo.toml --allow-dirty
+
+      - name: Wait for crispasr-sys to index
+        if: steps.crate_ver.outputs.sys_exists != 'true'
+        run: sleep 30
+
+      - name: Publish crispasr
+        id: pub_wrap
+        if: steps.crate_ver.outputs.wrap_exists != 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --no-verify --manifest-path crispasr/Cargo.toml --allow-dirty
+
+      # Job-level outputs, because `needs.<job>.result` CANNOT express this: with
+      # continue-on-error the result is reported as 'success' even when the job
+      # failed, so a summary keyed on it is itself a check that cannot go red.
+      - name: Record outcome
+        id: record
+        if: always()
+        run: |
+          if [ "${{ steps.cfg.outcome }}" != "success" ]; then
+              echo "status=skipped" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          for o in "${{ steps.pub_sys.outcome }}" "${{ steps.pub_wrap.outcome }}"; do
+              case "$o" in
+                  failure|cancelled) echo "status=failed" >> "$GITHUB_OUTPUT"; exit 0 ;;
+              esac
+          done
+          echo "status=ok" >> "$GITHUB_OUTPUT"
+
+  publish-pub-dev:
+    name: Publish Dart wrapper to pub.dev
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    outputs:
+      status: ${{ steps.record.outputs.status }}
+    environment:
+      name: pub.dev
+      url: https://pub.dev/packages/crispasr
+    permissions:
+      id-token: write  # for pub.dev OIDC publishing
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          ref: ${{ inputs.tag || github.ref }}
+
+      # pub.dev's automated publishing requires the package to already
+      # exist (the very first `dart pub publish` for a brand-new package
+      # is interactive only). Probe and bail fast if the package is
+      # missing.
+      - name: pub.dev bootstrap check
+        id: cfg
+        run: |
+          if ! curl -sf -o /dev/null https://pub.dev/api/packages/crispasr; then
+            echo "::warning::pub.dev package 'crispasr' does not exist yet."
+            echo "::warning::First publish must be manual + interactive (see PLAN.md §66)."
+            echo "skipping pub.dev publish."
+            exit 78
+          fi
+
+      - name: Check whether this version is already on pub.dev
+        id: pub_check
+        run: |
+          PACKAGE_VERSION=$(python - <<'PY'
+          import re
+          from pathlib import Path
+
+          text = Path("flutter/crispasr/pubspec.yaml").read_text()
+          print(re.search(r"^version:\s*(\S+)", text, re.MULTILINE).group(1))
+          PY
+          )
+          python - "$PACKAGE_VERSION" <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.request
+
+          version = sys.argv[1]
+          try:
+              with urllib.request.urlopen("https://pub.dev/api/packages/crispasr") as response:
+                  versions = {item["version"] for item in json.load(response)["versions"]}
+          except Exception:
+              versions = set()
+          exists = version in versions
+          print(f"pub.dev release {version}: {'already present' if exists else 'not present'}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"exists={'true' if exists else 'false'}\n")
+          PY
+
+      - name: Set up Dart
+        uses: dart-lang/setup-dart@v1
+
+      - name: Publish
+        id: pub
+        if: steps.pub_check.outputs.exists != 'true'
+        working-directory: flutter/crispasr
+        run: |
+          dart pub get
+          dart pub publish --force
+
+      - name: Record outcome
+        id: record
+        if: always()
+        run: |
+          if [ "${{ steps.cfg.outcome }}" != "success" ]; then
+              echo "status=skipped" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          case "${{ steps.pub.outcome }}" in
+              failure|cancelled) echo "status=failed" >> "$GITHUB_OUTPUT" ;;
+              *)                 echo "status=ok"     >> "$GITHUB_OUTPUT" ;;
+          esac
+
+  # ── Did anything actually publish? ──────────────────────────────────────────
+  #
+  # The jobs above are `continue-on-error: true` so one misconfigured registry
+  # does not stop the others from trying. That is the right behaviour, but on its
+  # own it made the WORKFLOW report success while BOTH publishes failed — which
+  # is how v0.8.24 tagged with neither crates.io nor pub.dev updated, and nothing
+  # anywhere said so. A green check that cannot go red is not a check.
+  #
+  # This job restores the signal without coupling the registries: they still run
+  # independently, and the run turns red if any of them failed.
+  #
+  # It reads each job's `status` OUTPUT, not `needs.<job>.result`. That distinction
+  # is the whole point: `continue-on-error: true` makes a FAILED job report
+  # `result == 'success'`, so the first version of this gate passed while pub.dev
+  # was failing — a check that could not go red, which is the bug it exists to
+  # catch. Verified against the real thing: the v0.8.24 dispatch had crates.io
+  # publishing and pub.dev rejected, and only the output-based version goes red.
+  publish-summary:
+    name: Publish summary (fails if any registry did not publish)
+    runs-on: ubuntu-latest
+    needs: [publish-crates-io, publish-pub-dev]
+    if: always()
+    steps:
+      - name: Report
+        env:
+          CRATES: ${{ needs.publish-crates-io.outputs.status }}
+          PUBDEV: ${{ needs.publish-pub-dev.outputs.status }}
+        run: |
+          echo "crates.io : ${CRATES:-unknown}"
+          echo "pub.dev   : ${PUBDEV:-unknown}"
+          failed=0
+          for s in "$CRATES" "$PUBDEV"; do
+              case "$s" in
+                  ok|skipped) ;;
+                  # empty means the job died before recording — treat as failure,
+                  # never as success; that is how this went unnoticed before.
+                  *) failed=1 ;;
+              esac
+          done
+          if [ "$failed" = "1" ]; then
+              echo "::error::at least one wrapper registry did not publish — see the job logs above"
+              exit 1
+          fi
+          echo "all configured registries published (or were already up to date)"

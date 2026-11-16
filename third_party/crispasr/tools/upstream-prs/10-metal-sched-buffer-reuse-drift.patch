@@ -1,0 +1,90 @@
+diff --git a/ggml/src/ggml-backend.cpp b/ggml/src/ggml-backend.cpp
+index d9f8aaec..0b455448 100644
+--- a/ggml/src/ggml-backend.cpp
++++ b/ggml/src/ggml-backend.cpp
+@@ -771,6 +771,23 @@ struct ggml_backend_sched_split {
+     struct ggml_cgraph graph;
+ };
+ 
++// fix for back-to-back alloc_graph + compute on the same gf: per-call record of src[j]
++// mutations made by ggml_backend_sched_split_graph. Without restoration,
++// calling sched_alloc_graph repeatedly with the same user graph leaves
++// node->src[j] pointing to input_cpy tensors that lived in the previous
++// sched->ctx (which is freed+reinit'd at the start of every split_graph
++// call). The dangling pointers cause the next call's input-detection
++// loop to miss the original GGML_TENSOR_FLAG_INPUT tensors, so sched
++// never queues the CPU→GPU copy of inputs the second time. Repro: the
++// chatterbox S3Gen UNet's CFM solver runs the same gf twice per CFM
++// step (cond + uncond); the second call silently used stale GPU
++struct ggml_backend_sched_src_mutation {
++    struct ggml_tensor * node;
++    struct ggml_tensor * orig_src;
++    int j;
++};
++
+ struct ggml_backend_sched {
+     bool is_reset; // true if the scheduler has been reset since the last graph split
+     bool is_alloc;
+@@ -800,6 +817,13 @@ struct ggml_backend_sched {
+     int n_splits;
+     int splits_capacity;
+ 
++    // fix for back-to-back alloc_graph + compute on the same gf: mutation log for src[j]
++    // rewires in split_graph (see the struct definition above for
++    // rationale). Allocated lazily; freed in sched_free.
++    struct ggml_backend_sched_src_mutation * src_mutations;
++    int n_src_mutations;
++    int src_mutations_capacity;
++
+     // pipeline parallelism support
+     int n_copies;
+     int cur_copy;
+@@ -1367,6 +1391,20 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
+                         GGML_ASSERT(n_inputs < GGML_SCHED_MAX_SPLIT_INPUTS);
+                         split->inputs[n_inputs] = src;
+                     }
++                    // fix for back-to-back alloc_graph + compute on the same gf: record the
++                    // mutation so it can be undone at end of compute_splits.
++                    if (sched->n_src_mutations >= sched->src_mutations_capacity) {
++                        sched->src_mutations_capacity = sched->src_mutations_capacity * 2 + 16;
++                        sched->src_mutations = (struct ggml_backend_sched_src_mutation *) realloc(
++                            sched->src_mutations,
++                            sched->src_mutations_capacity * sizeof(struct ggml_backend_sched_src_mutation));
++                        GGML_ASSERT(sched->src_mutations != NULL);
++                    }
++                    sched->src_mutations[sched->n_src_mutations].node = node;
++                    sched->src_mutations[sched->n_src_mutations].orig_src = src;
++                    sched->src_mutations[sched->n_src_mutations].j = j;
++                    sched->n_src_mutations++;
++
+                     node->src[j] = tensor_id_copy(src_id, cur_backend_id, sched->cur_copy);
+                 }
+             }
+@@ -1721,6 +1759,18 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
+         }
+     }
+ 
++    // fix for back-to-back alloc_graph + compute on the same gf: restore user's gf src[j] to
++    // their originals now that compute is done. Without this, repeated
++    // sched_alloc_graph + compute calls on the same gf silently leak
++    // dangling pointers into the user's graph because sched->ctx (which
++    // contains the input_cpy tensors that src[j] now points to) is
++    // freed+reinit'd at the start of the NEXT split_graph call.
++    for (int i = 0; i < sched->n_src_mutations; i++) {
++        const struct ggml_backend_sched_src_mutation * m = &sched->src_mutations[i];
++        m->node->src[m->j] = m->orig_src;
++    }
++    sched->n_src_mutations = 0;
++
+     return GGML_STATUS_SUCCESS;
+ }
+ 
+@@ -1815,6 +1865,8 @@ void ggml_backend_sched_free(ggml_backend_sched_t sched) {
+     free(sched->context_buffer);
+     free(sched->graph.nodes);
+     free(sched->graph.leafs);
++    // fix for back-to-back alloc_graph + compute on the same gf: free the lazily-allocated mutation log.
++    free(sched->src_mutations);
+     free(sched);
+ }
+ 

@@ -1,0 +1,448 @@
+name: Release Python wheels
+
+# Builds self-contained (native-lib-bundled) Python wheels and publishes them:
+#   • CPU wheels          → PyPI (linux x86_64/arm64, macOS arm64/Metal, win x64)
+#   • GPU wheels          → a PEP 503 "simple" index on GitHub Pages
+#                           (CUDA linux+win, Vulkan win), llama-cpp-python style:
+#         pip install crispasr --extra-index-url \
+#             https://crispstrobe.github.io/CrispASR/whl/cuda/
+#         pip install crispasr --extra-index-url \
+#             https://crispstrobe.github.io/CrispASR/whl/vulkan/
+#   • a pure-Python sdist → PyPI (fallback for unlisted platforms; finds a
+#                           system-installed libcrispasr at runtime)
+#
+# These wheels REUSE the relocatable `libcrispasr-<platform>[-cuda|-vulkan]`
+# bundles that `release.yml` already builds and attaches to the GitHub Release
+# (their rpaths are rewritten to $ORIGIN / @loader_path by
+# tools/package-lib-bundle.sh). So this workflow does NOT recompile the native
+# library — it downloads the bundle, stages the libs into the `crispasr`
+# package (tools/stage_libs.py), builds a py3-none-any wheel, and retags it to
+# the platform. That means it must run AFTER `release.yml` finishes; hence the
+# `workflow_run` trigger.
+#
+# ONE-TIME SETUP:
+#   • PyPI:   `PYPI_API_TOKEN` repo secret (token scoped to the crispasr project).
+#   • Pages:  none needed — Pages already serves `main`/root (legacy Jekyll).
+#             The GPU index is committed to `main` under `whl/`, so Jekyll serves
+#             it at https://crispstrobe.github.io/CrispASR/whl/{cuda,vulkan}/ and
+#             the existing README landing page is left untouched.
+#
+# NOTE ON THE manylinux TAG: the linux bundles come from release.yml's runners.
+# We label the wheels `manylinux_2_28_*` (broadly compatible). If the bundle
+# turns out to need a newer glibc, bump MANYLINUX below — verify on the first
+# tagged run with `auditwheel show`.
+
+on:
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to package (e.g. v0.8.24)'
+        required: true
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_branch || inputs.tag }}
+  cancel-in-progress: true
+
+env:
+  MANYLINUX_X86_64: manylinux_2_28_x86_64
+  MANYLINUX_AARCH64: manylinux_2_28_aarch64
+
+jobs:
+  # Only proceed if the triggering Release run succeeded (or on manual dispatch),
+  # and expose the tag to every downstream job.
+  setup:
+    runs-on: ubuntu-latest
+    # Run whenever the Release workflow FINISHED, not only when it was green.
+    #
+    # The old gate was `workflow_run.conclusion == 'success'`, and it cost
+    # v0.8.26 every GPU wheel: six Linux TARBALL legs failed, the Release run
+    # went red, and this whole pipeline skipped — even though the
+    # `libcrispasr-*` assets these wheels actually repackage had all built
+    # fine. Release legs attach independently, so a red run does not mean the
+    # inputs are missing; it means SOME leg failed. Coupling wheels to the
+    # aggregate conclusion turns any unrelated failure into a silent wheel
+    # outage, and "silent" is the problem — nothing reported it for four days.
+    #
+    # The real precondition is "the libcrispasr asset I repackage exists",
+    # which each matrix leg already checks when it downloads. So proceed on any
+    # completed run and let the legs fail loudly on a genuinely missing asset.
+    #
+    # ⚠ But a DRY RUN of Release is not a release. `head_branch` is the ref the
+    # run was on, so a dry run dispatched from main arrives here as the tag
+    # "main", and every leg then fails downloading assets from a release that
+    # does not exist. Dry runs are the recommended way to inspect packaging
+    # before tagging, so that red run appears on main every time anyone follows
+    # the documented process. Require a tag-shaped ref.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      ((github.event.workflow_run.conclusion == 'success' ||
+        github.event.workflow_run.conclusion == 'failure') &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - id: tag
+        run: |
+          TAG="${{ github.event.workflow_run.head_branch || inputs.tag }}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Packaging wheels for tag: $TAG"
+
+  cpu-wheels:
+    needs: setup
+    name: CPU wheel (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-22.04
+            asset: libcrispasr-linux-x86_64
+            plat: manylinux_2_28_x86_64
+            smoke: true
+          - name: linux-arm64
+            runner: ubuntu-22.04-arm
+            asset: libcrispasr-linux-arm64
+            plat: manylinux_2_28_aarch64
+            smoke: true
+          - name: macos-arm64
+            runner: macos-14
+            asset: libcrispasr-macos-arm64
+            plat: macosx_11_0_arm64
+            smoke: true
+          # smoke was false here, which is why nothing noticed that the Windows
+          # wheel had never contained a library at all (stage_libs could not find
+          # bin/) — the job went green on a build that packaged nothing loadable.
+          # Windows also needs os.add_dll_directory for crispasr.dll to find the
+          # ggml DLLs beside it, and only an install-and-load test can catch that.
+          - name: windows-x86_64
+            runner: windows-latest
+            asset: libcrispasr-windows-x86_64
+            plat: win_amd64
+            smoke: true
+    steps:
+      - uses: actions/checkout@v6
+        # Check out the TAG being packaged, not the default branch. The wheel
+        # version comes from the checked-out pyproject/VERSION, so building
+        # from main while packaging an older tag produces wheels labelled with
+        # main's version and attaches them to that older release — a wrong
+        # artifact under a version number, which is worse than a missing one.
+        # Hit for real: a workflow_dispatch with tag=v0.8.26 while main was
+        # 0.8.27 put three 0.8.27-labelled wheels on the v0.8.26 release.
+        with:
+          ref: ${{ needs.setup.outputs.tag }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Download + extract the prebuilt lib bundle
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release download "${{ needs.setup.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --pattern "${{ matrix.asset }}.tar.gz" --dir bundle_dl
+          mkdir -p bundle
+          tar xzf "bundle_dl/${{ matrix.asset }}.tar.gz" -C bundle
+          echo "BUNDLE_DIR=bundle/${{ matrix.asset }}" >> "$GITHUB_ENV"
+
+      # The bundle is relocatable but NOT self-contained: libcrispasr.so has a
+      # DT_NEEDED on libopenblas.so.0 / libespeak-ng / libfdk-aac / libasound,
+      # none of which it ships. stage_libs vendors them into the wheel, but it
+      # can only copy what exists on this runner — so install them first, and
+      # patchelf so each vendored copy gets RUNPATH=$ORIGIN. Without this the
+      # wheel imports fine here and dies on a user's machine with
+      # "libopenblas.so.0: cannot open shared object file" (v0.8.24).
+      - name: Runtime deps to vendor into the wheel (linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            patchelf libopenblas0 libespeak-ng1 libfdk-aac2 libasound2
+
+      - name: Stage libs into the package
+        shell: bash
+        run: python python/tools/stage_libs.py --bundle "$BUNDLE_DIR"
+
+      - name: Build + retag platform wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade build wheel
+          ( cd python && python -m build --wheel )
+          python -m wheel tags --python-tag py3 --abi-tag none \
+            --platform-tag "${{ matrix.plat }}" --remove python/dist/*.whl
+          echo "built:"; ls -la python/dist
+
+      - name: Smoke test (install + locate bundled lib)
+        if: matrix.smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A venv puts its activate script under bin/ on POSIX and Scripts/ on
+          # Windows; hardcoding bin/ is why this could not run on windows-latest.
+          python -m venv .wt
+          if [ -f .wt/bin/activate ]; then . .wt/bin/activate; else . .wt/Scripts/activate; fi
+          pip install python/dist/*.whl
+          python - <<'PY'
+          import crispasr._binding as b
+          from pathlib import Path
+          lib = b._find_lib()
+          print("resolved lib:", lib)
+          # must be the copy bundled inside the installed package
+          assert "site-packages" in lib and Path(lib).exists(), lib
+          # The real test: loading it pulls in the ggml libraries beside it. On
+          # Windows that only works because _find_lib registered the package dir
+          # via os.add_dll_directory — a bare CDLL of a full path does not search
+          # the DLL's own directory for its dependencies on Python 3.8+.
+          import ctypes; ctypes.CDLL(lib)
+          print("CDLL load OK")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cpu-wheel-${{ matrix.name }}
+          path: python/dist/*.whl
+
+  sdist:
+    needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        # Check out the TAG being packaged, not the default branch. The wheel
+        # version comes from the checked-out pyproject/VERSION, so building
+        # from main while packaging an older tag produces wheels labelled with
+        # main's version and attaches them to that older release — a wrong
+        # artifact under a version number, which is worse than a missing one.
+        # Hit for real: a workflow_dispatch with tag=v0.8.26 while main was
+        # 0.8.27 put three 0.8.27-labelled wheels on the v0.8.26 release.
+        with:
+          ref: ${{ needs.setup.outputs.tag }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Build pure-Python sdist (fallback)
+        run: |
+          python -m pip install --upgrade build
+          cd python && python -m build --sdist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: python/dist/*.tar.gz
+
+  publish-pypi:
+    needs: [cpu-wheels, sdist]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/crispasr
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: cpu-wheel-*
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+      - name: Upload to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          python -m pip install --upgrade twine
+          ls -la dist
+          # --skip-existing so a re-run (or the sdist already uploaded by the
+          # wrapper workflow) doesn't fail the job.
+          python -m twine upload --skip-existing dist/*
+
+  gpu-wheels:
+    needs: setup
+    name: GPU wheel (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64-cuda
+            runner: ubuntu-22.04
+            asset: libcrispasr-linux-x86_64-cuda
+            plat: manylinux_2_28_x86_64
+            local: cuda
+          - name: windows-x86_64-cuda
+            runner: windows-latest
+            asset: libcrispasr-windows-x86_64-cuda
+            plat: win_amd64
+            local: cuda
+          - name: windows-x86_64-vulkan
+            runner: windows-latest
+            asset: libcrispasr-windows-x86_64-vulkan
+            plat: win_amd64
+            local: vulkan
+    steps:
+      - uses: actions/checkout@v6
+        # Check out the TAG being packaged, not the default branch. The wheel
+        # version comes from the checked-out pyproject/VERSION, so building
+        # from main while packaging an older tag produces wheels labelled with
+        # main's version and attaches them to that older release — a wrong
+        # artifact under a version number, which is worse than a missing one.
+        # Hit for real: a workflow_dispatch with tag=v0.8.26 while main was
+        # 0.8.27 put three 0.8.27-labelled wheels on the v0.8.26 release.
+        with:
+          ref: ${{ needs.setup.outputs.tag }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Download + extract the prebuilt lib bundle
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release download "${{ needs.setup.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --pattern "${{ matrix.asset }}.tar.gz" --dir bundle_dl
+          mkdir -p bundle
+          tar xzf "bundle_dl/${{ matrix.asset }}.tar.gz" -C bundle
+          echo "BUNDLE_DIR=bundle/${{ matrix.asset }}" >> "$GITHUB_ENV"
+
+      # The bundle is relocatable but NOT self-contained: libcrispasr.so has a
+      # DT_NEEDED on libopenblas.so.0 / libespeak-ng / libfdk-aac / libasound,
+      # none of which it ships. stage_libs vendors them into the wheel, but it
+      # can only copy what exists on this runner — so install them first, and
+      # patchelf so each vendored copy gets RUNPATH=$ORIGIN. Without this the
+      # wheel imports fine here and dies on a user's machine with
+      # "libopenblas.so.0: cannot open shared object file" (v0.8.24).
+      - name: Runtime deps to vendor into the wheel (linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            patchelf libopenblas0 libespeak-ng1 libfdk-aac2 libasound2
+
+      - name: Stage libs into the package
+        shell: bash
+        run: python python/tools/stage_libs.py --bundle "$BUNDLE_DIR"
+
+      - name: Add local version tag (+${{ matrix.local }})
+        shell: bash
+        run: |
+          python - <<'PY'
+          import re, pathlib
+          p = pathlib.Path("python/pyproject.toml")
+          t = p.read_text()
+          t = re.sub(r'(?m)^(version\s*=\s*")([^"]+)(")',
+                     lambda m: f'{m.group(1)}{m.group(2)}+${{ matrix.local }}{m.group(3)}',
+                     t, count=1)
+          p.write_text(t)
+          print(t.splitlines()[6])
+          PY
+
+      - name: Build + retag platform wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade build wheel
+          ( cd python && python -m build --wheel )
+          python -m wheel tags --python-tag py3 --abi-tag none \
+            --platform-tag "${{ matrix.plat }}" --remove python/dist/*.whl
+          echo "built:"; ls -la python/dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gpu-wheel-${{ matrix.name }}
+          path: python/dist/*.whl
+
+  publish-gpu-index:
+    needs: [setup, gpu-wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # attach wheels to the release + commit whl/ to main
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          token: ${{ github.token }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: gpu
+          pattern: gpu-wheel-*
+          merge-multiple: true
+
+      - name: Attach GPU wheels to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ls -la gpu
+          gh release upload "${{ needs.setup.outputs.tag }}" gpu/*.whl \
+            --repo "${{ github.repository }}" --clobber
+
+      - name: Regenerate the PEP 503 index under whl/ (all releases)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import json, os, subprocess, html, pathlib, shutil
+          repo = os.environ["GITHUB_REPOSITORY"]
+          # Rebuild from ALL releases' assets, so old versions stay installable
+          # and a deleted release drops out. Links point at the Release-hosted
+          # wheels (absolute URLs), so main only carries tiny index.html files.
+          rels = json.loads(subprocess.check_output(
+              ["gh", "api", "--paginate", f"repos/{repo}/releases"]))
+          buckets = {"cuda": [], "vulkan": []}
+          for r in rels:
+              for a in r.get("assets", []):
+                  n = a["name"]
+                  if not n.endswith(".whl"):
+                      continue
+                  for tag in buckets:
+                      if f"+{tag}" in n:
+                          buckets[tag].append((n, a["browser_download_url"]))
+          for tag, items in buckets.items():
+              root = pathlib.Path("whl") / tag
+              if root.exists():
+                  shutil.rmtree(root)
+              proj = root / "crispasr"
+              proj.mkdir(parents=True, exist_ok=True)
+              links = "\n".join(
+                  f'    <a href="{html.escape(url)}">{html.escape(name)}</a><br>'
+                  for name, url in sorted(set(items)))
+              (proj / "index.html").write_text(
+                  f"<!DOCTYPE html><html><body>\n{links}\n</body></html>\n")
+              (root / "index.html").write_text(
+                  '<!DOCTYPE html><html><body>\n'
+                  '    <a href="crispasr/">crispasr</a><br>\n'
+                  '</body></html>\n')
+              print(f"{tag}: {len(set(items))} wheels")
+          PY
+
+      # Pages serves main/root (legacy Jekyll), so commit the index there. Only
+      # this job ever writes whl/, but retry on a race with concurrent pushes.
+      # [skip ci] keeps the index commit from re-triggering other workflows.
+      - name: Commit + push whl/ to main
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add whl
+          if git diff --cached --quiet; then
+            echo "no index changes"; exit 0
+          fi
+          git commit -m "ci: publish GPU wheel index for ${{ needs.setup.outputs.tag }} [skip ci]"
+          for i in 1 2 3 4 5; do
+            if git push origin HEAD:main; then echo "pushed"; exit 0; fi
+            echo "push rejected — rebasing (attempt $i)"
+            git pull --rebase origin main || true
+            sleep $((i * 5))
+          done
+          echo "::error::could not push GPU wheel index to main"; exit 1

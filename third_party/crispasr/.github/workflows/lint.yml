@@ -1,0 +1,527 @@
+name: Lint
+
+# Run on every push / PR that touches C++ source, headers, or the tooling
+# configuration files themselves.  This is the CI analogue of the Python
+# black + ruff + mypy + bandit stack.
+#
+#   clang-format --dry-run  →  black / ruff-format check (style)
+#   clang-tidy              →  ruff-lint + mypy + bandit (correctness + types + security)
+#   (cppcheck moved to lint-deep.yml 2026-09-03 — non-cancelling, so it actually completes)
+
+on:
+  # Manual re-run. Without this, a commit whose push did not match the paths
+  # filter below can NEVER be linted: workflows trigger on the head commit of a
+  # push, so merging a C++ change and a tools/ change and pushing them together
+  # evaluates the filter against the tools/ commit only, and the C++ never gets
+  # checked. That happened to 824c934d (#369). Re-running the previous run does
+  # not help — it re-runs the OLD commit.
+  workflow_dispatch:
+  push:
+    branches: [main, master, integrated_cli]
+    paths:
+      - '**.cpp'
+      - '**.h'
+      - '**.c'
+      - '.clang-format'
+      - '.clang-tidy'
+      - '.github/workflows/lint.yml'
+      - 'CMakeLists.txt'
+      - 'CMakePresets.json'
+      # README language drift check (issue #50)
+      - 'README.md'
+      - 'tools/check-readme-langs.py'
+      # LEARNINGS index drift: a new section shifts every cited line number
+      - 'LEARNINGS.md'
+      - 'docs/LEARNINGS-INDEX.md'
+      - 'tools/gen-learnings-index.py'
+      # Shell inside workflow run blocks. release.yml only executes on a tag
+      # push, so its first run IS the release — #339 shipped a literal \n into
+      # four jobs and cost every Linux tarball of v0.8.26.
+      - '.github/workflows/**'
+      - 'tools/check-workflow-run-blocks.py'
+      - 'tools/check-release-portable-cpu.py'
+      # OmniVoice prompt vocabularies: the generated headers must match their
+      # vendored sources. Neither is cosmetic — both are what the model is
+      # conditioned on (#13273).
+      - 'src/core/omnivoice_lang_table.h'
+      - 'src/core/omnivoice_instruct_table.h'
+      - 'third_party/omnivoice/lang_map.py'
+      - 'third_party/omnivoice/voice_design.py'
+      - 'tools/gen-backend-caps-table.py'
+      - 'src/core/backend_caps_table.h'
+      - 'tools/gen-omnivoice-lang-map.py'
+      - 'tools/gen-omnivoice-instruct-map.py'
+      - 'tools/gen-omnivoice-duration-table.py'
+      - 'third_party/omnivoice/duration.py'
+      # Release-tooling consistency (release-consistency job). A version bump
+      # touches NONE of the C++ paths above, so without these the check would
+      # never run on the commits it exists to guard.
+      #
+      # RELEASE_NOTES_*.md is here for exactly the same reason and was missing.
+      # The convention is "write the notes, then tag", so the TAGGED commit is
+      # routinely docs-only and matched none of these paths — meaning neither
+      # release-consistency nor the workflow-shell lint ran on the exact tree
+      # that ships. v0.8.32 hit this at 26a3d2a6 and had to be linted by a
+      # manual workflow_dispatch instead (run 33844654678). The trap is already
+      # documented at the top of this filter for #369: knowing the pattern did
+      # not stop the next instance of it, so the filter has to encode it.
+      - 'RELEASE_NOTES_*.md'
+      - 'VERSION'
+      - 'scripts/sync-version.py'
+      - 'scripts/bump-version.sh'
+      - 'python/pyproject.toml'
+      - 'python/crispasr/__init__.py'
+      - 'flutter/crispasr/pubspec.yaml'
+      - 'flutter/crispasr/CHANGELOG.md'
+      - 'bindings/javascript/package.json'
+      - 'crispasr/Cargo.toml'
+      - 'crispasr-sys/Cargo.toml'
+      # kaggle_harness bundled-copy sync. Without these the job could only ever
+      # fire incidentally, on some unrelated .cpp push: editing the canonical
+      # harness did not trigger it (so drift went unnoticed — 6503430b sat
+      # broken), and neither did the re-copy that fixes it (so the job could not
+      # be observed going green again). A guard that cannot run on the commits
+      # it exists to guard is not a guard.
+      - 'tools/kaggle/**/kaggle_harness.py'
+      - 'tools/kaggle/kaggle_harness.py'
+      - 'tools/check-kaggle-harness-sync.py'
+      # chat ABI binding coverage — the guarded files, so the check runs on the
+      # commits that can break it rather than incidentally on an unrelated .cpp.
+      - 'include/crispasr_chat.h'
+      - 'python/crispasr/_binding.py'
+      - 'bindings/go/chat.go'
+      - 'crispasr-sys/src/lib.rs'
+      - 'flutter/crispasr/lib/src/chat.dart'
+      - 'bindings/java/src/main/java/io/github/ggerganov/whispercpp/chat/**'
+      - 'tools/check-chat-binding-coverage.py'
+      - 'tools/check-doc-anchors.py'
+      - 'tools/check-cuda-split-packaging.py'
+      - 'tools/check-cpu-backend-include.py'
+      - 'src/core/ggml_cpu_backend.h'
+      - 'docs/**.md'
+  pull_request:
+    branches: [main, master]
+    paths:
+      - '**.cpp'
+      - '**.h'
+      - '**.c'
+      - '.clang-format'
+      - '.clang-tidy'
+      - '.github/workflows/lint.yml'
+      - 'CMakeLists.txt'
+      - 'CMakePresets.json'
+      # README language drift check (issue #50)
+      - 'README.md'
+      - 'tools/check-readme-langs.py'
+      # LEARNINGS index drift: a new section shifts every cited line number
+      - 'LEARNINGS.md'
+      - 'docs/LEARNINGS-INDEX.md'
+      - 'tools/gen-learnings-index.py'
+      # Shell inside workflow run blocks. release.yml only executes on a tag
+      # push, so its first run IS the release — #339 shipped a literal \n into
+      # four jobs and cost every Linux tarball of v0.8.26.
+      # chat ABI binding coverage. '**.h' above catches a header edit, but a
+      # commit that only DELETES a symbol from one binding touches no .h at
+      # all — and that is precisely the drift this guards. A guard that cannot
+      # run on the commits it exists to guard is not a guard.
+      - 'python/crispasr/_binding.py'
+      - 'bindings/go/chat.go'
+      - 'crispasr-sys/src/lib.rs'
+      - 'flutter/crispasr/lib/src/chat.dart'
+      - 'bindings/java/src/main/java/io/github/ggerganov/whispercpp/chat/**'
+      - 'tools/check-chat-binding-coverage.py'
+      - 'tools/check-doc-anchors.py'
+      - 'tools/check-cuda-split-packaging.py'
+      - 'tools/check-cpu-backend-include.py'
+      - 'src/core/ggml_cpu_backend.h'
+      - 'docs/**.md'
+      - '.github/workflows/**'
+      - 'tools/check-workflow-run-blocks.py'
+      - 'tools/check-release-portable-cpu.py'
+      # OmniVoice prompt vocabularies: the generated headers must match their
+      # vendored sources. Neither is cosmetic — both are what the model is
+      # conditioned on (#13273).
+      - 'src/core/omnivoice_lang_table.h'
+      - 'src/core/omnivoice_instruct_table.h'
+      - 'third_party/omnivoice/lang_map.py'
+      - 'third_party/omnivoice/voice_design.py'
+      - 'tools/gen-backend-caps-table.py'
+      - 'src/core/backend_caps_table.h'
+      - 'tools/gen-omnivoice-lang-map.py'
+      - 'tools/gen-omnivoice-instruct-map.py'
+      - 'tools/gen-omnivoice-duration-table.py'
+      - 'third_party/omnivoice/duration.py'
+      # Release-tooling consistency (release-consistency job). A version bump
+      # touches NONE of the C++ paths above, so without these the check would
+      # never run on the commits it exists to guard.
+      #
+      # RELEASE_NOTES_*.md is here for exactly the same reason and was missing.
+      # The convention is "write the notes, then tag", so the TAGGED commit is
+      # routinely docs-only and matched none of these paths — meaning neither
+      # release-consistency nor the workflow-shell lint ran on the exact tree
+      # that ships. v0.8.32 hit this at 26a3d2a6 and had to be linted by a
+      # manual workflow_dispatch instead (run 33844654678). The trap is already
+      # documented at the top of this filter for #369: knowing the pattern did
+      # not stop the next instance of it, so the filter has to encode it.
+      - 'RELEASE_NOTES_*.md'
+      - 'VERSION'
+      - 'scripts/sync-version.py'
+      - 'scripts/bump-version.sh'
+      - 'python/pyproject.toml'
+      - 'python/crispasr/__init__.py'
+      - 'flutter/crispasr/pubspec.yaml'
+      - 'flutter/crispasr/CHANGELOG.md'
+      - 'bindings/javascript/package.json'
+      - 'crispasr/Cargo.toml'
+      - 'crispasr-sys/Cargo.toml'
+
+  # Nightly full lint of main, independent of the paths filter above.
+  #
+  # Every push to main shares the ref `refs/heads/main`, so with a ref-keyed
+  # concurrency group each push CANCELS the previous run. Measured 2026-08-28:
+  # 12 of the last 40 main runs were cancelled (30%), including five Lint runs
+  # in a row while two branches landed in quick succession — and a cancelled
+  # run is indistinguishable from one that never ran. Cancelling is still the
+  # right default for a burst of pushes (the slow cppcheck job was moved to lint-deep.yml for this reason — it was
+  # ~40 min), so rather than stop cancelling we guarantee a floor: main gets a
+  # complete lint at least once a day.
+  #
+  # It also covers the hole the workflow_dispatch comment above describes — a
+  # push whose HEAD commit misses the paths filter can never be linted by that
+  # push. The nightly has no paths filter, so it lints whatever main holds.
+  schedule:
+    - cron: '17 3 * * *'
+
+# Scoped by EVENT as well as ref: without that the nightly shares
+# `Lint-refs/heads/main` with ordinary pushes, so the next push would cancel
+# it and the floor above would not exist. Push runs still cancel each other,
+# which is where the savings are.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # clang-format: style check (equivalent to black / ruff-format --check)
+  # ---------------------------------------------------------------------------
+  clang-format:
+    name: clang-format (style)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install clang-format
+        # Pin the version so the same formatting verdict is produced here and
+        # when contributors run `clang-format -i` locally. Version bumps
+        # between 14 / 18 / 20 silently flip wrapping decisions and cause
+        # "it passed on my machine" drift.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends clang-format-18
+          sudo update-alternatives --install /usr/bin/clang-format clang-format /usr/bin/clang-format-18 100
+
+      - name: Check formatting
+        # --dry-run: report diffs without touching files.
+        # --Werror:  exit non-zero if any file would change.
+        # Scope: project-owned C++ only — skip ggml/ and bindings/ (third-party).
+        # On failure, print the offending file:line locations so contributors
+        # don't have to guess from a bare count.
+        run: |
+          clang-format --version
+          OUT=$(find src examples/cli crisp_audio \
+               \( -name '*.cpp' -o -name '*.h' -o -name '*.c' \) \
+               ! -name 'httplib.h' \
+               ! -name 'miniaudio.h' \
+               ! -name 'json.hpp' \
+               ! -name 'stb_vorbis.c' \
+               ! -path '*/coreml/*' \
+               ! -path '*/rnnoise/*' \
+               -print0 \
+          | xargs -0 clang-format --dry-run --Werror 2>&1 || true)
+          ERRORS=$(echo "$OUT" | grep -c 'error:.*clang-format' || true)
+          echo "Format violations: $ERRORS"
+          if [ "$ERRORS" -ne 0 ]; then
+            echo "--- violations ---"
+            echo "$OUT" | grep 'error:.*clang-format' | head -50
+            exit 1
+          fi
+
+  # ---------------------------------------------------------------------------
+  # clang-tidy: lint + type-checking + security (ruff-lint + mypy + bandit)
+  #
+  # We run tidy via the CMake `tidy` preset so it uses the same compile flags
+  # and include paths as the real build — this prevents false positives from
+  # missing system headers or wrong C++ standard.
+  # ---------------------------------------------------------------------------
+  clang-tidy:
+    name: clang-tidy (lint / types / security)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install build tools + clang-tidy
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build clang clang-tidy
+
+      - name: Configure (tidy preset)
+        # The `tidy` preset sets CMAKE_CXX_CLANG_TIDY so every TU is analysed
+        # during the build step.  We use Clang as the compiler so that clang-tidy
+        # gets the same diagnostics as the compiler it was built alongside.
+        run: |
+          cmake --preset tidy \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -G Ninja \
+            -DCRISPASR_BUILD_TESTS=OFF \
+            -DCRISPASR_BUILD_EXAMPLES=ON
+
+      - name: Build (clang-tidy fires on each TU)
+        # tee the output so the full tidy log is visible in the Actions UI even
+        # when the build succeeds; the step fails if cmake --build exits non-zero.
+        run: |
+          cmake --build build-tidy --target crispasr-lib 2>&1 | tee tidy.log
+          grep -q 'warning:' tidy.log && echo "::warning::clang-tidy warnings found" || true
+  # ---------------------------------------------------------------------------
+  # README language metadata vs upstream model cards (regression catcher
+  # for issue #50: granite-4.1-plus / -nar / -3.3-2b copy-pasted `ja` into
+  # the language column from a base row that DID support Japanese, and
+  # nothing in lint or test caught the drift). Fetches each HF model link
+  # in the README's model table and asserts our language column matches
+  # the upstream card's `language:` frontmatter.
+  # ---------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
+  # Every tools/kaggle/<kernel>/ bundles its own kaggle_harness.py as the
+  # clone-failure fallback (CPU workers have no internet). Nothing kept them in
+  # sync: on 2026-07-20 there were 4 distinct versions across 53 files. The
+  # drift only bites when the in-kernel git clone fails, so it stays invisible
+  # until the one run that needs the fallback. Pure file hashing — no build.
+  # ---------------------------------------------------------------------------
+  kaggle-harness-sync:
+    name: kaggle_harness bundled-copy sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Check bundled harness copies match canonical
+        run: python tools/check-kaggle-harness-sync.py
+
+  # Markdown anchors rot silently: a heading is reworded, every link to it keeps
+  # rendering, and the only symptom is that clicking does nothing. One pass found
+  # six dead ones — three in the README pointing at a renamed TTS section, two at
+  # content that had moved into docs/, and one that had simply mis-derived the
+  # slug of a heading containing both an em-dash and a `--flag`. That last is why
+  # this is a script and not a careful reader.
+  doc-anchors:
+    name: doc anchors resolve
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Every in-repo #fragment points at a real heading
+        run: python tools/check-doc-anchors.py
+
+  # A mechanical rewrite put `#include "core/ggml_cpu_backend.h"` after the
+  # first include already in each file, which in seven of them was inside a
+  # conditional — `#ifndef _WIN32`, `#ifdef __APPLE__`, `HAVE_ACCELERATE`. Every
+  # use of the namespace is at top level, so it compiled on macOS (where all of
+  # those hold) and failed on Windows. No local build can catch that: the guards
+  # hiding it are the ones satisfied on the machine doing the building. This
+  # reads the conditional nesting instead of evaluating it, so one run covers
+  # every platform.
+  cpu-backend-include:
+    name: core_cpu_backend header reachable everywhere
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      # Quoted: the '::' followed by a space would otherwise read as a nested
+      # YAML mapping and the whole workflow stops parsing.
+      - name: 'Every core_cpu_backend:: user includes the header unconditionally'
+        run: python tools/check-cpu-backend-include.py
+
+  # #342 asks for the three Windows CUDA runtime DLLs as separate downloads, so
+  # a release that only changed CrispASR does not force everyone to re-fetch
+  # them. It was implemented for the CLI package and missed on the dev-lib one —
+  # which at 874 MB is the largest asset we publish, i.e. exactly the download
+  # the request is about. Two surfaces, one fixed, no way to notice. release.yml
+  # only executes on a tag push, so a packaging mistake first appears IN the
+  # release; this runs at PR time instead.
+  cuda-split-packaging:
+    name: CUDA runtime ships split from every package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - run: pip install --quiet pyyaml
+      - name: Every CUDA-bundling job also ships a split archive
+        run: python tools/check-cuda-split-packaging.py
+
+  # include/crispasr_chat.h is hand-mirrored into five languages and CI compiles
+  # one of them: bindings-go.yml is the only binding workflow reaching the chat
+  # surface, bindings/java is built only by build.yml (PR filter: ggml /
+  # .gitmodules), and there is no PR-time cargo, dart or Java job. So an entry
+  # point could land bound in Go and missing from the other four with every
+  # required check green. Text-level drift check, no toolchain, runs in seconds.
+  chat-binding-coverage:
+    name: chat ABI bound by every binding
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Every chat entry point is bound in all five bindings
+        run: python tools/check-chat-binding-coverage.py
+
+  # The wiring audit checks a registry ROW EXISTS; nothing checked the URL
+  # resolves. A registry entry naming a HuggingFace repo that had never been
+  # created shipped to main and `-m auto` would have 404'd (tabcnn, 2026-07-20).
+  # Network-dependent and third-party, so soft-fire like readme-langs: a flaky
+  # HF API should not block a PR.
+  registry-urls:
+    name: model-registry URLs resolve
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    # continue-on-error was REMOVED. It existed because the checker exited 1 on
+    # any unreachable URL, including a transient HF connection reset — but it
+    # also meant this job could never go red, so a genuinely deleted model would
+    # have been reported in a log nobody opens. check-registry-urls.py now fails
+    # only on 404/410 (a server that answered "gone") and downgrades timeouts,
+    # resets and 5xx to warnings, so the job can be strict without being flaky.
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: HEAD every registry download URL
+        run: python tools/check-registry-urls.py --jobs 8 --timeout 25
+
+  # Release tooling only ever ran at release time, so its bugs stayed invisible
+  # until a release was half-published: v0.8.24 was first tagged with
+  # crispasr.__version__ still reading 0.8.23 (bump-version.sh's staged file list
+  # had drifted from sync-version.py), and 0.8.23 never reached pub.dev at all
+  # because the Flutter CHANGELOG lacked its version. Both are now a red check on
+  # the commit that causes them. No network, no models — a few seconds.
+  release-consistency:
+    name: version files agree with VERSION
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Every versioned file matches VERSION
+        run: python scripts/sync-version.py --check
+
+  readme-langs:
+    name: README language metadata
+    runs-on: ubuntu-latest
+    # Soft-fire on schedule + push to main so a flaky HF API doesn't
+    # block PRs. The job is best-effort: missing upstream metadata or
+    # network errors degrade to "skip" without failing the lint.
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      # BEFORE the network-dependent step on purpose: this check is hermetic, and
+      # a flaky HF call in a later step must not be able to stop it from running.
+      # docs/LEARNINGS-INDEX.md cites LEARNINGS.md line numbers, so ANY inserted
+      # section shifts them; an index that silently points at the wrong lesson is
+      # worse than no index, so this is a hard gate, not an advisory.
+      - name: Check LEARNINGS.md index is current
+        run: python tools/gen-learnings-index.py --check
+
+      # Also hermetic, also before the network step. release.yml is the least
+      # exercised code here — a tag push is its first execution — so its static
+      # shell errors have to be caught somewhere that runs on every commit.
+      - name: Lint shell in workflow run blocks
+        run: |
+          pip install --quiet pyyaml
+          python tools/check-workflow-run-blocks.py
+          # #374: the shipped Windows CUDA .exe was built with -march=native on a
+          # runner that has AVX-512, so it SIGILL'd on every CPU without it. Nine
+          # of eleven GPU jobs were in that state. release.yml only runs on a tag
+          # push, so nothing else can catch this before the release IS the bug.
+          python tools/check-release-portable-cpu.py
+
+      # Also hermetic, and also before the network steps. The table is generated
+      # from third_party/omnivoice/lang_map.py, which is vendored precisely so
+      # this gate never needs the network — the ids in it decide what the model
+      # is conditioned on, so a hand-edit has to be caught (#13273).
+      # #433: src/core/backend_caps_table.h mirrors the CLI's --list-backends-json
+      # so libcrispasr can answer "what verbs does this backend have?". The binary
+      # is the source of truth, so the mirror has to be re-derived and compared —
+      # a stale table would report capabilities a backend no longer has, which is
+      # worse than not exposing them at all. Needs a built crispasr; the step is
+      # skipped (loudly) when one is not present in this job.
+      - name: Check backend capability table is current
+        run: |
+          if [ -x build/bin/crispasr ]; then
+            python tools/gen-backend-caps-table.py --check --crispasr build/bin/crispasr
+          else
+            echo "::notice::no built crispasr in this job — backend caps drift not checked here"
+          fi
+
+      - name: Check OmniVoice language table is current
+        run: python tools/gen-omnivoice-lang-map.py --check
+
+      - name: Check OmniVoice instruct table is current
+        run: python tools/gen-omnivoice-instruct-map.py --check
+
+      # The duration weights decide how many frames an utterance gets, and
+      # OmniVoice fills exactly that many — so a stale table silently compresses
+      # speech rather than erroring. The previous hand-written classifier
+      # disagreed with upstream on 1110 codepoints (#363).
+      - name: Check OmniVoice duration table is current
+        run: python tools/gen-omnivoice-duration-table.py --check
+
+      - name: Install huggingface_hub
+        run: pip install --quiet 'huggingface_hub>=0.20'
+
+      # Advisory only — prints a NOTE and exits 0 when upstream moves. Whether to
+      # take a new revision is a judgement call (a changed id for an existing
+      # language would alter what callers synthesise), so it must not auto-fail.
+      - name: Report OmniVoice upstream language-map drift
+        continue-on-error: true
+        run: python tools/gen-omnivoice-lang-map.py --check-upstream
+
+      - name: Report OmniVoice upstream duration-table drift
+        continue-on-error: true
+        run: python tools/gen-omnivoice-duration-table.py --check-upstream
+
+      - name: Report OmniVoice upstream instruct-map drift
+        continue-on-error: true
+        run: python tools/gen-omnivoice-instruct-map.py --check-upstream
+
+      - name: Check README language columns vs HF cards
+        env:
+          # Authenticated requests get higher rate limits; the secret is
+          # optional — anonymous hits work for public repos.
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python tools/check-readme-langs.py

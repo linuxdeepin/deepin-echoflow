@@ -1,0 +1,3565 @@
+{
+  "script_version": "2026-10-01.1",
+  "source_commit": "5e813d39bce0e79b53f956a5715a006108097fb8",
+  "model_revision": "022317a0aacb5813050abf813dde423e91a30403",
+  "hardware": "Tesla T4, 7.5, 15360 MiB\nTesla T4, 7.5, 15360 MiB",
+  "cuda_arch": "75",
+  "quantized_integer_mmq": true,
+  "reference_device": "CPU; F32 tower/connector, BF16 decoder",
+  "cases": [
+    {
+      "tag": "f16-jfk-cpu",
+      "stage_rc": 0,
+      "decode_rc": 0,
+      "decoded_match": true,
+      "seconds_including_load": 31.624355121999997,
+      "actual": [
+        "And so my fellow Americans,",
+        "So, my fellow Americans,",
+        "ask not what your country can do for you,",
+        "do not ask what your country can do for you,",
+        "ask what you can do for your country.",
+        "ask what you can do for your country."
+      ],
+      "expected": [
+        "And so my fellow Americans,",
+        "So, my fellow Americans,",
+        "ask not what your country can do for you,",
+        "do not ask what your country can do for you,",
+        "ask what you can do for your country.",
+        "ask what you can do for your country."
+      ],
+      "stages_ms": {
+        "model_load": 2394.01,
+        "mel": 98.07,
+        "audio_encode": 6090.2,
+        "connector": 64.45,
+        "decoder_prefill": 2081.06,
+        "decoder_generate": 20313.17
+      },
+      "stage_metrics": {
+        "mel_spectrogram": {
+          "cos_min": 1.0,
+          "relative_l2": 5.1e-06
+        },
+        "connector_output": {
+          "cos_min": 1.0,
+          "relative_l2": 1.9e-06
+        },
+        "conv1_out": {
+          "cos_min": 1.0,
+          "relative_l2": 1.051e-05
+        },
+        "conv2_out": {
+          "cos_min": 1.0,
+          "relative_l2": 8.81e-06
+        },
+        "conv3_out": {
+          "cos_min": 1.0,
+          "relative_l2": 5.85e-06
+        },
+        "encoder_input": {
+          "cos_min": 1.0,
+          "relative_l2": 1.96e-06
+        },
+        "ln_post_out": {
+          "cos_min": 1.0,
+          "relative_l2": 2.05e-06
+        },
+        "proj1_out": {
+          "cos_min": 1.0,
+          "relative_l2": 2.27e-06
+        },
+        "encoder_output": {
+          "cos_min": 1.0,
+          "relative_l2": 1.9e-06
+        },
+        "encoder_layer_0": {
+          "cos_min": 1.0,
+          "relative_l2": 1.63e-06
+        },
+        "encoder_layer_1": {
+          "cos_min": 1.0,
+          "relative_l2": 1.82e-06
+        },
+        "encoder_layer_2": {
+          "cos_min": 1.0,
+          "relative_l2": 1.88e-06
+        },
+        "encoder_layer_3": {
+          "cos_min": 1.0,
+          "relative_l2": 2.07e-06
+        },
+        "encoder_layer_4": {
+          "cos_min": 1.0,
+          "relative_l2": 2.21e-06
+        },
+        "encoder_layer_5": {
+          "cos_min": 1.0,
+          "relative_l2": 2.35e-06
+        },
+        "encoder_layer_6": {
+          "cos_min": 1.0,
+          "relative_l2": 2.36e-06
+        },
+        "encoder_layer_7": {
+          "cos_min": 1.0,
+          "relative_l2": 2.5e-06
+        },
+        "encoder_layer_8": {
+          "cos_min": 1.0,
+          "relative_l2": 2.6e-06
+        },
+        "encoder_layer_9": {
+          "cos_min": 1.0,
+          "relative_l2": 2.62e-06
+        },
+        "encoder_layer_10": {
+          "cos_min": 1.0,
+          "relative_l2": 2.65e-06
+        },
+        "encoder_layer_11": {
+          "cos_min": 1.0,
+          "relative_l2": 2.57e-06
+        },
+        "encoder_layer_12": {
+          "cos_min": 1.0,
+          "relative_l2": 2.53e-06
+        },
+        "encoder_layer_13": {
+          "cos_min": 1.0,
+          "relative_l2": 2.45e-06
+        },
+        "encoder_layer_14": {
+          "cos_min": 1.0,
+          "relative_l2": 2.37e-06
+        },
+        "encoder_layer_15": {
+          "cos_min": 1.0,
+          "relative_l2": 2.27e-06
+        },
+        "encoder_layer_17": {
+          "cos_min": 1.0,
+          "relative_l2": 2.13e-06
+        },
+        "encoder_layer_18": {
+          "cos_min": 1.0,
+          "relative_l2": 2.03e-06
+        },
+        "encoder_layer_19": {
+          "cos_min": 1.0,
+          "relative_l2": 2.01e-06
+        },
+        "encoder_layer_20": {
+          "cos_min": 1.0,
+          "relative_l2": 1.95e-06
+        },
+        "encoder_layer_21": {
+          "cos_min": 1.0,
+          "relative_l2": 1.86e-06
+        },
+        "encoder_layer_22": {
+          "cos_min": 1.0,
+          "relative_l2": 1.9e-06
+        },
+        "encoder_layer_23": {
+          "cos_min": 1.0,
+          "relative_l2": 1.88e-06
+        },
+        "encoder_layer_24": {
+          "cos_min": 1.0,
+          "relative_l2": 1.96e-06
+        },
+        "encoder_layer_25": {
+          "cos_min": 1.0,
+          "relative_l2": 2.04e-06
+        },
+        "encoder_layer_26": {
+          "cos_min": 1.0,
+          "relative_l2": 1.69e-06
+        },
+        "encoder_layer_27": {
+          "cos_min": 1.0,
+          "relative_l2": 1.72e-06
+        },
+        "encoder_layer_28": {
+          "cos_min": 1.0,
+          "relative_l2": 1.87e-06
+        },
+        "encoder_layer_29": {
+          "cos_min": 1.0,
+          "relative_l2": 1.93e-06
+        },
+        "encoder_layer_30": {
+          "cos_min": 1.0,
+          "relative_l2": 1.95e-06
+        },
+        "encoder_layer_31": {
+          "cos_min": 1.0,
+          "relative_l2": 7.2e-07
+        },
+        "llm_logits": {
+          "cos_min": 0.999987,
+          "relative_l2": 0.00541966
+        },
+        "llm_block_0": {
+          "cos_min": 0.999986,
+          "relative_l2": 0.00564588
+        },
+        "llm_block_1": {
+          "cos_min": 0.999987,
+          "relative_l2": 0.00526276
+        },
+        "llm_block_2": {
+          "cos_min": 0.999988,
+          "relative_l2": 0.00500414
+        },
+        "llm_block_3": {
+          "cos_min": 0.999977,
+          "relative_l2": 0.00689314
+        },
+        "llm_block_4": {
+          "cos_min": 0.999979,
+          "relative_l2": 0.00676098
+        },
+        "llm_block_5": {
+          "cos_min": 0.999969,
+          "relative_l2": 0.00793649
+        },
+        "llm_block_6": {
+          "cos_min": 0.999972,
+          "relative_l2": 0.00771191
+        },
+        "llm_block_7": {
+          "cos_min": 0.999968,
+          "relative_l2": 0.00808091
+        },
+        "llm_block_8": {
+          "cos_min": 0.999962,
+          "relative_l2": 0.00896918
+        },
+        "llm_block_9": {
+          "cos_min": 0.999962,
+          "relative_l2": 0.00922002
+        },
+        "llm_block_11": {
+          "cos_min": 0.999952,
+          "relative_l2": 0.01004596
+        },
+        "llm_block_12": {
+          "cos_min": 0.999945,
+          "relative_l2": 0.01055151
+        },
+        "llm_block_13": {
+          "cos_min": 0.999943,
+          "relative_l2": 0.01065662
+        },
+        "llm_block_14": {
+          "cos_min": 0.999958,
+          "relative_l2": 0.00927166
+        },
+        "llm_block_15": {
+          "cos_min": 0.99996,
+          "relative_l2": 0.00921119
+        },
+        "llm_block_16": {
+          "cos_min": 0.999954,
+          "relative_l2": 0.00967301
+        },
+        "llm_block_17": {
+          "cos_min": 0.999946,
+          "relative_l2": 0.01059264
+        },
+        "llm_block_18": {
+          "cos_min": 0.999956,
+          "relative_l2": 0.00983757
+        },
+        "llm_block_19": {
+          "cos_min": 0.999935,
+          "relative_l2": 0.01145953
+        },
+        "llm_block_20": {
+          "cos_min": 0.999923,
+          "relative_l2": 0.01239037
+        },
+        "llm_block_21": {
+          "cos_min": 0.999906,
+          "relative_l2": 0.01371997
+        },
+        "llm_block_22": {
+          "cos_min": 0.999903,
+          "relative_l2": 0.01398167
+        },
+        "llm_block_23": {
+          "cos_min": 0.999902,
+          "relative_l2": 0.01414282
+        },
+        "teacherforced_logits": {
+          "cos_min": 0.999566,
+          "relative_l2": 0.01063493
+        }
+      },
+      "source_timestamp_match": true
+    },
+    {
+      "tag": "f16-jfk-cuda",
+      "stage_rc": 0,
+      "decode_rc": 0,
+      "decoded_match": true,
+      "seconds_including_load": 5.828699097000026,
+      "actual": [
+        "And so my fellow Americans,",
+        "So, my fellow Americans,",
+        "ask not what your country can do for you,",
+        "do not ask what your country can do for you,",
+        "ask what you can do for your country.",
+        "ask what you can do for your country."
+      ],
+      "expected": [
+        "And so my fellow Americans,",
+        "So, my fellow Americans,",
+        "ask not what your country can do for you,",
+        "do not ask what your country can do for you,",
+        "ask what you can do for your country.",
+        "ask what you can do for your country."
+      ],
+      "stages_ms": {
+        "model_load": 2434.68,
+        "mel": 99.77,
+        "audio_encode": 231.68,
+        "connector": 4.63,
+        "decoder_prefill": 456.92,
+        "decoder_generate": 2085.96
+      },
+      "stage_metrics": {
+        "mel_spectrogram": {
+          "cos_min": 1.0,
+          "relative_l2": 5.1e-06
+        },
+        "connector_output": {
+          "cos_min": 1.0,
+          "relative_l2": 6.992e-05
+        },
+        "conv1_out": {
+          "cos_min": 1.0,
+          "relative_l2": 1.051e-05
+        },
+        "conv2_out": {
+          "cos_min": 1.0,
+          "relative_l2": 8.78e-06
+        },
+        "conv3_out": {
+          "cos_min": 1.0,
+          "relative_l2": 5.84e-06
+        },
+        "encoder_input": {
+          "cos_min": 1.0,
+          "relative_l2": 4.805e-05
+        },
+        "ln_post_out": {
+          "cos_min": 1.0,
+          "relative_l2": 7.918e-05
+        },
+        "proj1_out": {
+          "cos_min": 1.0,
+          "relative_l2": 8.459e-05
+        },
+        "encoder_output": {
+          "cos_min": 1.0,
+          "relative_l2": 6.993e-05
+        },
+        "encoder_layer_0": {
+          "cos_min": 1.0,
+          "relative_l2": 3.503e-05
+        },
+        "encoder_layer_1": {
+          "cos_min": 1.0,
+          "relative_l2": 3.436e-05
+        },
+        "encoder_layer_2": {
+          "cos_min": 1.0,
+          "relative_l2": 3.68e-05
+        },
+        "encoder_layer_3": {
+          "cos_min": 1.0,
+          "relative_l2": 4.462e-05
+        },
+        "encoder_layer_4": {
+          "cos_min": 1.0,
+          "relative_l2": 4.882e-05
+        },
+        "encoder_layer_5": {
+          "cos_min": 1.0,
+          "relative_l2": 5.32e-05
+        },
+        "encoder_layer_6": {
+          "cos_min": 1.0,
+          "relative_l2": 5.488e-05
+        },
+        "encoder_layer_7": {
+          "cos_min": 1.0,
+          "relative_l2": 6.013e-05
+        },
+        "encoder_layer_8": {
+          "cos_min": 1.0,
+          "relative_l2": 6.403e-05
+        },
+        "encoder_layer_9": {
+          "cos_min": 1.0,
+          "relative_l2": 6.694e-05
+        },
+        "encoder_layer_10": {
+          "cos_min": 1.0,
+          "relative_l2": 7.148e-05
+        },
+        "encoder_layer_11": {
+          "cos_min": 1.0,
+          "relative_l2": 7.271e-05
+        },
+        "encoder_layer_12": {
+          "cos_min": 1.0,
+          "relative_l2": 7.475e-05
+        },
+        "encoder_layer_13": {
+          "cos_min": 1.0,
+          "relative_l2": 7.604e-05
+        },
+        "encoder_layer_14": {
+          "cos_min": 1.0,
+          "relative_l2": 7.618e-05
+        },
+        "encoder_layer_15": {
+          "cos_min": 1.0,
+          "relative_l2": 7.506e-05
+        },
+        "encoder_layer_17": {
+          "cos_min": 1.0,
+          "relative_l2": 7.262e-05
+        },
+        "encoder_layer_18": {
+          "cos_min": 1.0,
+          "relative_l2": 7.067e-05
+        },
+        "encoder_layer_19": {
+          "cos_min": 1.0,
+          "relative_l2": 6.993e-05
+        },
+        "encoder_layer_20": {
+          "cos_min": 1.0,
+          "relative_l2": 6.797e-05
+        },
+        "encoder_layer_21": {
+          "cos_min": 1.0,
+          "relative_l2": 6.533e-05
+        },
+        "encoder_layer_22": {
+          "cos_min": 1.0,
+          "relative_l2": 6.698e-05
+        },
+        "encoder_layer_23": {
+          "cos_min": 1.0,
+          "relative_l2": 6.774e-05
+        },
+        "encoder_layer_24": {
+          "cos_min": 1.0,
+          "relative_l2": 9.216e-05
+        },
+        "encoder_layer_25": {
+          "cos_min": 1.0,
+          "relative_l2": 0.00014032
+        },
+        "encoder_layer_26": {
+          "cos_min": 1.0,
+          "relative_l2": 9.59e-05
+        },
+        "encoder_layer_27": {
+          "cos_min": 1.0,
+          "relative_l2": 9.673e-05
+        },
+        "encoder_layer_28": {
+          "cos_min": 1.0,
+          "relative_l2": 0.00010486
+        },
+        "encoder_layer_29": {
+          "cos_min": 1.0,
+          "relative_l2": 0.00010713
+        },
+        "encoder_layer_30": {
+          "cos_min": 1.0,
+          "relative_l2": 0.00010472
+        },
+        "encoder_layer_31": {
+          "cos_min": 1.0,
+          "relative_l2": 3.188e-05
+        },
+        "llm_logits": {
+          "cos_min": 0.999987,
+          "relative_l2": 0.00546395
+        },
+        "llm_block_0": {
+          "cos_min": 0.999986,
+          "relative_l2": 0.0056471
+        },
+        "llm_block_1": {
+          "cos_min": 0.999987,
+          "relative_l2": 0.00526462
+        },
+        "llm_block_2": {
+          "cos_min": 0.999988,
+          "relative_l2": 0.00500457
+        },
+        "llm_block_3": {
+          "cos_min": 0.999977,
+          "relative_l2": 0.00688958
+        },
+        "llm_block_4": {
+          "cos_min": 0.999979,
+          "relative_l2": 0.0067631
+        },
+        "llm_block_5": {
+          "cos_min": 0.999968,
+          "relative_l2": 0.00794743
+        },
+        "llm_block_6": {
+          "cos_min": 0.999972,
+          "relative_l2": 0.00771871
+        },
+        "llm_block_7": {
+          "cos_min": 0.999967,
+          "relative_l2": 0.00808915
+        },
+        "llm_block_8": {
+          "cos_min": 0.999962,
+          "relative_l2": 0.00898041
+        },
+        "llm_block_9": {
+          "cos_min": 0.999962,
+          "relative_l2": 0.00923706
+        },
+        "llm_block_11": {
+          "cos_min": 0.999952,
+          "relative_l2": 0.01004856
+        },
+        "llm_block_12": {
+          "cos_min": 0.999945,
+          "relative_l2": 0.0105494
+        },
+        "llm_block_13": {
+          "cos_min": 0.999943,
+          "relative_l2": 0.01065408
+        },
+        "llm_block_14": {
+          "cos_min": 0.999959,
+          "relative_l2": 0.00925691
+        },
+        "llm_block_15": {
+          "cos_min": 0.99996,
+          "relative_l2": 0.00919485
+        },
+        "llm_block_16": {
+          "cos_min": 0.999954,
+          "relative_l2": 0.00965801
+        },
+        "llm_block_17": {
+          "cos_min": 0.999946,
+          "relative_l2": 0.01056734
+        },
+        "llm_block_18": {
+          "cos_min": 0.999956,
+          "relative_l2": 0.009826
+        },
+        "llm_block_19": {
+          "cos_min": 0.999935,
+          "relative_l2": 0.01143071
+        },
+        "llm_block_20": {
+          "cos_min": 0.999924,
+          "relative_l2": 0.01236416
+        },
+        "llm_block_21": {
+          "cos_min": 0.999906,
+          "relative_l2": 0.01368948
+        },
+        "llm_block_22": {
+          "cos_min": 0.999903,
+          "relative_l2": 0.01396354
+        },
+        "llm_block_23": {
+          "cos_min": 0.999903,
+          "relative_l2": 0.01410395
+        },
+        "teacherforced_logits": {
+          "cos_min": 0.999595,
+          "relative_l2": 0.01061132
+        }
+      },
+      "source_timestamp_match": true
+    },
+    {
+      "tag": "f16-zh-cpu",
+      "stage_rc": 0,
+      "decode_rc": 0,
+      "decoded_match": true,
+      "seconds_including_load": 42.21725870599994,
+      "actual": [
+        "正是因为存在绝对正义，所以我们接受现实的相对正义。",
+        "It is precisely because absolute justice exists that we accept the relative justice of reality.",
+        "但是不要因为现实的相对正义，",
+        "But don't let the relative justice of reality",
+        "我们就认为这个世界没有正义。",
+        "make us believe there is no justice in this world.",
+        "因为如果当你认为这个世界没有正义，",
+        "Because if you believe there is no justice in this world,"
+      ],
+      "expected": [
+        "正是因为存在绝对正义，所以我们接受现实的相对正义。",
+        "It is precisely because absolute justice exists that we accept the relative justice of reality.",
+        "但是不要因为现实的相对正义，",
+        "But don't let the relative justice of reality",
+        "我们就认为这个世界没有正义。",
+        "make us believe there is no justice in this world.",
+        "因为如果当你认为这个世界没有正义，",
+        "Because if you believe there is no justice in this world,"
+      ],
+      "stages_ms": {
+        "model_load": 2445.41,
+        "mel": 124.78,
+        "audio_encode": 7556.09,
+        "connector": 74.23,
+        "decoder_prefill": 2108.51,
+        "decoder_generate": 29280.29
+      },
+      "stage_metrics": {
+        "mel_spectrogram": {
+          "cos_min": 1.0,
+          "relative_l2": 9.17e-06
+        },
+        "connector_output": {
+          "cos_min": 1.0,
+          "relative_l2": 2.65e-06
+        },
+        "conv1_out": {
+          "cos_min": 1.0,
+          "relative_l2": 1.702e-05
+        },
+        "conv2_out": {
+          "cos_min": 1.0,
+          "relative_l2": 1.449e-05
+        },
+        "conv3_out": {
+          "cos_min": 1.0,
+          "relative_l2": 9.49e-06
+        },
+        "encoder_input": {
+          "cos_min": 1.0,
+          "relative_l2": 2.74e-06
+        },
+        "ln_post_out": {
+          "cos_min": 1.0,
+          "relative_l2": 3.32e-06
+        },
+        "proj1_out": {
+          "cos_min": 1.0,
+          "relative_l2": 3.03e-06
+        },
+        "encoder_output": {
+          "cos_min": 1.0,
+          "relative_l2": 2.65e-06
+        },
+        "encoder_layer_0": {
+          "cos_min": 1.0,
+          "relative_l2": 2.02e-06
+        },
+        "encoder_layer_1": {
+          "cos_min": 1.0,
+          "relative_l2": 2.08e-06
+        },
+        "encoder_layer_2": {
+          "cos_min": 1.0,
+          "relative_l2": 2.13e-06
+        },
+        "encoder_layer_3": {
+          "cos_min": 1.0,
+          "relative_l2": 2.37e-06
+        },
+        "encoder_layer_4": {
+          "cos_min": 1.0,
+          "relative_l2": 2.53e-06
+        },
+        "encoder_layer_5": {
+          "cos_min": 1.0,
+          "relative_l2": 2.68e-06
+        },
+        "encoder_layer_6": {
+          "cos_min": 1.0,
+          "relative_l2": 2.68e-06
+        },
+        "encoder_layer_7": {
+          "cos_min": 1.0,
+          "relative_l2": 2.8e-06
+        },
+        "encoder_layer_8": {
+          "cos_min": 1.0,
+          "relative_l2": 2.9e-06
+        },
+        "encoder_layer_9": {
+          "cos_min": 1.0,
+          "relative_l2": 2.91e-06
+        },
+        "encoder_layer_10": {
+          "cos_min": 1.0,
+          "relative_l2": 2.93e-06
+        },
+        "encoder_layer_11": {
+          "cos_min": 1.0,
+          "relative_l2": 2.86e-06
+        },
+        "encoder_layer_12": {
+          "cos_min": 1.0,
+          "relative_l2": 2.78e-06
+        },
+        "encoder_layer_13": {
+          "cos_min": 1.0,
+          "relative_l2": 2.69e-06
+        },
+        "encoder_layer_14": {
+          "cos_min": 1.0,
+          "relative_l2": 2.63e-06
+        },
+        "encoder_layer_15": {
+          "cos_min": 1.0,
+          "relative_l2": 2.52e-06
+        },
+        "encoder_layer_17": {
+          "cos_min": 1.0,
+          "relative_l2": 2.41e-06
+        },
+        "encoder_layer_18": {
+          "cos_min": 1.0,
+          "relative_l2": 2.33e-06
+        },
+        "encoder_layer_19": {
+          "cos_min": 1.0,
+          "relative_l2": 2.33e-06
+        },
+        "encoder_layer_20": {
+          "cos_min": 1.0,
+          "relative_l2": 2.23e-06
+        },
+        "encoder_layer_21": {
+          "cos_min": 1.0,
+          "relative_l2": 2.15e-06
+        },
+        "encoder_layer_22": {
+          "cos_min": 1.0,
+          "relative_l2": 2.2e-06
+        },
+        "encoder_layer_23": {
+          "cos_min": 1.0,
+          "relative_l2": 2.16e-06
+        },
+        "encoder_layer_24": {
+          "cos_min": 1.0,
+          "relative_l2": 2.24e-06
+        },
+        "encoder_layer_25": {
+          "cos_min": 1.0,
+          "relative_l2": 2.66e-06
+        },
+        "encoder_layer_26": {
+          "cos_min": 1.0,
+          "relative_l2": 4.72e-06
+        },
+        "encoder_layer_27": {
+          "cos_min": 1.0,
+          "relative_l2": 4.68e-06
+        },
+        "encoder_layer_28": {
+          "cos_min": 1.0,
+          "relative_l2": 3.82e-06
+        },
+        "encoder_layer_29": {
+          "cos_min": 1.0,
+          "relative_l2": 3.44e-06
+        },
+        "encoder_layer_30": {
+          "cos_min": 1.0,
+          "relative_l2": 3.07e-06
+        },
+        "encoder_layer_31": {
+          "cos_min": 1.0,
+          "relative_l2": 9.4e-07
+        },
+        "llm_logits": {
+          "cos_min": 0.99998,
+          "relative_l2": 0.00706072
+        },
+        "llm_block_0": {
+          "cos_min": 0.999993,
+          "relative_l2": 0.00383322
+        },
+        "llm_block_1": {
+          "cos_min": 0.999984,
+          "relative_l2": 0.00568437
+        },
+        "llm_block_2": {
+          "cos_min": 0.999985,
+          "relative_l2": 0.00570404
+        },
+        "llm_block_3": {
+          "cos_min": 0.999979,
+          "relative_l2": 0.00649905
+        },
+        "llm_block_4": {
+          "cos_min": 0.999982,
+          "relative_l2": 0.00592137
+        },
+        "llm_block_5": {
+          "cos_min": 0.999978,
+          "relative_l2": 0.0065953
+        },
+        "llm_block_6": {
+          "cos_min": 0.999981,
+          "relative_l2": 0.00615608
+        },
+        "llm_block_7": {
+          "cos_min": 0.999981,
+          "relative_l2": 0.00615494
+        },
+        "llm_block_8": {
+          "cos_min": 0.999978,
+          "relative_l2": 0.00656864
+        },
+        "llm_block_9": {
+          "cos_min": 0.999975,
+          "relative_l2": 0.00710878
+        },
+        "llm_block_11": {
+          "cos_min": 0.999974,
+          "relative_l2": 0.0072973
+        },
+        "llm_block_12": {
+          "cos_min": 0.999973,
+          "relative_l2": 0.00735298
+        },
+        "llm_block_13": {
+          "cos_min": 0.99997,
+          "relative_l2": 0.00777884
+        },
+        "llm_block_14": {
+          "cos_min": 0.999971,
+          "relative_l2": 0.00761875
+        },
+        "llm_block_15": {
+          "cos_min": 0.999971,
+          "relative_l2": 0.00757776
+        },
+        "llm_block_16": {
+          "cos_min": 0.999962,
+          "relative_l2": 0.00872071
+        },
+        "llm_block_17": {
+          "cos_min": 0.999959,
+          "relative_l2": 0.00904879
+        },
+        "llm_block_18": {
+          "cos_min": 0.999969,
+          "relative_l2": 0.00783108
+        },
+        "llm_block_19": {
+          "cos_min": 0.999958,
+          "relative_l2": 0.00920584
+        },
+        "llm_block_20": {
+          "cos_min": 0.999956,
+          "relative_l2": 0.00941316
+        },
+        "llm_block_21": {
+          "cos_min": 0.999953,
+          "relative_l2": 0.00972315
+        },
+        "llm_block_22": {
+          "cos_min": 0.999946,
+          "relative_l2": 0.01042305
+        },
+        "llm_block_23": {
+          "cos_min": 0.999935,
+          "relative_l2": 0.01141004
+        },
+        "teacherforced_logits": {
+          "cos_min": 0.998389,
+          "relative_l2": 0.0049221
+        }
+      },
+      "source_timestamp_match": true
+    },
+    {
+      "tag": "f16-zh-cuda",
+      "stage_rc": 0,
+      "decode_rc": 0,
+      "decoded_match": true,
+      "seconds_including_load": 6.831041013999766,
+      "actual": [
+        "正是因为存在绝对正义，所以我们接受现实的相对正义。",
+        "It is precisely because absolute justice exists that we accept the relative justice of reality.",
+        "但是不要因为现实的相对正义，",
+        "But don't let the relative justice of reality",
+        "我们就认为这个世界没有正义。",
+        "make us believe there is no justice in this world.",
+        "因为如果当你认为这个世界没有正义，",
+        "Because if you believe there is no justice in this world,"
+      ],
+      "expected": [
+        "正是因为存在绝对正义，所以我们接受现实的相对正义。",
+        "It is precisely because absolute justice exists that we accept the relative justice of reality.",
+        "但是不要因为现实的相对正义，",
+        "But don't let the relative justice of reality",
+        "我们就认为这个世界没有正义。",
+        "make us believe there is no justice in this world.",
+        "因为如果当你认为这个世界没有正义，",
+        "Because if you believe there is no justice in this world,"
+      ],
+      "stages_ms": {
+        "model_load": 2395.15,
+        "mel": 117.19,
+        "audio_encode": 225.45,
+        "connector": 4.49,
+        "decoder_prefill": 501.71,
+        "decoder_generate": 3056.21
+      },
+      "stage_metrics": {
+        "mel_spectrogram": {
+          "cos_min": 1.0,
+          "relative_l2": 9.17e-06
+        },
+        "connector_output": {
+          "cos_min": 1.0,
+          "relative_l2": 7.024e-05
+        },
+        "conv1_out": {
+          "cos_min": 1.0,
+          "relative_l2": 1.702e-05
+        },
+        "conv2_out": {
+          "cos_min": 1.0,
+          "relative_l2": 1.447e-05
+        },
+        "conv3_out": {
+          "cos_min": 1.0,
+          "relative_l2": 9.49e-06
+        },
+        "encoder_input": {
+          "cos_min": 1.0,
+          "relative_l2": 4.875e-05
+        },
+        "ln_post_out": {
+          "cos_min": 0.999999,
+          "relative_l2": 0.00010985
+        },
+        "proj1_out": {
+          "cos_min": 1.0,
+          "relative_l2": 8.36e-05
+        },
+        "encoder_output": {
+          "cos_min": 1.0,
+          "relative_l2": 7.025e-05
+        },
+        "encoder_layer_0": {
+          "cos_min": 1.0,
+          "relative_l2": 3.322e-05
+        },
+        "encoder_layer_1": {
+          "cos_min": 1.0,
+          "relative_l2": 3.172e-05
+        },
+        "encoder_layer_2": {
+          "cos_min": 1.0,
+          "relative_l2": 3.364e-05
+        },
+        "encoder_layer_3": {
+          "cos_min": 1.0,
+          "relative_l2": 4.035e-05
+        },
+        "encoder_layer_4": {
+          "cos_min": 1.0,
+          "relative_l2": 4.388e-05
+        },
+        "encoder_layer_5": {
+          "cos_min": 1.0,
+          "relative_l2": 4.744e-05
+        },
+        "encoder_layer_6": {
+          "cos_min": 1.0,
+          "relative_l2": 4.877e-05
+        },
+        "encoder_layer_7": {
+          "cos_min": 1.0,
+          "relative_l2": 5.264e-05
+        },
+        "encoder_layer_8": {
+          "cos_min": 1.0,
+          "relative_l2": 5.626e-05
+        },
+        "encoder_layer_9": {
+          "cos_min": 1.0,
+          "relative_l2": 5.871e-05
+        },
+        "encoder_layer_10": {
+          "cos_min": 1.0,
+          "relative_l2": 6.245e-05
+        },
+        "encoder_layer_11": {
+          "cos_min": 1.0,
+          "relative_l2": 6.301e-05
+        },
+        "encoder_layer_12": {
+          "cos_min": 1.0,
+          "relative_l2": 6.417e-05
+        },
+        "encoder_layer_13": {
+          "cos_min": 1.0,
+          "relative_l2": 6.499e-05
+        },
+        "encoder_layer_14": {
+          "cos_min": 1.0,
+          "relative_l2": 6.586e-05
+        },
+        "encoder_layer_15": {
+          "cos_min": 1.0,
+          "relative_l2": 6.49e-05
+        },
+        "encoder_layer_17": {
+          "cos_min": 1.0,
+          "relative_l2": 6.224e-05
+        },
+        "encoder_layer_18": {
+          "cos_min": 1.0,
+          "relative_l2": 6.07e-05
+        },
+        "encoder_layer_19": {
+          "cos_min": 1.0,
+          "relative_l2": 6.055e-05
+        },
+        "encoder_layer_20": {
+          "cos_min": 1.0,
+          "relative_l2": 5.678e-05
+        },
+        "encoder_layer_21": {
+          "cos_min": 1.0,
+          "relative_l2": 5.344e-05
+        },
+        "encoder_layer_22": {
+          "cos_min": 1.0,
+          "relative_l2": 5.376e-05
+        },
+        "encoder_layer_23": {
+          "cos_min": 1.0,
+          "relative_l2": 4.961e-05
+        },
+        "encoder_layer_24": {
+          "cos_min": 1.0,
+          "relative_l2": 4.986e-05
+        },
+        "encoder_layer_25": {
+          "cos_min": 1.0,
+          "relative_l2": 6.983e-05
+        },
+        "encoder_layer_26": {
+          "cos_min": 1.0,
+          "relative_l2": 0.00017243
+        },
+        "encoder_layer_27": {
+          "cos_min": 1.0,
+          "relative_l2": 0.00018323
+        },
+        "encoder_layer_28": {
+          "cos_min": 1.0,
+          "relative_l2": 0.00015757
+        },
+        "encoder_layer_29": {
+          "cos_min": 1.0,
+          "relative_l2": 0.00013731
+        },
+        "encoder_layer_30": {
+          "cos_min": 1.0,
+          "relative_l2": 0.00011444
+        },
+        "encoder_layer_31": {
+          "cos_min": 1.0,
+          "relative_l2": 2.765e-05
+        },
+        "llm_logits": {
+          "cos_min": 0.999981,
+          "relative_l2": 0.00699606
+        },
+        "llm_block_0": {
+          "cos_min": 0.999993,
+          "relative_l2": 0.00383293
+        },
+        "llm_block_1": {
+          "cos_min": 0.999984,
+          "relative_l2": 0.00568364
+        },
+        "llm_block_2": {
+          "cos_min": 0.999985,
+          "relative_l2": 0.0057017
+        },
+        "llm_block_3": {
+          "cos_min": 0.999979,
+          "relative_l2": 0.00649467
+        },
+        "llm_block_4": {
+          "cos_min": 0.999982,
+          "relative_l2": 0.00591881
+        },
+        "llm_block_5": {
+          "cos_min": 0.999978,
+          "relative_l2": 0.00659035
+        },
+        "llm_block_6": {
+          "cos_min": 0.999981,
+          "relative_l2": 0.00615195
+        },
+        "llm_block_7": {
+          "cos_min": 0.999981,
+          "relative_l2": 0.00614507
+        },
+        "llm_block_8": {
+          "cos_min": 0.999979,
+          "relative_l2": 0.00656041
+        },
+        "llm_block_9": {
+          "cos_min": 0.999975,
+          "relative_l2": 0.00709948
+        },
+        "llm_block_11": {
+          "cos_min": 0.999974,
+          "relative_l2": 0.00728027
+        },
+        "llm_block_12": {
+          "cos_min": 0.999973,
+          "relative_l2": 0.00734459
+        },
+        "llm_block_13": {
+          "cos_min": 0.99997,
+          "relative_l2": 0.00777259
+        },
+        "llm_block_14": {
+          "cos_min": 0.999971,
+          "relative_l2": 0.00761939
+        },
+        "llm_block_15": {
+          "cos_min": 0.999971,
+          "relative_l2": 0.00759043
+        },
+        "llm_block_16": {
+          "cos_min": 0.999962,
+          "relative_l2": 0.00872268
+        },
+        "llm_block_17": {
+          "cos_min": 0.999959,
+          "relative_l2": 0.00905155
+        },
+        "llm_block_18": {
+          "cos_min": 0.999969,
+          "relative_l2": 0.00783631
+        },
+        "llm_block_19": {
+          "cos_min": 0.999958,
+          "relative_l2": 0.00921555
+        },
+        "llm_block_20": {
+          "cos_min": 0.999956,
+          "relative_l2": 0.00941637
+        },
+        "llm_block_21": {
+          "cos_min": 0.999953,
+          "relative_l2": 0.00972802
+        },
+        "llm_block_22": {
+          "cos_min": 0.999946,
+          "relative_l2": 0.01043496
+        },
+        "llm_block_23": {
+          "cos_min": 0.999935,
+          "relative_l2": 0.01142634
+        },
+        "teacherforced_logits": {
+          "cos_min": 0.998739,
+          "relative_l2": 0.00495925
+        }
+      },
+      "source_timestamp_match": true
+    },
+    {
+      "tag": "f16-jfk-tail-cpu",
+      "stage_rc": 0,
+      "decode_rc": 0,
+      "decoded_match": true,
+      "seconds_including_load": 31.767309865999778,
+      "actual": [
+        "And so my fellow Americans,",
+        "So, my fellow Americans,",
+        "ask not what your country can do for you,",
+        "do not ask what your country can do for you,",
+        "ask what you can do for your country.",
+        "ask what you can do for your country."
+      ],
+      "expected": [
+        "And so my fellow Americans,",
+        "So, my fellow Americans,",
+        "ask not what your country can do for you,",
+        "do not ask what your country can do for you,",
+        "ask what you can do for your country.",
+        "ask what you can do for your country."
+      ],
+      "stages_ms": {
+        "model_load": 2450.87,
+        "mel": 99.48,
+        "audio_encode": 6075.62,
+        "connector": 63.55,
+        "decoder_prefill": 2087.48,
+        "decoder_generate": 20399.95
+      },
+      "stage_metrics": {
+        "mel_spectrogram": {
+          "cos_min": 1.0,
+          "relative_l2": 5.1e-06
+        },
+        "connector_output": {
+          "cos_min": 1.0,
+          "relative_l2": 1.89e-06
+        },
+        "conv1_out": {
+          "cos_min": 1.0,
+          "relative_l2": 1.05e-05
+        },
+        "conv2_out": {
+          "cos_min": 1.0,
+          "relative_l2": 8.81e-06
+        },
+        "conv3_out": {
+          "cos_min": 1.0,
+          "relative_l2": 5.85e-06
+        },
+        "encoder_input": {
+          "cos_min": 1.0,
+          "relative_l2": 1.96e-06
+        },
+        "ln_post_out": {
+          "cos_min": 1.0,
+          "relative_l2": 2.06e-06
+        },
+        "proj1_out": {
+          "cos_min": 1.0,
+          "relative_l2": 2.27e-06
+        },
+        "encoder_output": {
+          "cos_min": 1.0,
+          "relative_l2": 1.89e-06
+        },
+        "encoder_layer_0": {
+          "cos_min": 1.0,
+          "relative_l2": 1.63e-06
+        },
+        "encoder_layer_1": {
+          "cos_min": 1.0,
+          "relative_l2": 1.82e-06
+        },
+        "encoder_layer_2": {
+          "cos_min": 1.0,
+          "relative_l2": 1.88e-06
+        },
+        "encoder_layer_3": {
+          "cos_min": 1.0,
+          "relative_l2": 2.07e-06
+        },
+        "encoder_layer_4": {
+          "cos_min": 1.0,
+          "relative_l2": 2.22e-06
+        },
+        "encoder_layer_5": {
+          "cos_min": 1.0,
+          "relative_l2": 2.36e-06
+        },
+        "encoder_layer_6": {
+          "cos_min": 1.0,
+          "relative_l2": 2.36e-06
+        },
+        "encoder_layer_7": {
+          "cos_min": 1.0,
+          "relative_l2": 2.51e-06
+        },
+        "encoder_layer_8": {
+          "cos_min": 1.0,
+          "relative_l2": 2.6e-06
+        },
+        "encoder_layer_9": {
+          "cos_min": 1.0,
+          "relative_l2": 2.62e-06
+        },
+        "encoder_layer_10": {
+          "cos_min": 1.0,
+          "relative_l2": 2.64e-06
+        },
+        "encoder_layer_11": {
+          "cos_min": 1.0,
+          "relative_l2": 2.57e-06
+        },
+        "encoder_layer_12": {
+          "cos_min": 1.0,
+          "relative_l2": 2.53e-06
+        },
+        "encoder_layer_13": {
+          "cos_min": 1.0,
+          "relative_l2": 2.45e-06
+        },
+        "encoder_layer_14": {
+          "cos_min": 1.0,
+          "relative_l2": 2.36e-06
+        },
+        "encoder_layer_15": {
+          "cos_min": 1.0,
+          "relative_l2": 2.27e-06
+        },
+        "encoder_layer_17": {
+          "cos_min": 1.0,
+          "relative_l2": 2.13e-06
+        },
+        "encoder_layer_18": {
+          "cos_min": 1.0,
+          "relative_l2": 2.03e-06
+        },
+        "encoder_layer_19": {
+          "cos_min": 1.0,
+          "relative_l2": 2e-06
+        },
+        "encoder_layer_20": {
+          "cos_min": 1.0,
+          "relative_l2": 1.94e-06
+        },
+        "encoder_layer_21": {
+          "cos_min": 1.0,
+          "relative_l2": 1.85e-06
+        },
+        "encoder_layer_22": {
+          "cos_min": 1.0,
+          "relative_l2": 1.88e-06
+        },
+        "encoder_layer_23": {
+          "cos_min": 1.0,
+          "relative_l2": 1.86e-06
+        },
+        "encoder_layer_24": {
+          "cos_min": 1.0,
+          "relative_l2": 1.9e-06
+        },
+        "encoder_layer_25": {
+          "cos_min": 1.0,
+          "relative_l2": 1.95e-06
+        },
+        "encoder_layer_26": {
+          "cos_min": 1.0,
+          "relative_l2": 2e-06
+        },
+        "encoder_layer_27": {
+          "cos_min": 1.0,
+          "relative_l2": 2.07e-06
+        },
+        "encoder_layer_28": {
+          "cos_min": 1.0,
+          "relative_l2": 2.26e-06
+        },
+        "encoder_layer_29": {
+          "cos_min": 1.0,
+          "relative_l2": 2.33e-06
+        },
+        "encoder_layer_30": {
+          "cos_min": 1.0,
+          "relative_l2": 2.31e-06
+        },
+        "encoder_layer_31": {
+          "cos_min": 1.0,
+          "relative_l2": 7.6e-07
+        },
+        "llm_logits": {
+          "cos_min": 0.999991,
+          "relative_l2": 0.00426367
+        },
+        "llm_block_0": {
+          "cos_min": 0.999986,
+          "relative_l2": 0.00570364
+        },
+        "llm_block_1": {
+          "cos_min": 0.999977,
+          "relative_l2": 0.00677423
+        },
+        "llm_block_2": {
+          "cos_min": 0.999982,
+          "relative_l2": 0.00605763
+        },
+        "llm_block_3": {
+          "cos_min": 0.999951,
+          "relative_l2": 0.00993206
+        },
+        "llm_block_4": {
+          "cos_min": 0.999959,
+          "relative_l2": 0.00934935
+        },
+        "llm_block_5": {
+          "cos_min": 0.999958,
+          "relative_l2": 0.00930933
+        },
+        "llm_block_6": {
+          "cos_min": 0.999958,
+          "relative_l2": 0.00920857
+        },
+        "llm_block_7": {
+          "cos_min": 0.999953,
+          "relative_l2": 0.00973184
+        },
+        "llm_block_8": {
+          "cos_min": 0.999956,
+          "relative_l2": 0.00941811
+        },
+        "llm_block_9": {
+          "cos_min": 0.999955,
+          "relative_l2": 0.00947648
+        },
+        "llm_block_11": {
+          "cos_min": 0.999963,
+          "relative_l2": 0.00863315
+        },
+        "llm_block_12": {
+          "cos_min": 0.999957,
+          "relative_l2": 0.00923042
+        },
+        "llm_block_13": {
+          "cos_min": 0.999955,
+          "relative_l2": 0.00952555
+        },
+        "llm_block_14": {
+          "cos_min": 0.999962,
+          "relative_l2": 0.00877825
+        },
+        "llm_block_15": {
+          "cos_min": 0.999955,
+          "relative_l2": 0.00946703
+        },
+        "llm_block_16": {
+          "cos_min": 0.999948,
+          "relative_l2": 0.0101875
+        },
+        "llm_block_17": {
+          "cos_min": 0.999943,
+          "relative_l2": 0.01069475
+        },
+        "llm_block_18": {
+          "cos_min": 0.999956,
+          "relative_l2": 0.00935789
+        },
+        "llm_block_19": {
+          "cos_min": 0.999945,
+          "relative_l2": 0.01049729
+        },
+        "llm_block_20": {
+          "cos_min": 0.999942,
+          "relative_l2": 0.01082174
+        },
+        "llm_block_21": {
+          "cos_min": 0.999938,
+          "relative_l2": 0.01114006
+        },
+        "llm_block_22": {
+          "cos_min": 0.999934,
+          "relative_l2": 0.01147074
+        },
+        "llm_block_23": {
+          "cos_min": 0.999933,
+          "relative_l2": 0.01157419
+        },
+        "teacherforced_logits": {
+          "cos_min": 0.999794,
+          "relative_l2": 0.00925733
+        }
+      },
+      "source_timestamp_match": true
+    },
+    {
+      "tag": "f16-jfk-tail-cuda",
+      "stage_rc": 0,
+      "decode_rc": 0,
+      "decoded_match": true,
+      "seconds_including_load": 5.8819001340002615,
+      "actual": [
+        "And so my fellow Americans,",
+        "So, my fellow Americans,",
+        "ask not what your country can do for you,",
+        "do not ask what your country can do for you,",
+        "ask what you can do for your country.",
+        "ask what you can do for your country."
+      ],
+      "expected": [
+        "And so my fellow Americans,",
+        "So, my fellow Americans,",
+        "ask not what your country can do for you,",
+        "do not ask what your country can do for you,",
+        "ask what you can do for your country.",
+        "ask what you can do for your country."
+      ],
+      "stages_ms": {
+        "model_load": 2478.42,
+        "mel": 104.44,
+        "audio_encode": 233.14,
+        "connector": 4.39,
+        "decoder_prefill": 462.56,
+        "decoder_generate": 2085.23
+      },
+      "stage_metrics": {
+        "mel_spectrogram": {
+          "cos_min": 1.0,
+          "relative_l2": 5.1e-06
+        },
+        "connector_output": {
+          "cos_min": 1.0,
+          "relative_l2": 6.639e-05
+        },
+        "conv1_out": {
+          "cos_min": 1.0,
+          "relative_l2": 1.05e-05
+        },
+        "conv2_out": {
+          "cos_min": 1.0,
+          "relative_l2": 8.77e-06
+        },
+        "conv3_out": {
+          "cos_min": 1.0,
+          "relative_l2": 5.84e-06
+        },
+        "encoder_input": {
+          "cos_min": 1.0,
+          "relative_l2": 4.808e-05
+        },
+        "ln_post_out": {
+          "cos_min": 1.0,
+          "relative_l2": 7.655e-05
+        },
+        "proj1_out": {
+          "cos_min": 1.0,
+          "relative_l2": 8.057e-05
+        },
+        "encoder_output": {
+          "cos_min": 1.0,
+          "relative_l2": 6.64e-05
+        },
+        "encoder_layer_0": {
+          "cos_min": 1.0,
+          "relative_l2": 3.505e-05
+        },
+        "encoder_layer_1": {
+          "cos_min": 1.0,
+          "relative_l2": 3.437e-05
+        },
+        "encoder_layer_2": {
+          "cos_min": 1.0,
+          "relative_l2": 3.679e-05
+        },
+        "encoder_layer_3": {
+          "cos_min": 1.0,
+          "relative_l2": 4.459e-05
+        },
+        "encoder_layer_4": {
+          "cos_min": 1.0,
+          "relative_l2": 4.881e-05
+        },
+        "encoder_layer_5": {
+          "cos_min": 1.0,
+          "relative_l2": 5.319e-05
+        },
+        "encoder_layer_6": {
+          "cos_min": 1.0,
+          "relative_l2": 5.486e-05
+        },
+        "encoder_layer_7": {
+          "cos_min": 1.0,
+          "relative_l2": 6.008e-05
+        },
+        "encoder_layer_8": {
+          "cos_min": 1.0,
+          "relative_l2": 6.394e-05
+        },
+        "encoder_layer_9": {
+          "cos_min": 1.0,
+          "relative_l2": 6.68e-05
+        },
+        "encoder_layer_10": {
+          "cos_min": 1.0,
+          "relative_l2": 7.123e-05
+        },
+        "encoder_layer_11": {
+          "cos_min": 1.0,
+          "relative_l2": 7.238e-05
+        },
+        "encoder_layer_12": {
+          "cos_min": 1.0,
+          "relative_l2": 7.433e-05
+        },
+        "encoder_layer_13": {
+          "cos_min": 1.0,
+          "relative_l2": 7.545e-05
+        },
+        "encoder_layer_14": {
+          "cos_min": 1.0,
+          "relative_l2": 7.542e-05
+        },
+        "encoder_layer_15": {
+          "cos_min": 1.0,
+          "relative_l2": 7.401e-05
+        },
+        "encoder_layer_17": {
+          "cos_min": 1.0,
+          "relative_l2": 7.122e-05
+        },
+        "encoder_layer_18": {
+          "cos_min": 1.0,
+          "relative_l2": 6.889e-05
+        },
+        "encoder_layer_19": {
+          "cos_min": 1.0,
+          "relative_l2": 6.787e-05
+        },
+        "encoder_layer_20": {
+          "cos_min": 1.0,
+          "relative_l2": 6.546e-05
+        },
+        "encoder_layer_21": {
+          "cos_min": 1.0,
+          "relative_l2": 6.255e-05
+        },
+        "encoder_layer_22": {
+          "cos_min": 1.0,
+          "relative_l2": 6.378e-05
+        },
+        "encoder_layer_23": {
+          "cos_min": 1.0,
+          "relative_l2": 6.465e-05
+        },
+        "encoder_layer_24": {
+          "cos_min": 1.0,
+          "relative_l2": 9.027e-05
+        },
+        "encoder_layer_25": {
+          "cos_min": 1.0,
+          "relative_l2": 0.00014533
+        },
+        "encoder_layer_26": {
+          "cos_min": 1.0,
+          "relative_l2": 9.657e-05
+        },
+        "encoder_layer_27": {
+          "cos_min": 1.0,
+          "relative_l2": 9.563e-05
+        },
+        "encoder_layer_28": {
+          "cos_min": 1.0,
+          "relative_l2": 0.00010304
+        },
+        "encoder_layer_29": {
+          "cos_min": 1.0,
+          "relative_l2": 0.00010505
+        },
+        "encoder_layer_30": {
+          "cos_min": 1.0,
+          "relative_l2": 0.0001025
+        },
+        "encoder_layer_31": {
+          "cos_min": 1.0,
+          "relative_l2": 3.158e-05
+        },
+        "llm_logits": {
+          "cos_min": 0.999991,
+          "relative_l2": 0.00421089
+        },
+        "llm_block_0": {
+          "cos_min": 0.999986,
+          "relative_l2": 0.00570409
+        },
+        "llm_block_1": {
+          "cos_min": 0.999977,
+          "relative_l2": 0.00677659
+        },
+        "llm_block_2": {
+          "cos_min": 0.999982,
+          "relative_l2": 0.00605731
+        },
+        "llm_block_3": {
+          "cos_min": 0.999951,
+          "relative_l2": 0.00996088
+        },
+        "llm_block_4": {
+          "cos_min": 0.999958,
+          "relative_l2": 0.00937194
+        },
+        "llm_block_5": {
+          "cos_min": 0.999958,
+          "relative_l2": 0.00931669
+        },
+        "llm_block_6": {
+          "cos_min": 0.999958,
+          "relative_l2": 0.00921195
+        },
+        "llm_block_7": {
+          "cos_min": 0.999953,
+          "relative_l2": 0.00973332
+        },
+        "llm_block_8": {
+          "cos_min": 0.999956,
+          "relative_l2": 0.00942149
+        },
+        "llm_block_9": {
+          "cos_min": 0.999955,
+          "relative_l2": 0.00947936
+        },
+        "llm_block_11": {
+          "cos_min": 0.999963,
+          "relative_l2": 0.00865125
+        },
+        "llm_block_12": {
+          "cos_min": 0.999957,
+          "relative_l2": 0.00924132
+        },
+        "llm_block_13": {
+          "cos_min": 0.999955,
+          "relative_l2": 0.00953312
+        },
+        "llm_block_14": {
+          "cos_min": 0.999961,
+          "relative_l2": 0.00878517
+        },
+        "llm_block_15": {
+          "cos_min": 0.999955,
+          "relative_l2": 0.00945247
+        },
+        "llm_block_16": {
+          "cos_min": 0.999948,
+          "relative_l2": 0.0101677
+        },
+        "llm_block_17": {
+          "cos_min": 0.999943,
+          "relative_l2": 0.0106754
+        },
+        "llm_block_18": {
+          "cos_min": 0.999956,
+          "relative_l2": 0.00934458
+        },
+        "llm_block_19": {
+          "cos_min": 0.999945,
+          "relative_l2": 0.01048193
+        },
+        "llm_block_20": {
+          "cos_min": 0.999942,
+          "relative_l2": 0.010806
+        },
+        "llm_block_21": {
+          "cos_min": 0.999938,
+          "relative_l2": 0.01112211
+        },
+        "llm_block_22": {
+          "cos_min": 0.999934,
+          "relative_l2": 0.01145162
+        },
+        "llm_block_23": {
+          "cos_min": 0.999934,
+          "relative_l2": 0.01152085
+        },
+        "teacherforced_logits": {
+          "cos_min": 0.999816,
+          "relative_l2": 0.00936865
+        }
+      },
+      "source_timestamp_match": true
+    },
+    {
+      "tag": "q8_0-jfk-cpu",
+      "stage_rc": 0,
+      "decode_rc": 0,
+      "decoded_match": true,
+      "seconds_including_load": 20.284620116000042,
+      "actual": [
+        "And so my fellow Americans,",
+        "So, my fellow Americans,",
+        "ask not what your country can do for you,",
+        "do not ask what your country can do for you,",
+        "ask what you can do for your country.",
+        "ask what you can do for your country."
+      ],
+      "expected": [
+        "And so my fellow Americans,",
+        "So, my fellow Americans,",
+        "ask not what your country can do for you,",
+        "do not ask what your country can do for you,",
+        "ask what you can do for your country.",
+        "ask what you can do for your country."
+      ],
+      "stages_ms": {
+        "model_load": 2410.58,
+        "mel": 99.93,
+        "audio_encode": 3314.56,
+        "connector": 27.15,
+        "decoder_prefill": 1110.8,
+        "decoder_generate": 12708.82
+      },
+      "stage_metrics": {
+        "mel_spectrogram": {
+          "cos_min": 1.0,
+          "relative_l2": 5.1e-06
+        },
+        "connector_output": {
+          "cos_min": 0.999326,
+          "relative_l2": 0.01733513
+        },
+        "conv1_out": {
+          "cos_min": 1.0,
+          "relative_l2": 1.051e-05
+        },
+        "conv2_out": {
+          "cos_min": 1.0,
+          "relative_l2": 8.81e-06
+        },
+        "conv3_out": {
+          "cos_min": 1.0,
+          "relative_l2": 5.85e-06
+        },
+        "encoder_input": {
+          "cos_min": 0.999996,
+          "relative_l2": 0.00207787
+        },
+        "ln_post_out": {
+          "cos_min": 0.999447,
+          "relative_l2": 0.01666959
+        },
+        "proj1_out": {
+          "cos_min": 0.999201,
+          "relative_l2": 0.0210529
+        },
+        "encoder_output": {
+          "cos_min": 0.999326,
+          "relative_l2": 0.01733814
+        },
+        "encoder_layer_0": {
+          "cos_min": 0.999997,
+          "relative_l2": 0.00221772
+        },
+        "encoder_layer_1": {
+          "cos_min": 0.999997,
+          "relative_l2": 0.00230595
+        },
+        "encoder_layer_2": {
+          "cos_min": 0.999996,
+          "relative_l2": 0.00238312
+        },
+        "encoder_layer_3": {
+          "cos_min": 0.999994,
+          "relative_l2": 0.00298414
+        },
+        "encoder_layer_4": {
+          "cos_min": 0.999991,
+          "relative_l2": 0.00366542
+        },
+        "encoder_layer_5": {
+          "cos_min": 0.999985,
+          "relative_l2": 0.00449639
+        },
+        "encoder_layer_6": {
+          "cos_min": 0.999981,
+          "relative_l2": 0.00505705
+        },
+        "encoder_layer_7": {
+          "cos_min": 0.999977,
+          "relative_l2": 0.00575529
+        },
+        "encoder_layer_8": {
+          "cos_min": 0.999969,
+          "relative_l2": 0.00646008
+        },
+        "encoder_layer_9": {
+          "cos_min": 0.999967,
+          "relative_l2": 0.00681495
+        },
+        "encoder_layer_10": {
+          "cos_min": 0.999958,
+          "relative_l2": 0.00727911
+        },
+        "encoder_layer_11": {
+          "cos_min": 0.999955,
+          "relative_l2": 0.00754061
+        },
+        "encoder_layer_12": {
+          "cos_min": 0.999952,
+          "relative_l2": 0.00784345
+        },
+        "encoder_layer_13": {
+          "cos_min": 0.999947,
+          "relative_l2": 0.00807617
+        },
+        "encoder_layer_14": {
+          "cos_min": 0.999946,
+          "relative_l2": 0.00819438
+        },
+        "encoder_layer_15": {
+          "cos_min": 0.999942,
+          "relative_l2": 0.00831022
+        },
+        "encoder_layer_17": {
+          "cos_min": 0.999939,
+          "relative_l2": 0.00853201
+        },
+        "encoder_layer_18": {
+          "cos_min": 0.999931,
+          "relative_l2": 0.00852844
+        },
+        "encoder_layer_19": {
+          "cos_min": 0.999928,
+          "relative_l2": 0.00869766
+        },
+        "encoder_layer_20": {
+          "cos_min": 0.999911,
+          "relative_l2": 0.00886984
+        },
+        "encoder_layer_21": {
+          "cos_min": 0.999906,
+          "relative_l2": 0.0089316
+        },
+        "encoder_layer_22": {
+          "cos_min": 0.999855,
+          "relative_l2": 0.00957098
+        },
+        "encoder_layer_23": {
+          "cos_min": 0.999784,
+          "relative_l2": 0.01017219
+        },
+        "encoder_layer_24": {
+          "cos_min": 0.999731,
+          "relative_l2": 0.01077579
+        },
+        "encoder_layer_25": {
+          "cos_min": 0.999526,
+          "relative_l2": 0.01179265
+        },
+        "encoder_layer_26": {
+          "cos_min": 0.999243,
+          "relative_l2": 0.00956681
+        },
+        "encoder_layer_27": {
+          "cos_min": 0.999422,
+          "relative_l2": 0.00975422
+        },
+        "encoder_layer_28": {
+          "cos_min": 0.999551,
+          "relative_l2": 0.01049877
+        },
+        "encoder_layer_29": {
+          "cos_min": 0.999598,
+          "relative_l2": 0.01140866
+        },
+        "encoder_layer_30": {
+          "cos_min": 0.999516,
+          "relative_l2": 0.01228016
+        },
+        "encoder_layer_31": {
+          "cos_min": 0.999957,
+          "relative_l2": 0.00549179
+        },
+        "llm_logits": {
+          "cos_min": 0.999934,
+          "relative_l2": 0.01294476
+        },
+        "llm_block_0": {
+          "cos_min": 0.999791,
+          "relative_l2": 0.0204562
+        },
+        "llm_block_1": {
+          "cos_min": 0.999834,
+          "relative_l2": 0.01833214
+        },
+        "llm_block_2": {
+          "cos_min": 0.999863,
+          "relative_l2": 0.01679705
+        },
+        "llm_block_3": {
+          "cos_min": 0.999766,
+          "relative_l2": 0.02193655
+        },
+        "llm_block_4": {
+          "cos_min": 0.999784,
+          "relative_l2": 0.02080512
+        },
+        "llm_block_5": {
+          "cos_min": 0.999762,
+          "relative_l2": 0.02184719
+        },
+        "llm_block_6": {
+          "cos_min": 0.999771,
+          "relative_l2": 0.02142336
+        },
+        "llm_block_7": {
+          "cos_min": 0.999756,
+          "relative_l2": 0.02213181
+        },
+        "llm_block_8": {
+          "cos_min": 0.999752,
+          "relative_l2": 0.02240891
+        },
+        "llm_block_9": {
+          "cos_min": 0.999752,
+          "relative_l2": 0.02272875
+        },
+        "llm_block_11": {
+          "cos_min": 0.999746,
+          "relative_l2": 0.02253416
+        },
+        "llm_block_12": {
+          "cos_min": 0.999684,
+          "relative_l2": 0.02514924
+        },
+        "llm_block_13": {
+          "cos_min": 0.999673,
+          "relative_l2": 0.02560581
+        },
+        "llm_block_14": {
+          "cos_min": 0.999724,
+          "relative_l2": 0.02349311
+        },
+        "llm_block_15": {
+          "cos_min": 0.9997,
+          "relative_l2": 0.02447993
+        },
+        "llm_block_16": {
+          "cos_min": 0.999703,
+          "relative_l2": 0.02439246
+        },
+        "llm_block_17": {
+          "cos_min": 0.999712,
+          "relative_l2": 0.0240153
+        },
+        "llm_block_18": {
+          "cos_min": 0.999756,
+          "relative_l2": 0.02221416
+        },
+        "llm_block_19": {
+          "cos_min": 0.999677,
+          "relative_l2": 0.02549463
+        },
+        "llm_block_20": {
+          "cos_min": 0.999667,
+          "relative_l2": 0.02582627
+        },
+        "llm_block_21": {
+          "cos_min": 0.999637,
+          "relative_l2": 0.02698045
+        },
+        "llm_block_22": {
+          "cos_min": 0.999608,
+          "relative_l2": 0.02800228
+        },
+        "llm_block_23": {
+          "cos_min": 0.999565,
+          "relative_l2": 0.02963182
+        },
+        "teacherforced_logits": {
+          "cos_min": 0.999374,
+          "relative_l2": 0.015867
+        }
+      },
+      "source_timestamp_match": true
+    },
+    {
+      "tag": "q8_0-jfk-cuda",
+      "stage_rc": 0,
+      "decode_rc": 0,
+      "decoded_match": true,
+      "seconds_including_load": 4.676290784999765,
+      "actual": [
+        "And so my fellow Americans,",
+        "So, my fellow Americans,",
+        "ask not what your country can do for you,",
+        "do not ask what your country can do for you,",
+        "ask what you can do for your country.",
+        "ask what you can do for your country."
+      ],
+      "expected": [
+        "And so my fellow Americans,",
+        "So, my fellow Americans,",
+        "ask not what your country can do for you,",
+        "do not ask what your country can do for you,",
+        "ask what you can do for your country.",
+        "ask what you can do for your country."
+      ],
+      "stages_ms": {
+        "model_load": 1934.74,
+        "mel": 102.96,
+        "audio_encode": 131.81,
+        "connector": 3.18,
+        "decoder_prefill": 219.97,
+        "decoder_generate": 1769.3
+      },
+      "stage_metrics": {
+        "mel_spectrogram": {
+          "cos_min": 1.0,
+          "relative_l2": 5.1e-06
+        },
+        "connector_output": {
+          "cos_min": 0.999314,
+          "relative_l2": 0.01745317
+        },
+        "conv1_out": {
+          "cos_min": 1.0,
+          "relative_l2": 1.051e-05
+        },
+        "conv2_out": {
+          "cos_min": 1.0,
+          "relative_l2": 8.78e-06
+        },
+        "conv3_out": {
+          "cos_min": 1.0,
+          "relative_l2": 5.84e-06
+        },
+        "encoder_input": {
+          "cos_min": 0.999996,
+          "relative_l2": 0.00207688
+        },
+        "ln_post_out": {
+          "cos_min": 0.999673,
+          "relative_l2": 0.01688854
+        },
+        "proj1_out": {
+          "cos_min": 0.998807,
+          "relative_l2": 0.0212044
+        },
+        "encoder_output": {
+          "cos_min": 0.999314,
+          "relative_l2": 0.01745622
+        },
+        "encoder_layer_0": {
+          "cos_min": 0.999997,
+          "relative_l2": 0.00221363
+        },
+        "encoder_layer_1": {
+          "cos_min": 0.999997,
+          "relative_l2": 0.00229678
+        },
+        "encoder_layer_2": {
+          "cos_min": 0.999996,
+          "relative_l2": 0.00238583
+        },
+        "encoder_layer_3": {
+          "cos_min": 0.999994,
+          "relative_l2": 0.00298787
+        },
+        "encoder_layer_4": {
+          "cos_min": 0.999991,
+          "relative_l2": 0.00366623
+        },
+        "encoder_layer_5": {
+          "cos_min": 0.999985,
+          "relative_l2": 0.004507
+        },
+        "encoder_layer_6": {
+          "cos_min": 0.999981,
+          "relative_l2": 0.00505402
+        },
+        "encoder_layer_7": {
+          "cos_min": 0.999977,
+          "relative_l2": 0.00575338
+        },
+        "encoder_layer_8": {
+          "cos_min": 0.999971,
+          "relative_l2": 0.00647482
+        },
+        "encoder_layer_9": {
+          "cos_min": 0.999968,
+          "relative_l2": 0.00680853
+        },
+        "encoder_layer_10": {
+          "cos_min": 0.999958,
+          "relative_l2": 0.00728198
+        },
+        "encoder_layer_11": {
+          "cos_min": 0.999954,
+          "relative_l2": 0.00756234
+        },
+        "encoder_layer_12": {
+          "cos_min": 0.999938,
+          "relative_l2": 0.00785788
+        },
+        "encoder_layer_13": {
+          "cos_min": 0.999936,
+          "relative_l2": 0.00810422
+        },
+        "encoder_layer_14": {
+          "cos_min": 0.999928,
+          "relative_l2": 0.00825661
+        },
+        "encoder_layer_15": {
+          "cos_min": 0.999919,
+          "relative_l2": 0.00837424
+        },
+        "encoder_layer_17": {
+          "cos_min": 0.999911,
+          "relative_l2": 0.00855529
+        },
+        "encoder_layer_18": {
+          "cos_min": 0.999918,
+          "relative_l2": 0.00851987
+        },
+        "encoder_layer_19": {
+          "cos_min": 0.999915,
+          "relative_l2": 0.0086767
+        },
+        "encoder_layer_20": {
+          "cos_min": 0.999909,
+          "relative_l2": 0.00882713
+        },
+        "encoder_layer_21": {
+          "cos_min": 0.999906,
+          "relative_l2": 0.00888387
+        },
+        "encoder_layer_22": {
+          "cos_min": 0.99989,
+          "relative_l2": 0.00950176
+        },
+        "encoder_layer_23": {
+          "cos_min": 0.999883,
+          "relative_l2": 0.01000669
+        },
+        "encoder_layer_24": {
+          "cos_min": 0.999854,
+          "relative_l2": 0.01056077
+        },
+        "encoder_layer_25": {
+          "cos_min": 0.999686,
+          "relative_l2": 0.01138295
+        },
+        "encoder_layer_26": {
+          "cos_min": 0.999513,
+          "relative_l2": 0.01151958
+        },
+        "encoder_layer_27": {
+          "cos_min": 0.999619,
+          "relative_l2": 0.01214177
+        },
+        "encoder_layer_28": {
+          "cos_min": 0.999686,
+          "relative_l2": 0.01316085
+        },
+        "encoder_layer_29": {
+          "cos_min": 0.999725,
+          "relative_l2": 0.01388018
+        },
+        "encoder_layer_30": {
+          "cos_min": 0.999763,
+          "relative_l2": 0.01439138
+        },
+        "encoder_layer_31": {
+          "cos_min": 0.999929,
+          "relative_l2": 0.00557484
+        },
+        "llm_logits": {
+          "cos_min": 0.999926,
+          "relative_l2": 0.01227181
+        },
+        "llm_block_0": {
+          "cos_min": 0.999787,
+          "relative_l2": 0.02065499
+        },
+        "llm_block_1": {
+          "cos_min": 0.999824,
+          "relative_l2": 0.0190841
+        },
+        "llm_block_2": {
+          "cos_min": 0.999857,
+          "relative_l2": 0.01696724
+        },
+        "llm_block_3": {
+          "cos_min": 0.999767,
+          "relative_l2": 0.02163338
+        },
+        "llm_block_4": {
+          "cos_min": 0.999762,
+          "relative_l2": 0.02241088
+        },
+        "llm_block_5": {
+          "cos_min": 0.999746,
+          "relative_l2": 0.02285294
+        },
+        "llm_block_6": {
+          "cos_min": 0.999742,
+          "relative_l2": 0.02293564
+        },
+        "llm_block_7": {
+          "cos_min": 0.999714,
+          "relative_l2": 0.02394427
+        },
+        "llm_block_8": {
+          "cos_min": 0.999717,
+          "relative_l2": 0.02401346
+        },
+        "llm_block_9": {
+          "cos_min": 0.999719,
+          "relative_l2": 0.02394393
+        },
+        "llm_block_11": {
+          "cos_min": 0.999751,
+          "relative_l2": 0.02229875
+        },
+        "llm_block_12": {
+          "cos_min": 0.999692,
+          "relative_l2": 0.02484335
+        },
+        "llm_block_13": {
+          "cos_min": 0.999684,
+          "relative_l2": 0.02512627
+        },
+        "llm_block_14": {
+          "cos_min": 0.999725,
+          "relative_l2": 0.02352728
+        },
+        "llm_block_15": {
+          "cos_min": 0.999702,
+          "relative_l2": 0.02462029
+        },
+        "llm_block_16": {
+          "cos_min": 0.999646,
+          "relative_l2": 0.02689343
+        },
+        "llm_block_17": {
+          "cos_min": 0.999621,
+          "relative_l2": 0.02781804
+        },
+        "llm_block_18": {
+          "cos_min": 0.999709,
+          "relative_l2": 0.0244407
+        },
+        "llm_block_19": {
+          "cos_min": 0.999618,
+          "relative_l2": 0.02764838
+        },
+        "llm_block_20": {
+          "cos_min": 0.999587,
+          "relative_l2": 0.02875515
+        },
+        "llm_block_21": {
+          "cos_min": 0.999552,
+          "relative_l2": 0.02993414
+        },
+        "llm_block_22": {
+          "cos_min": 0.999515,
+          "relative_l2": 0.03118451
+        },
+        "llm_block_23": {
+          "cos_min": 0.999481,
+          "relative_l2": 0.03220452
+        },
+        "teacherforced_logits": {
+          "cos_min": 0.998167,
+          "relative_l2": 0.02685059
+        }
+      },
+      "source_timestamp_match": true
+    },
+    {
+      "tag": "q8_0-zh-cpu",
+      "stage_rc": 0,
+      "decode_rc": 0,
+      "decoded_match": true,
+      "seconds_including_load": 26.760996966999755,
+      "actual": [
+        "正是因为存在绝对正义，所以我们接受现实的相对正义。",
+        "It is precisely because absolute justice exists that we accept the relative justice of reality.",
+        "但是不要因为现实的相对正义，",
+        "But don't let the relative justice of reality",
+        "我们就认为这个世界没有正义。",
+        "make us believe there is no justice in this world.",
+        "因为如果当你认为这个世界没有正义，",
+        "Because if you believe there is no justice in this world,"
+      ],
+      "expected": [
+        "正是因为存在绝对正义，所以我们接受现实的相对正义。",
+        "It is precisely because absolute justice exists that we accept the relative justice of reality.",
+        "但是不要因为现实的相对正义，",
+        "But don't let the relative justice of reality",
+        "我们就认为这个世界没有正义。",
+        "make us believe there is no justice in this world.",
+        "因为如果当你认为这个世界没有正义，",
+        "Because if you believe there is no justice in this world,"
+      ],
+      "stages_ms": {
+        "model_load": 2405.03,
+        "mel": 118.16,
+        "audio_encode": 4148.02,
+        "connector": 32.77,
+        "decoder_prefill": 1115.12,
+        "decoder_generate": 18332.58
+      },
+      "stage_metrics": {
+        "mel_spectrogram": {
+          "cos_min": 1.0,
+          "relative_l2": 9.17e-06
+        },
+        "connector_output": {
+          "cos_min": 0.998798,
+          "relative_l2": 0.01762205
+        },
+        "conv1_out": {
+          "cos_min": 1.0,
+          "relative_l2": 1.702e-05
+        },
+        "conv2_out": {
+          "cos_min": 1.0,
+          "relative_l2": 1.449e-05
+        },
+        "conv3_out": {
+          "cos_min": 1.0,
+          "relative_l2": 9.49e-06
+        },
+        "encoder_input": {
+          "cos_min": 0.999996,
+          "relative_l2": 0.0020803
+        },
+        "ln_post_out": {
+          "cos_min": 0.996068,
+          "relative_l2": 0.0198751
+        },
+        "proj1_out": {
+          "cos_min": 0.997586,
+          "relative_l2": 0.02103725
+        },
+        "encoder_output": {
+          "cos_min": 0.998798,
+          "relative_l2": 0.01762561
+        },
+        "encoder_layer_0": {
+          "cos_min": 0.999997,
+          "relative_l2": 0.00217417
+        },
+        "encoder_layer_1": {
+          "cos_min": 0.999997,
+          "relative_l2": 0.00221897
+        },
+        "encoder_layer_2": {
+          "cos_min": 0.999997,
+          "relative_l2": 0.00231102
+        },
+        "encoder_layer_3": {
+          "cos_min": 0.999995,
+          "relative_l2": 0.00282374
+        },
+        "encoder_layer_4": {
+          "cos_min": 0.99999,
+          "relative_l2": 0.00344386
+        },
+        "encoder_layer_5": {
+          "cos_min": 0.999985,
+          "relative_l2": 0.00425308
+        },
+        "encoder_layer_6": {
+          "cos_min": 0.999982,
+          "relative_l2": 0.00480339
+        },
+        "encoder_layer_7": {
+          "cos_min": 0.999979,
+          "relative_l2": 0.00544372
+        },
+        "encoder_layer_8": {
+          "cos_min": 0.999972,
+          "relative_l2": 0.00612365
+        },
+        "encoder_layer_9": {
+          "cos_min": 0.999971,
+          "relative_l2": 0.00654002
+        },
+        "encoder_layer_10": {
+          "cos_min": 0.999964,
+          "relative_l2": 0.00699983
+        },
+        "encoder_layer_11": {
+          "cos_min": 0.99996,
+          "relative_l2": 0.00731315
+        },
+        "encoder_layer_12": {
+          "cos_min": 0.999957,
+          "relative_l2": 0.0076043
+        },
+        "encoder_layer_13": {
+          "cos_min": 0.999953,
+          "relative_l2": 0.00798381
+        },
+        "encoder_layer_14": {
+          "cos_min": 0.999949,
+          "relative_l2": 0.00822288
+        },
+        "encoder_layer_15": {
+          "cos_min": 0.999947,
+          "relative_l2": 0.00836237
+        },
+        "encoder_layer_17": {
+          "cos_min": 0.999936,
+          "relative_l2": 0.00868709
+        },
+        "encoder_layer_18": {
+          "cos_min": 0.99993,
+          "relative_l2": 0.0088313
+        },
+        "encoder_layer_19": {
+          "cos_min": 0.999927,
+          "relative_l2": 0.00916514
+        },
+        "encoder_layer_20": {
+          "cos_min": 0.999923,
+          "relative_l2": 0.00919266
+        },
+        "encoder_layer_21": {
+          "cos_min": 0.999927,
+          "relative_l2": 0.00930276
+        },
+        "encoder_layer_22": {
+          "cos_min": 0.999911,
+          "relative_l2": 0.01006828
+        },
+        "encoder_layer_23": {
+          "cos_min": 0.9999,
+          "relative_l2": 0.01054042
+        },
+        "encoder_layer_24": {
+          "cos_min": 0.999868,
+          "relative_l2": 0.01130642
+        },
+        "encoder_layer_25": {
+          "cos_min": 0.99985,
+          "relative_l2": 0.01145875
+        },
+        "encoder_layer_26": {
+          "cos_min": 0.999801,
+          "relative_l2": 0.01554078
+        },
+        "encoder_layer_27": {
+          "cos_min": 0.999531,
+          "relative_l2": 0.01717525
+        },
+        "encoder_layer_28": {
+          "cos_min": 0.998226,
+          "relative_l2": 0.01688733
+        },
+        "encoder_layer_29": {
+          "cos_min": 0.997806,
+          "relative_l2": 0.0164798
+        },
+        "encoder_layer_30": {
+          "cos_min": 0.997731,
+          "relative_l2": 0.01598777
+        },
+        "encoder_layer_31": {
+          "cos_min": 0.99965,
+          "relative_l2": 0.00569239
+        },
+        "llm_logits": {
+          "cos_min": 0.999881,
+          "relative_l2": 0.01556338
+        },
+        "llm_block_0": {
+          "cos_min": 0.999813,
+          "relative_l2": 0.01934335
+        },
+        "llm_block_1": {
+          "cos_min": 0.999834,
+          "relative_l2": 0.01823543
+        },
+        "llm_block_2": {
+          "cos_min": 0.999866,
+          "relative_l2": 0.01641145
+        },
+        "llm_block_3": {
+          "cos_min": 0.999839,
+          "relative_l2": 0.01797017
+        },
+        "llm_block_4": {
+          "cos_min": 0.99984,
+          "relative_l2": 0.01800903
+        },
+        "llm_block_5": {
+          "cos_min": 0.999823,
+          "relative_l2": 0.01884434
+        },
+        "llm_block_6": {
+          "cos_min": 0.999827,
+          "relative_l2": 0.01863955
+        },
+        "llm_block_7": {
+          "cos_min": 0.999823,
+          "relative_l2": 0.01889005
+        },
+        "llm_block_8": {
+          "cos_min": 0.999828,
+          "relative_l2": 0.01854008
+        },
+        "llm_block_9": {
+          "cos_min": 0.999827,
+          "relative_l2": 0.01871227
+        },
+        "llm_block_11": {
+          "cos_min": 0.999823,
+          "relative_l2": 0.01882756
+        },
+        "llm_block_12": {
+          "cos_min": 0.999799,
+          "relative_l2": 0.02006994
+        },
+        "llm_block_13": {
+          "cos_min": 0.999795,
+          "relative_l2": 0.02045625
+        },
+        "llm_block_14": {
+          "cos_min": 0.999808,
+          "relative_l2": 0.01991767
+        },
+        "llm_block_15": {
+          "cos_min": 0.999813,
+          "relative_l2": 0.01952076
+        },
+        "llm_block_16": {
+          "cos_min": 0.999762,
+          "relative_l2": 0.0219548
+        },
+        "llm_block_17": {
+          "cos_min": 0.999749,
+          "relative_l2": 0.02255379
+        },
+        "llm_block_18": {
+          "cos_min": 0.999817,
+          "relative_l2": 0.01926953
+        },
+        "llm_block_19": {
+          "cos_min": 0.999776,
+          "relative_l2": 0.02125865
+        },
+        "llm_block_20": {
+          "cos_min": 0.99976,
+          "relative_l2": 0.02195645
+        },
+        "llm_block_21": {
+          "cos_min": 0.999727,
+          "relative_l2": 0.02340425
+        },
+        "llm_block_22": {
+          "cos_min": 0.999675,
+          "relative_l2": 0.02549306
+        },
+        "llm_block_23": {
+          "cos_min": 0.999585,
+          "relative_l2": 0.02896595
+        },
+        "teacherforced_logits": {
+          "cos_min": 0.999334,
+          "relative_l2": 0.00952582
+        }
+      },
+      "source_timestamp_match": true
+    },
+    {
+      "tag": "q8_0-zh-cuda",
+      "stage_rc": 0,
+      "decode_rc": 0,
+      "decoded_match": true,
+      "seconds_including_load": 5.378364799999872,
+      "actual": [
+        "正是因为存在绝对正义，所以我们接受现实的相对正义。",
+        "It is precisely because absolute justice exists that we accept the relative justice of reality.",
+        "但是不要因为现实的相对正义，",
+        "But don't let the relative justice of reality",
+        "我们就认为这个世界没有正义。",
+        "make us believe there is no justice in this world.",
+        "因为如果当你认为这个世界没有正义，",
+        "Because if you believe there is no justice in this world,"
+      ],
+      "expected": [
+        "正是因为存在绝对正义，所以我们接受现实的相对正义。",
+        "It is precisely because absolute justice exists that we accept the relative justice of reality.",
+        "但是不要因为现实的相对正义，",
+        "But don't let the relative justice of reality",
+        "我们就认为这个世界没有正义。",
+        "make us believe there is no justice in this world.",
+        "因为如果当你认为这个世界没有正义，",
+        "Because if you believe there is no justice in this world,"
+      ],
+      "stages_ms": {
+        "model_load": 1964.15,
+        "mel": 118.94,
+        "audio_encode": 147.79,
+        "connector": 3.75,
+        "decoder_prefill": 227.82,
+        "decoder_generate": 2416.18
+      },
+      "stage_metrics": {
+        "mel_spectrogram": {
+          "cos_min": 1.0,
+          "relative_l2": 9.17e-06
+        },
+        "connector_output": {
+          "cos_min": 0.99905,
+          "relative_l2": 0.01750388
+        },
+        "conv1_out": {
+          "cos_min": 1.0,
+          "relative_l2": 1.702e-05
+        },
+        "conv2_out": {
+          "cos_min": 1.0,
+          "relative_l2": 1.447e-05
+        },
+        "conv3_out": {
+          "cos_min": 1.0,
+          "relative_l2": 9.49e-06
+        },
+        "encoder_input": {
+          "cos_min": 0.999996,
+          "relative_l2": 0.00207882
+        },
+        "ln_post_out": {
+          "cos_min": 0.996953,
+          "relative_l2": 0.01952018
+        },
+        "proj1_out": {
+          "cos_min": 0.998114,
+          "relative_l2": 0.02086943
+        },
+        "encoder_output": {
+          "cos_min": 0.999049,
+          "relative_l2": 0.01750734
+        },
+        "encoder_layer_0": {
+          "cos_min": 0.999997,
+          "relative_l2": 0.00216779
+        },
+        "encoder_layer_1": {
+          "cos_min": 0.999997,
+          "relative_l2": 0.00220563
+        },
+        "encoder_layer_2": {
+          "cos_min": 0.999997,
+          "relative_l2": 0.00229555
+        },
+        "encoder_layer_3": {
+          "cos_min": 0.999994,
+          "relative_l2": 0.0028134
+        },
+        "encoder_layer_4": {
+          "cos_min": 0.99999,
+          "relative_l2": 0.00343441
+        },
+        "encoder_layer_5": {
+          "cos_min": 0.999985,
+          "relative_l2": 0.0042379
+        },
+        "encoder_layer_6": {
+          "cos_min": 0.999981,
+          "relative_l2": 0.00478039
+        },
+        "encoder_layer_7": {
+          "cos_min": 0.999979,
+          "relative_l2": 0.00542097
+        },
+        "encoder_layer_8": {
+          "cos_min": 0.999962,
+          "relative_l2": 0.00611662
+        },
+        "encoder_layer_9": {
+          "cos_min": 0.999957,
+          "relative_l2": 0.00653841
+        },
+        "encoder_layer_10": {
+          "cos_min": 0.99995,
+          "relative_l2": 0.00699374
+        },
+        "encoder_layer_11": {
+          "cos_min": 0.99995,
+          "relative_l2": 0.00729661
+        },
+        "encoder_layer_12": {
+          "cos_min": 0.999951,
+          "relative_l2": 0.00758658
+        },
+        "encoder_layer_13": {
+          "cos_min": 0.999943,
+          "relative_l2": 0.00799871
+        },
+        "encoder_layer_14": {
+          "cos_min": 0.99994,
+          "relative_l2": 0.00826614
+        },
+        "encoder_layer_15": {
+          "cos_min": 0.999943,
+          "relative_l2": 0.00838925
+        },
+        "encoder_layer_17": {
+          "cos_min": 0.999939,
+          "relative_l2": 0.00869618
+        },
+        "encoder_layer_18": {
+          "cos_min": 0.999928,
+          "relative_l2": 0.00882511
+        },
+        "encoder_layer_19": {
+          "cos_min": 0.999918,
+          "relative_l2": 0.00917422
+        },
+        "encoder_layer_20": {
+          "cos_min": 0.999916,
+          "relative_l2": 0.00925995
+        },
+        "encoder_layer_21": {
+          "cos_min": 0.999917,
+          "relative_l2": 0.00937021
+        },
+        "encoder_layer_22": {
+          "cos_min": 0.999899,
+          "relative_l2": 0.01014806
+        },
+        "encoder_layer_23": {
+          "cos_min": 0.999894,
+          "relative_l2": 0.01063055
+        },
+        "encoder_layer_24": {
+          "cos_min": 0.999881,
+          "relative_l2": 0.01130469
+        },
+        "encoder_layer_25": {
+          "cos_min": 0.999826,
+          "relative_l2": 0.0114465
+        },
+        "encoder_layer_26": {
+          "cos_min": 0.999722,
+          "relative_l2": 0.01439616
+        },
+        "encoder_layer_27": {
+          "cos_min": 0.999618,
+          "relative_l2": 0.01577124
+        },
+        "encoder_layer_28": {
+          "cos_min": 0.998616,
+          "relative_l2": 0.01560171
+        },
+        "encoder_layer_29": {
+          "cos_min": 0.998319,
+          "relative_l2": 0.01544262
+        },
+        "encoder_layer_30": {
+          "cos_min": 0.998251,
+          "relative_l2": 0.01532625
+        },
+        "encoder_layer_31": {
+          "cos_min": 0.999731,
+          "relative_l2": 0.00560722
+        },
+        "llm_logits": {
+          "cos_min": 0.999877,
+          "relative_l2": 0.01627017
+        },
+        "llm_block_0": {
+          "cos_min": 0.999812,
+          "relative_l2": 0.01938148
+        },
+        "llm_block_1": {
+          "cos_min": 0.999838,
+          "relative_l2": 0.01810274
+        },
+        "llm_block_2": {
+          "cos_min": 0.999863,
+          "relative_l2": 0.01678342
+        },
+        "llm_block_3": {
+          "cos_min": 0.999834,
+          "relative_l2": 0.01821451
+        },
+        "llm_block_4": {
+          "cos_min": 0.999851,
+          "relative_l2": 0.01760191
+        },
+        "llm_block_5": {
+          "cos_min": 0.999849,
+          "relative_l2": 0.0175822
+        },
+        "llm_block_6": {
+          "cos_min": 0.999865,
+          "relative_l2": 0.01646927
+        },
+        "llm_block_7": {
+          "cos_min": 0.999852,
+          "relative_l2": 0.01729115
+        },
+        "llm_block_8": {
+          "cos_min": 0.999851,
+          "relative_l2": 0.01736738
+        },
+        "llm_block_9": {
+          "cos_min": 0.999845,
+          "relative_l2": 0.01772242
+        },
+        "llm_block_11": {
+          "cos_min": 0.999831,
+          "relative_l2": 0.01842585
+        },
+        "llm_block_12": {
+          "cos_min": 0.999806,
+          "relative_l2": 0.01978198
+        },
+        "llm_block_13": {
+          "cos_min": 0.999803,
+          "relative_l2": 0.01997299
+        },
+        "llm_block_14": {
+          "cos_min": 0.999806,
+          "relative_l2": 0.01992097
+        },
+        "llm_block_15": {
+          "cos_min": 0.9998,
+          "relative_l2": 0.02006715
+        },
+        "llm_block_16": {
+          "cos_min": 0.999749,
+          "relative_l2": 0.0226138
+        },
+        "llm_block_17": {
+          "cos_min": 0.999739,
+          "relative_l2": 0.02301306
+        },
+        "llm_block_18": {
+          "cos_min": 0.999797,
+          "relative_l2": 0.02022679
+        },
+        "llm_block_19": {
+          "cos_min": 0.999751,
+          "relative_l2": 0.02231913
+        },
+        "llm_block_20": {
+          "cos_min": 0.999748,
+          "relative_l2": 0.02247098
+        },
+        "llm_block_21": {
+          "cos_min": 0.999723,
+          "relative_l2": 0.02354447
+        },
+        "llm_block_22": {
+          "cos_min": 0.999667,
+          "relative_l2": 0.02580914
+        },
+        "llm_block_23": {
+          "cos_min": 0.999581,
+          "relative_l2": 0.02898542
+        },
+        "teacherforced_logits": {
+          "cos_min": 0.997175,
+          "relative_l2": 0.00991557
+        }
+      },
+      "source_timestamp_match": true
+    },
+    {
+      "tag": "q8_0-jfk-tail-cpu",
+      "stage_rc": 0,
+      "decode_rc": 0,
+      "decoded_match": true,
+      "seconds_including_load": 20.28602520300001,
+      "actual": [
+        "And so my fellow Americans,",
+        "So, my fellow Americans,",
+        "ask not what your country can do for you,",
+        "do not ask what your country can do for you,",
+        "ask what you can do for your country.",
+        "ask what you can do for your country."
+      ],
+      "expected": [
+        "And so my fellow Americans,",
+        "So, my fellow Americans,",
+        "ask not what your country can do for you,",
+        "do not ask what your country can do for you,",
+        "ask what you can do for your country.",
+        "ask what you can do for your country."
+      ],
+      "stages_ms": {
+        "model_load": 2400.07,
+        "mel": 100.0,
+        "audio_encode": 3420.59,
+        "connector": 26.71,
+        "decoder_prefill": 1094.72,
+        "decoder_generate": 12678.4
+      },
+      "stage_metrics": {
+        "mel_spectrogram": {
+          "cos_min": 1.0,
+          "relative_l2": 5.1e-06
+        },
+        "connector_output": {
+          "cos_min": 0.999428,
+          "relative_l2": 0.01714779
+        },
+        "conv1_out": {
+          "cos_min": 1.0,
+          "relative_l2": 1.05e-05
+        },
+        "conv2_out": {
+          "cos_min": 1.0,
+          "relative_l2": 8.81e-06
+        },
+        "conv3_out": {
+          "cos_min": 1.0,
+          "relative_l2": 5.85e-06
+        },
+        "encoder_input": {
+          "cos_min": 0.999996,
+          "relative_l2": 0.0020798
+        },
+        "ln_post_out": {
+          "cos_min": 0.999486,
+          "relative_l2": 0.0164433
+        },
+        "proj1_out": {
+          "cos_min": 0.999227,
+          "relative_l2": 0.02086276
+        },
+        "encoder_output": {
+          "cos_min": 0.999428,
+          "relative_l2": 0.01715084
+        },
+        "encoder_layer_0": {
+          "cos_min": 0.999997,
+          "relative_l2": 0.00221043
+        },
+        "encoder_layer_1": {
+          "cos_min": 0.999997,
+          "relative_l2": 0.00229075
+        },
+        "encoder_layer_2": {
+          "cos_min": 0.999996,
+          "relative_l2": 0.00238766
+        },
+        "encoder_layer_3": {
+          "cos_min": 0.999994,
+          "relative_l2": 0.00299876
+        },
+        "encoder_layer_4": {
+          "cos_min": 0.999991,
+          "relative_l2": 0.00366837
+        },
+        "encoder_layer_5": {
+          "cos_min": 0.999985,
+          "relative_l2": 0.00450007
+        },
+        "encoder_layer_6": {
+          "cos_min": 0.999981,
+          "relative_l2": 0.0050451
+        },
+        "encoder_layer_7": {
+          "cos_min": 0.999976,
+          "relative_l2": 0.00572451
+        },
+        "encoder_layer_8": {
+          "cos_min": 0.999971,
+          "relative_l2": 0.00641791
+        },
+        "encoder_layer_9": {
+          "cos_min": 0.999966,
+          "relative_l2": 0.00678106
+        },
+        "encoder_layer_10": {
+          "cos_min": 0.999959,
+          "relative_l2": 0.00725119
+        },
+        "encoder_layer_11": {
+          "cos_min": 0.999951,
+          "relative_l2": 0.00753153
+        },
+        "encoder_layer_12": {
+          "cos_min": 0.999943,
+          "relative_l2": 0.00780163
+        },
+        "encoder_layer_13": {
+          "cos_min": 0.999942,
+          "relative_l2": 0.00802916
+        },
+        "encoder_layer_14": {
+          "cos_min": 0.999938,
+          "relative_l2": 0.00818475
+        },
+        "encoder_layer_15": {
+          "cos_min": 0.999933,
+          "relative_l2": 0.00829166
+        },
+        "encoder_layer_17": {
+          "cos_min": 0.999925,
+          "relative_l2": 0.00853445
+        },
+        "encoder_layer_18": {
+          "cos_min": 0.999925,
+          "relative_l2": 0.00852969
+        },
+        "encoder_layer_19": {
+          "cos_min": 0.999909,
+          "relative_l2": 0.00869687
+        },
+        "encoder_layer_20": {
+          "cos_min": 0.999891,
+          "relative_l2": 0.00885135
+        },
+        "encoder_layer_21": {
+          "cos_min": 0.999885,
+          "relative_l2": 0.00891711
+        },
+        "encoder_layer_22": {
+          "cos_min": 0.999782,
+          "relative_l2": 0.00955682
+        },
+        "encoder_layer_23": {
+          "cos_min": 0.999704,
+          "relative_l2": 0.01006073
+        },
+        "encoder_layer_24": {
+          "cos_min": 0.999645,
+          "relative_l2": 0.01042312
+        },
+        "encoder_layer_25": {
+          "cos_min": 0.99959,
+          "relative_l2": 0.01028014
+        },
+        "encoder_layer_26": {
+          "cos_min": 0.999627,
+          "relative_l2": 0.00807337
+        },
+        "encoder_layer_27": {
+          "cos_min": 0.999621,
+          "relative_l2": 0.00831626
+        },
+        "encoder_layer_28": {
+          "cos_min": 0.999532,
+          "relative_l2": 0.00893485
+        },
+        "encoder_layer_29": {
+          "cos_min": 0.999561,
+          "relative_l2": 0.00991247
+        },
+        "encoder_layer_30": {
+          "cos_min": 0.999522,
+          "relative_l2": 0.01096698
+        },
+        "encoder_layer_31": {
+          "cos_min": 0.99996,
+          "relative_l2": 0.00521129
+        },
+        "llm_logits": {
+          "cos_min": 0.999933,
+          "relative_l2": 0.01278193
+        },
+        "llm_block_0": {
+          "cos_min": 0.999797,
+          "relative_l2": 0.02037085
+        },
+        "llm_block_1": {
+          "cos_min": 0.999807,
+          "relative_l2": 0.01972503
+        },
+        "llm_block_2": {
+          "cos_min": 0.999849,
+          "relative_l2": 0.01737829
+        },
+        "llm_block_3": {
+          "cos_min": 0.999731,
+          "relative_l2": 0.02329991
+        },
+        "llm_block_4": {
+          "cos_min": 0.999726,
+          "relative_l2": 0.02348079
+        },
+        "llm_block_5": {
+          "cos_min": 0.999724,
+          "relative_l2": 0.02350933
+        },
+        "llm_block_6": {
+          "cos_min": 0.999703,
+          "relative_l2": 0.02437782
+        },
+        "llm_block_7": {
+          "cos_min": 0.999681,
+          "relative_l2": 0.02526697
+        },
+        "llm_block_8": {
+          "cos_min": 0.999675,
+          "relative_l2": 0.02549354
+        },
+        "llm_block_9": {
+          "cos_min": 0.999682,
+          "relative_l2": 0.02522083
+        },
+        "llm_block_11": {
+          "cos_min": 0.999744,
+          "relative_l2": 0.0226102
+        },
+        "llm_block_12": {
+          "cos_min": 0.999691,
+          "relative_l2": 0.0248605
+        },
+        "llm_block_13": {
+          "cos_min": 0.999667,
+          "relative_l2": 0.02582294
+        },
+        "llm_block_14": {
+          "cos_min": 0.99971,
+          "relative_l2": 0.02409453
+        },
+        "llm_block_15": {
+          "cos_min": 0.999692,
+          "relative_l2": 0.02483369
+        },
+        "llm_block_16": {
+          "cos_min": 0.999661,
+          "relative_l2": 0.02605168
+        },
+        "llm_block_17": {
+          "cos_min": 0.999617,
+          "relative_l2": 0.02766721
+        },
+        "llm_block_18": {
+          "cos_min": 0.999701,
+          "relative_l2": 0.02445601
+        },
+        "llm_block_19": {
+          "cos_min": 0.999612,
+          "relative_l2": 0.02791612
+        },
+        "llm_block_20": {
+          "cos_min": 0.99957,
+          "relative_l2": 0.02934686
+        },
+        "llm_block_21": {
+          "cos_min": 0.999528,
+          "relative_l2": 0.03072478
+        },
+        "llm_block_22": {
+          "cos_min": 0.999477,
+          "relative_l2": 0.03234269
+        },
+        "llm_block_23": {
+          "cos_min": 0.999496,
+          "relative_l2": 0.03177145
+        },
+        "teacherforced_logits": {
+          "cos_min": 0.997264,
+          "relative_l2": 0.02511311
+        }
+      },
+      "source_timestamp_match": true
+    },
+    {
+      "tag": "q8_0-jfk-tail-cuda",
+      "stage_rc": 0,
+      "decode_rc": 0,
+      "decoded_match": true,
+      "seconds_including_load": 4.526307290999739,
+      "actual": [
+        "And so my fellow Americans,",
+        "So, my fellow Americans,",
+        "ask not what your country can do for you,",
+        "do not ask what your country can do for you,",
+        "ask what you can do for your country.",
+        "ask what you can do for your country."
+      ],
+      "expected": [
+        "And so my fellow Americans,",
+        "So, my fellow Americans,",
+        "ask not what your country can do for you,",
+        "do not ask what your country can do for you,",
+        "ask what you can do for your country.",
+        "ask what you can do for your country."
+      ],
+      "stages_ms": {
+        "model_load": 1933.25,
+        "mel": 100.53,
+        "audio_encode": 130.98,
+        "connector": 3.23,
+        "decoder_prefill": 213.16,
+        "decoder_generate": 1617.96
+      },
+      "stage_metrics": {
+        "mel_spectrogram": {
+          "cos_min": 1.0,
+          "relative_l2": 5.1e-06
+        },
+        "connector_output": {
+          "cos_min": 0.999454,
+          "relative_l2": 0.01713866
+        },
+        "conv1_out": {
+          "cos_min": 1.0,
+          "relative_l2": 1.05e-05
+        },
+        "conv2_out": {
+          "cos_min": 1.0,
+          "relative_l2": 8.77e-06
+        },
+        "conv3_out": {
+          "cos_min": 1.0,
+          "relative_l2": 5.84e-06
+        },
+        "encoder_input": {
+          "cos_min": 0.999996,
+          "relative_l2": 0.00207868
+        },
+        "ln_post_out": {
+          "cos_min": 0.999615,
+          "relative_l2": 0.01648674
+        },
+        "proj1_out": {
+          "cos_min": 0.999263,
+          "relative_l2": 0.02083531
+        },
+        "encoder_output": {
+          "cos_min": 0.999454,
+          "relative_l2": 0.01714169
+        },
+        "encoder_layer_0": {
+          "cos_min": 0.999997,
+          "relative_l2": 0.00221101
+        },
+        "encoder_layer_1": {
+          "cos_min": 0.999997,
+          "relative_l2": 0.002286
+        },
+        "encoder_layer_2": {
+          "cos_min": 0.999996,
+          "relative_l2": 0.00238426
+        },
+        "encoder_layer_3": {
+          "cos_min": 0.999994,
+          "relative_l2": 0.0029894
+        },
+        "encoder_layer_4": {
+          "cos_min": 0.999991,
+          "relative_l2": 0.00365973
+        },
+        "encoder_layer_5": {
+          "cos_min": 0.999985,
+          "relative_l2": 0.0044881
+        },
+        "encoder_layer_6": {
+          "cos_min": 0.99998,
+          "relative_l2": 0.0050461
+        },
+        "encoder_layer_7": {
+          "cos_min": 0.999976,
+          "relative_l2": 0.00573632
+        },
+        "encoder_layer_8": {
+          "cos_min": 0.999971,
+          "relative_l2": 0.00643156
+        },
+        "encoder_layer_9": {
+          "cos_min": 0.999965,
+          "relative_l2": 0.00677797
+        },
+        "encoder_layer_10": {
+          "cos_min": 0.99996,
+          "relative_l2": 0.00726712
+        },
+        "encoder_layer_11": {
+          "cos_min": 0.999953,
+          "relative_l2": 0.00752647
+        },
+        "encoder_layer_12": {
+          "cos_min": 0.999947,
+          "relative_l2": 0.00779518
+        },
+        "encoder_layer_13": {
+          "cos_min": 0.999946,
+          "relative_l2": 0.00804478
+        },
+        "encoder_layer_14": {
+          "cos_min": 0.999941,
+          "relative_l2": 0.00816666
+        },
+        "encoder_layer_15": {
+          "cos_min": 0.99993,
+          "relative_l2": 0.00826581
+        },
+        "encoder_layer_17": {
+          "cos_min": 0.999913,
+          "relative_l2": 0.00850078
+        },
+        "encoder_layer_18": {
+          "cos_min": 0.999913,
+          "relative_l2": 0.00846742
+        },
+        "encoder_layer_19": {
+          "cos_min": 0.999911,
+          "relative_l2": 0.00862032
+        },
+        "encoder_layer_20": {
+          "cos_min": 0.999915,
+          "relative_l2": 0.00875796
+        },
+        "encoder_layer_21": {
+          "cos_min": 0.999911,
+          "relative_l2": 0.0088185
+        },
+        "encoder_layer_22": {
+          "cos_min": 0.99989,
+          "relative_l2": 0.0094524
+        },
+        "encoder_layer_23": {
+          "cos_min": 0.999837,
+          "relative_l2": 0.00997449
+        },
+        "encoder_layer_24": {
+          "cos_min": 0.999826,
+          "relative_l2": 0.01043593
+        },
+        "encoder_layer_25": {
+          "cos_min": 0.999796,
+          "relative_l2": 0.0107331
+        },
+        "encoder_layer_26": {
+          "cos_min": 0.999564,
+          "relative_l2": 0.00830946
+        },
+        "encoder_layer_27": {
+          "cos_min": 0.999631,
+          "relative_l2": 0.00840583
+        },
+        "encoder_layer_28": {
+          "cos_min": 0.999664,
+          "relative_l2": 0.00895051
+        },
+        "encoder_layer_29": {
+          "cos_min": 0.999699,
+          "relative_l2": 0.00990822
+        },
+        "encoder_layer_30": {
+          "cos_min": 0.999718,
+          "relative_l2": 0.01094849
+        },
+        "encoder_layer_31": {
+          "cos_min": 0.99997,
+          "relative_l2": 0.00509872
+        },
+        "llm_logits": {
+          "cos_min": 0.999928,
+          "relative_l2": 0.01565855
+        },
+        "llm_block_0": {
+          "cos_min": 0.9998,
+          "relative_l2": 0.02018841
+        },
+        "llm_block_1": {
+          "cos_min": 0.999815,
+          "relative_l2": 0.01931615
+        },
+        "llm_block_2": {
+          "cos_min": 0.99985,
+          "relative_l2": 0.01736009
+        },
+        "llm_block_3": {
+          "cos_min": 0.999738,
+          "relative_l2": 0.02291811
+        },
+        "llm_block_4": {
+          "cos_min": 0.99973,
+          "relative_l2": 0.02356996
+        },
+        "llm_block_5": {
+          "cos_min": 0.999724,
+          "relative_l2": 0.02393565
+        },
+        "llm_block_6": {
+          "cos_min": 0.999713,
+          "relative_l2": 0.02433257
+        },
+        "llm_block_7": {
+          "cos_min": 0.999695,
+          "relative_l2": 0.02475999
+        },
+        "llm_block_8": {
+          "cos_min": 0.999704,
+          "relative_l2": 0.02433788
+        },
+        "llm_block_9": {
+          "cos_min": 0.999703,
+          "relative_l2": 0.02438544
+        },
+        "llm_block_11": {
+          "cos_min": 0.999731,
+          "relative_l2": 0.02325028
+        },
+        "llm_block_12": {
+          "cos_min": 0.999702,
+          "relative_l2": 0.0244301
+        },
+        "llm_block_13": {
+          "cos_min": 0.999681,
+          "relative_l2": 0.02528429
+        },
+        "llm_block_14": {
+          "cos_min": 0.999707,
+          "relative_l2": 0.02423214
+        },
+        "llm_block_15": {
+          "cos_min": 0.999664,
+          "relative_l2": 0.0259432
+        },
+        "llm_block_16": {
+          "cos_min": 0.999561,
+          "relative_l2": 0.02961253
+        },
+        "llm_block_17": {
+          "cos_min": 0.999527,
+          "relative_l2": 0.03075892
+        },
+        "llm_block_18": {
+          "cos_min": 0.999646,
+          "relative_l2": 0.02662106
+        },
+        "llm_block_19": {
+          "cos_min": 0.99956,
+          "relative_l2": 0.02966951
+        },
+        "llm_block_20": {
+          "cos_min": 0.999533,
+          "relative_l2": 0.03057972
+        },
+        "llm_block_21": {
+          "cos_min": 0.999511,
+          "relative_l2": 0.0313245
+        },
+        "llm_block_22": {
+          "cos_min": 0.999498,
+          "relative_l2": 0.03173073
+        },
+        "llm_block_23": {
+          "cos_min": 0.999503,
+          "relative_l2": 0.0316479
+        },
+        "teacherforced_logits": {
+          "cos_min": 0.999068,
+          "relative_l2": 0.01651312
+        }
+      },
+      "source_timestamp_match": true
+    }
+  ],
+  "failed": [],
+  "conclusive": true,
+  "precision_audit_run": 36911946162,
+  "timestamp_cpu_control_byte_exact": true,
+  "limitations": [
+    "One cold CLI invocation per clip/cohort/device; not a warm median benchmark.",
+    "Two Tesla T4 devices; default decoder layer distribution uses both.",
+    "Integer MMQ-capable hardware; no forced-MMQ versus cuBLAS A/B.",
+    "Direct windows without Silero; no full-file GPU proof."
+  ]
+}

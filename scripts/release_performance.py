@@ -184,8 +184,10 @@ def _local_submodule_candidates(root):
 def _initialize_submodule(root, tree, ref):
     listing = _run(["git", "ls-tree", ref, "third_party/crispasr"], cwd=root).strip()
     fields = listing.split()
-    if len(fields) < 3 or fields[1] != "commit":
-        raise RuntimeError(f"cannot resolve CrispASR gitlink for {ref}")
+    if not listing or fields[1] != "commit":
+        # Vendored CrispASR source already came with the worktree checkout;
+        # only historical refs still carry a gitlink that needs materializing.
+        return
     commit = fields[2]
     source = find_local_submodule_source(_local_submodule_candidates(root), commit)
     destination = tree / "third_party" / "crispasr"
