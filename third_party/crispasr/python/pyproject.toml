@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crispasr"
+version = "0.8.42"
+description = "Lightweight on-device speech recognition via ggml — Python bindings for CrispASR (Whisper, Qwen3-ASR, FastConformer, Canary, Parakeet, Cohere, Granite, Voxtral, wav2vec2, and more)."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.8"
+authors = [
+    { name = "CrispASR contributors" },
+]
+keywords = ["asr", "speech-recognition", "whisper", "ggml", "speech-to-text", "transcription"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "numpy>=1.20",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.urls]
+Homepage = "https://github.com/CrispStrobe/CrispASR"
+Repository = "https://github.com/CrispStrobe/CrispASR"
+Issues = "https://github.com/CrispStrobe/CrispASR/issues"
+Changelog = "https://github.com/CrispStrobe/CrispASR/blob/main/HISTORY.md"
+
+[tool.setuptools]
+packages = ["crispasr"]
+
+[tool.setuptools.package-data]
+# `_helpers.c` ships as source (compiled at install/CI). The shared-library
+# globs are empty for the pure-Python sdist and populated by the wheel CI,
+# which stages libcrispasr + the ggml backends + the compiled helpers into
+# this package directory before building the platform wheel.
+crispasr = [
+    "_helpers.c",
+    "*.so",
+    "*.so.*",
+    "*.dylib",
+    "*.dll",
+]

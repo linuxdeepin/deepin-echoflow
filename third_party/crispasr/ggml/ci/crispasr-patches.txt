@@ -1,0 +1,111 @@
+# CrispASR carried-patch manifest
+#
+# Every line is a patch this fork carries on top of upstream ggml, expressed as
+# an executable check so that "MUST RE-APPLY after ggml bump" is enforced by CI
+# instead of remembered by a human. It exists because it was NOT remembered: a
+# core_adaln ARM failure survived for weeks because the vendored tree predated
+# two upstream SVE fixes, and nobody was watching.
+#
+# Format:  <min-count> <TAB> <file> <TAB> <fixed-string pattern>
+# A patch whose count drops below <min-count> fails the build.
+#
+# When an upstream merge legitimately removes or renames a patch, update this
+# file IN THE SAME COMMIT and say why in the message. Editing it to make CI
+# green without that justification defeats the entire point.
+
+# --- new ops we add to the ordered GGML_OP_* enum -------------------------
+# COL2IM_1D and its CPU/CUDA/Metal/Vulkan implementations are upstream-owned
+# as of v0.23; they were removed from this carried-patch list during the sync.
+1	include/ggml.h	GGML_OP_NORM_AFFINE
+1	include/ggml.h	GGML_OP_AA_SNAKE_BETA
+1	include/ggml.h	ggml_norm_affine
+1	include/ggml.h	ggml_aa_snake_beta
+2	src/ggml.c	GGML_OP_COUNT == 103
+
+# --- issue #38: F16 vec_dot_type = F32 to avoid saturating F32->F16 -------
+# vfmaq_f16 accumulates in an F16 register and overflows at 65504, which turns
+# long F16xF16 dots into +-Inf -> NaN. Upstream has NOT fixed this.
+1	src/ggml-cpu/ggml-cpu.c	ggml_vec_dot_f16_f32
+1	src/ggml-cpu/ggml-cpu.c	issue #38
+1	src/ggml-cpu/vec.h	ggml_vec_dot_f16_f32
+1	src/ggml-cpu/simd-mappings.h	GGML_F32Cx4_FMA
+# the conv im2col patch buffer is mul_mat's src1, so it follows vec_dot_type
+2	src/ggml-cpu/ops.cpp	vec_dot_type
+
+# --- carried CPU / backend ops -------------------------------------------
+1	src/ggml-cpu/ops.h	ggml_compute_forward_norm_affine
+1	src/ggml-cpu/ops.h	ggml_compute_forward_aa_snake_beta
+
+# --- Metal ----------------------------------------------------------------
+1	src/ggml-metal/kernels/aa_snake_beta.metal	aa_snake_beta
+1	src/ggml-metal/kernels/conv.metal	kernel_im2col_flat
+1	src/ggml-metal/ggml-metal-ops.cpp	aa_snake_beta
+1	src/ggml-metal/ggml-metal-device.cpp	aa_snake_beta
+1	src/ggml-metal/ggml-metal-device.m	crispasr_metal_pipeline_cache
+# High-precision (F32-tile) mul_mm (#83). The dispatcher in ggml-metal-device.cpp
+# asks for kernel_mul_mm_<type>_f32_hp whenever an op carries GGML_PREC_F32 on a
+# device without the tensor API. The kernel was LOST once, when the shader source
+# was split into kernels/*.metal: the dispatcher survived, the kernel did not, and
+# every such op aborted with "nil Metal pipeline". Guard BOTH halves, and all six
+# instantiations the dispatcher's switch can select.
+1	src/ggml-metal/ggml-metal-device.cpp	kernel_mul_mm_%s_%s_hp
+1	src/ggml-metal/kernels/mul_mm.metal	kernel void kernel_mul_mm_hp(
+1	src/ggml-metal/kernels/mul_mm.metal	host_name("kernel_mul_mm_f32_f32_hp")
+1	src/ggml-metal/kernels/mul_mm.metal	host_name("kernel_mul_mm_f16_f32_hp")
+1	src/ggml-metal/kernels/mul_mm.metal	host_name("kernel_mul_mm_q4_K_f32_hp")
+1	src/ggml-metal/kernels/mul_mm.metal	host_name("kernel_mul_mm_q5_K_f32_hp")
+1	src/ggml-metal/kernels/mul_mm.metal	host_name("kernel_mul_mm_q6_K_f32_hp")
+1	src/ggml-metal/kernels/mul_mm.metal	host_name("kernel_mul_mm_q8_0_f32_hp")
+# NOTE: NORM_AFFINE is deliberately CPU + CUDA only — there is no Metal kernel,
+# so do not add one here expecting it to exist.
+
+# --- Vulkan ---------------------------------------------------------------
+1	src/ggml-vulkan/ggml-vulkan.cpp	conv_transpose_1d_f16
+1	src/ggml-vulkan/ggml-vulkan.cpp	pipeline_snake_f32
+# Upstream split the device struct and the push-constant blocks out of
+# ggml-vulkan.cpp (v0.26: ggml-vulkan-types.h, ggml-vulkan-push-constants.h).
+# The carried members live there now, where a merge takes "theirs" silently.
+1	src/ggml-vulkan/ggml-vulkan-types.h	pipeline_conv_transpose_1d_f16
+1	src/ggml-vulkan/ggml-vulkan-types.h	pipeline_siglu
+
+# --- CUDA -----------------------------------------------------------------
+# The long-grid IM2COL fix is upstream-owned as of v0.23.
+1	src/ggml-cuda/norm.cu	CrispASR patch
+1	src/ggml-cuda/ggml-cuda.cu	CrispASR patch
+
+# --- CUDA build robustness -------------------------------------------------
+# Upstream links the CUDA::cuda_driver imported target unconditionally for the
+# VMM pool; it is not always defined (Kaggle, nvidia/cuda devel containers).
+1	src/ggml-cuda/CMakeLists.txt	GGML_CUDA_DRIVER_LIB
+
+# --- WebGPU ops still absent upstream v0.23 -------------------------------
+1	src/ggml-webgpu/wgsl-shaders/arange.wgsl	fn main
+1	src/ggml-webgpu/wgsl-shaders/pool2d.wgsl	fn main
+1	src/ggml-webgpu/wgsl-shaders/conv_transpose_2d.wgsl	fn main
+1	src/ggml-webgpu/ggml-webgpu.cpp	get_conv_transpose_2d_pipeline
+
+# --- Vulkan flash-attention mask row stride (CrispASR#337) ---------------
+# FA shaders read the mask with its own row stride (nbm1, in the old neq3
+# push-constant slot) instead of KV; upstream still uses KV. Guarded by the
+# mask_pad FLASH_ATTN_EXT cases in tests/test-backend-ops.cpp.
+1	src/ggml-vulkan/vulkan-shaders/flash_attn_base.glsl	: p.nbm1;
+1	src/ggml-vulkan/ggml-vulkan.cpp	(nbm1 & 7) == 0
+# The C++ half of the push-constant block (must stay in the same slot as the
+# GLSL one above) moved to ggml-vulkan-push-constants.h in the v0.26 split.
+1	src/ggml-vulkan/ggml-vulkan-push-constants.h	uint32_t nbm1; // mask row stride
+1	tests/test-backend-ops.cpp	mask_pad
+
+# --- SIGLU: a GLU variant we add to the ordered ggml_glu_op enum ----------
+1	include/ggml.h	GGML_GLU_OP_SIGLU
+1	src/ggml.c	GGML_GLU_OP_COUNT == 8
+1	src/ggml-cpu/ops.cpp	ggml_compute_forward_siglu
+
+# --- scheduler: src-rewire mutation log (restore on exit, re-apply on replay)
+# split_graph rewires node->src[j] to per-backend input copies. We record every
+# rewire, restore the user's graph on EVERY exit of compute_splits (3 call
+# sites, plus 1 in drop = 4) and re-apply it on a repeat compute of the same
+# allocation. Upstream has neither; a new early return in compute_splits that
+# skips the restore would not show up here, so re-read that function on a sync.
+4	src/ggml-backend.cpp	ggml_backend_sched_restore_src_mutations(sched);
+1	src/ggml-backend.cpp	ggml_backend_sched_apply_src_mutations(sched);
+1	src/ggml-backend.cpp	ggml_backend_sched_drop_src_mutations(sched);

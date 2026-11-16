@@ -1,0 +1,187 @@
+name: Bindings Tests (C#)
+
+# The C# bindings had tests (bindings/csharp/CrispASR.Tests) but NOTHING in CI
+# built or ran them. That is exactly how issue #291 shipped: VadSegments'
+# doc-comment promised seconds while the code returned centiseconds, and no build
+# ever compared the two. This job compiles the binding (catching signature drift
+# against the C ABI) and runs the tests against a freshly built libcrispasr.so.
+#
+# Second round of #291 (GeorgeS2019, 2026-08-28): "all xunit tests pass" while
+# no test had ever opened a model, and the Windows DLL layout was untested
+# because Linux .so/.dll names cannot collide. Both are covered now:
+#   * every job sets CRISPASR_CS_REQUIRE_LIVE=1, which turns the tests' silent
+#     "return if the library will not load" skips into failures — without it the
+#     suite is green on a machine with no native library at all;
+#   * a real moonshine GGUF + samples/jfk.wav drive an end-to-end transcribe;
+#   * a windows-latest job puts the native crispasr.dll in the SAME directory as
+#     the managed assembly, which is the layout that used to be impossible.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'bindings/csharp/**'
+      - 'include/crispasr_session.h'
+      - 'include/crispasr.h'
+      - 'src/crispasr_c_api.cpp'
+      - '.github/workflows/bindings-csharp.yml'
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'bindings/csharp/**'
+      - 'include/crispasr_session.h'
+      - 'include/crispasr.h'
+      - 'src/crispasr_c_api.cpp'
+      - '.github/workflows/bindings-csharp.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # moonshine-tiny is the smallest real ASR GGUF in the registry (~20 MB) and
+  # needs its companion tokenizer.bin in the same directory — which is itself
+  # worth exercising, since a bare .gguf download is a common way to get
+  # "the CLI works, the binding does not".
+  MODEL_URL: https://huggingface.co/cstr/moonshine-tiny-GGUF/resolve/main/moonshine-tiny-q4_k.gguf
+  TOKENIZER_URL: https://huggingface.co/cstr/moonshine-tiny-GGUF/resolve/main/tokenizer.bin
+
+jobs:
+  ubuntu:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Install build tools
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends cmake ninja-build g++
+
+      # dotnet build alone would catch compile-time drift, but the reported bug
+      # was a LOGIC bug (wrong units) that only a run against the real library
+      # surfaces. So build libcrispasr.so and put it on the loader path.
+      - name: Build native libcrispasr.so
+        run: |
+          cmake -S . -B build-cs -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=ON \
+            -DCRISPASR_BUILD_TESTS=OFF \
+            -DCRISPASR_BUILD_EXAMPLES=OFF \
+            -DCRISPASR_BUILD_SERVER=OFF \
+            -DCRISPASR_OPUS_FETCH=ON
+          cmake --build build-cs -j "$(nproc)" --target crispasr-lib
+
+      - name: Cache the test model
+        uses: actions/cache@v4
+        with:
+          path: model-cs
+          key: csharp-moonshine-tiny-q4k-v1
+
+      - name: Download moonshine-tiny (+ companion tokenizer)
+        run: |
+          mkdir -p model-cs
+          for f in "moonshine-tiny-q4_k.gguf:$MODEL_URL" "tokenizer.bin:$TOKENIZER_URL"; do
+            name="${f%%:*}"; url="${f#*:}"
+            if [ ! -s "model-cs/$name" ]; then
+              for i in 1 2 3; do
+                curl -fL --retry 3 --retry-delay 10 -o "model-cs/$name" "$url" && break
+                sleep 15
+              done
+            fi
+          done
+          ls -l model-cs
+
+      - name: Build binding (compile-time ABI check)
+        working-directory: bindings/csharp
+        run: dotnet build CrispASR/CrispASR.csproj -c Release
+
+      - name: Test
+        working-directory: bindings/csharp
+        # CRISPASR_LIBRARY_PATH is the binding's own resolver hook — using it
+        # here also proves the hook works, rather than leaning on the loader's
+        # LD_LIBRARY_PATH handling.
+        env:
+          CRISPASR_LIBRARY_PATH: ${{ github.workspace }}/build-cs/src
+          LD_LIBRARY_PATH: ${{ github.workspace }}/build-cs/src:${{ github.workspace }}/build-cs/ggml/src
+          CRISPASR_CS_REQUIRE_LIVE: '1'
+          CRISPASR_MODEL_ASR: ${{ github.workspace }}/model-cs/moonshine-tiny-q4_k.gguf
+          CRISPASR_AUDIO_SAMPLE: ${{ github.workspace }}/samples/jfk.wav
+          CRISPASR_ASR_BACKEND: moonshine
+        run: dotnet test CrispASR.Tests/CrispASR.Tests.csproj -c Release --verbosity normal
+
+  # Issue #291: the managed assembly (CrispASR.dll) and the native library
+  # (crispasr.dll) were the same file name on a case-insensitive filesystem, so
+  # they could not be installed side by side — and Linux, where .so and .dll
+  # never collide, could never see it. This job reproduces the reporter's exact
+  # layout: native DLL + its ggml siblings in the test output directory,
+  # alongside the managed assembly.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build native crispasr.dll
+        run: |
+          cmake -S . -B build-cs `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DBUILD_SHARED_LIBS=ON `
+            -DCRISPASR_BUILD_TESTS=OFF `
+            -DCRISPASR_BUILD_EXAMPLES=OFF `
+            -DCRISPASR_BUILD_SERVER=OFF `
+            -DCRISPASR_OPUS_FETCH=ON
+          cmake --build build-cs --config Release -j $env:NUMBER_OF_PROCESSORS --target crispasr-lib
+
+      - name: Cache the test model
+        uses: actions/cache@v4
+        with:
+          path: model-cs
+          key: csharp-win-moonshine-tiny-q4k-v1
+
+      - name: Download moonshine-tiny (+ companion tokenizer)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force model-cs | Out-Null
+          if (-not (Test-Path model-cs/moonshine-tiny-q4_k.gguf)) {
+            Invoke-WebRequest -Uri $env:MODEL_URL -OutFile model-cs/moonshine-tiny-q4_k.gguf
+          }
+          if (-not (Test-Path model-cs/tokenizer.bin)) {
+            Invoke-WebRequest -Uri $env:TOKENIZER_URL -OutFile model-cs/tokenizer.bin
+          }
+          Get-ChildItem model-cs
+
+      - name: Build the test assembly
+        working-directory: bindings/csharp
+        run: dotnet build CrispASR.Tests/CrispASR.Tests.csproj -c Release
+
+      # The whole point: copy the native DLLs INTO the managed output directory.
+      # Before the CrispASR.dll -> CrispASR.Net.dll rename this step overwrote
+      # the managed assembly, because on Windows the two names are one file.
+      - name: Install the native library beside the managed assembly
+        shell: pwsh
+        run: |
+          $out = "bindings/csharp/CrispASR.Tests/bin/Release/net8.0"
+          Get-ChildItem build-cs/bin/Release/*.dll | Copy-Item -Destination $out
+          Write-Host "--- test output directory ---"
+          Get-ChildItem $out -Filter *.dll | Select-Object Name,Length | Format-Table
+          if (-not (Test-Path "$out/crispasr.dll")) { throw "native crispasr.dll is not in the output directory" }
+          if (-not (Test-Path "$out/CrispASR.Net.dll")) { throw "managed CrispASR.Net.dll was overwritten (issue #291 regression)" }
+
+      - name: Test
+        working-directory: bindings/csharp
+        # NO CRISPASR_LIBRARY_PATH here on purpose: the library must be found in
+        # the app base directory, which is the case that used to be impossible.
+        env:
+          CRISPASR_CS_REQUIRE_LIVE: '1'
+          CRISPASR_MODEL_ASR: ${{ github.workspace }}\model-cs\moonshine-tiny-q4_k.gguf
+          CRISPASR_AUDIO_SAMPLE: ${{ github.workspace }}\samples\jfk.wav
+          CRISPASR_ASR_BACKEND: moonshine
+        run: dotnet test CrispASR.Tests/CrispASR.Tests.csproj -c Release --no-build --verbosity normal

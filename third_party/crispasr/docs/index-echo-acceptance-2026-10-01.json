@@ -1,0 +1,147 @@
+{
+  "accepted": true,
+  "provenance": {
+    "model_repo": "cstr/index-echo-2b-GGUF",
+    "model_revision": "87570ff6a93285b6ec2f46560ca80f74d9da4293",
+    "source_commit": "8e02d28703504e719a0a3f989eae8bf81516bcc3",
+    "ggml_commit": "2f5a80d258c46e6ac8eee95f1328c0f58376d7ee",
+    "threads": 4,
+    "cpu": "aarch64"
+  },
+  "cases": {
+    "f16": {
+      "jfk-en": {
+        "source_variant": "released-f32-tower-bf16-decoder",
+        "max_timestamp_error_seconds": 0.0,
+        "timestamp_tolerance_seconds": 0.0051,
+        "exact_text": true,
+        "vad_max_abs": 0.002838730812072754
+      },
+      "multi-en": {
+        "source_variant": "released-f32-tower-bf16-decoder",
+        "max_timestamp_error_seconds": 0.0,
+        "timestamp_tolerance_seconds": 0.0051,
+        "exact_text": true,
+        "vad_max_abs": 0.002838730812072754
+      },
+      "zh-en": {
+        "source_variant": "released-f32-tower-bf16-decoder",
+        "max_timestamp_error_seconds": 1.7763568394002505e-15,
+        "timestamp_tolerance_seconds": 0.0051,
+        "exact_text": true,
+        "vad_max_abs": 0.0010029524564743042
+      },
+      "zh-es": {
+        "source_variant": "diagnostic-all-f32",
+        "max_timestamp_error_seconds": 1.7763568394002505e-15,
+        "timestamp_tolerance_seconds": 0.0051,
+        "exact_text": true,
+        "vad_max_abs": 0.0010029524564743042
+      },
+      "zh-ja": {
+        "source_variant": "diagnostic-all-f32",
+        "max_timestamp_error_seconds": 1.7763568394002505e-15,
+        "timestamp_tolerance_seconds": 0.0051,
+        "exact_text": true,
+        "vad_max_abs": 0.0010029524564743042
+      }
+    },
+    "q8_0": {
+      "jfk-en": {
+        "source_variant": "released-f32-tower-bf16-decoder",
+        "max_timestamp_error_seconds": 0.0,
+        "timestamp_tolerance_seconds": 0.0201,
+        "exact_text": true,
+        "vad_max_abs": 0.002838730812072754
+      },
+      "multi-en": {
+        "source_variant": "released-f32-tower-bf16-decoder",
+        "max_timestamp_error_seconds": 0.0,
+        "timestamp_tolerance_seconds": 0.0201,
+        "exact_text": true,
+        "vad_max_abs": 0.002838730812072754
+      },
+      "zh-en": {
+        "source_variant": "released-f32-tower-bf16-decoder",
+        "max_timestamp_error_seconds": 0.019999999999999962,
+        "timestamp_tolerance_seconds": 0.0201,
+        "exact_text": true,
+        "vad_max_abs": 0.0010029524564743042
+      },
+      "zh-es": {
+        "source_variant": "released-f32-tower-bf16-decoder",
+        "max_timestamp_error_seconds": 1.7763568394002505e-15,
+        "timestamp_tolerance_seconds": 0.0201,
+        "exact_text": true,
+        "vad_max_abs": 0.0010029524564743042
+      },
+      "zh-ja": {
+        "source_variant": "released-f32-tower-bf16-decoder",
+        "max_timestamp_error_seconds": 0.02000000000000135,
+        "timestamp_tolerance_seconds": 0.0201,
+        "exact_text": true,
+        "vad_max_abs": 0.0010029524564743042
+      }
+    }
+  },
+  "policy": "Exact direct-window gates; complete full-file text must match one independently generated source precision variant. F16 timestamp tolerance 5.1ms; Q8 20.1ms.",
+  "exact_released_full_pipeline": false,
+  "evidence": [
+    {
+      "path": "/mnt/storage/crispasr/issue485/pipeline-36907733162/heavy-36907733162/pipeline.json",
+      "sha256": "72ab1c8bd2d538aef086d75079442acdfb221f43d0c760681f212bc3c5d5616e"
+    },
+    {
+      "path": "/mnt/storage/crispasr/issue485/pipeline-f32-36913471293/heavy-36913471293/pipeline.json",
+      "sha256": "60bd67a28a4beb15c53c5689dce6a351230ad8900db1f6affaeb0cf72d6f486e"
+    },
+    {
+      "path": "/mnt/storage/crispasr/issue485/audit-36911946162/heavy-36911946162/precision-audit.json",
+      "sha256": "98c15e377dab7cb8af9ec370ea1a7951d72871fe2e48ad61a67b58837416e670"
+    },
+    {
+      "path": "/mnt/storage/crispasr/issue485/validation-36912744733/heavy-36912744733/validation-provenance.json",
+      "sha256": "ad4f838a3f90b9dc7f9ebddb4a082e61a4276f1a4d94899e3156ec3e43f74dc1"
+    },
+    {
+      "path": "/mnt/storage/crispasr/issue485/validation-f32-36915483750/heavy-36915483750/cohort-results.json",
+      "sha256": "18eb2ed1aa2a2d92fa5c7f90df02e9811f66caea86dbec51e6b71c396ab28d38"
+    },
+    {
+      "path": "/mnt/storage/crispasr/issue485/validation-f32-36915483750/heavy-36915483750/stage-results-f16.json",
+      "sha256": "539db208b8bb3dae7b105d67a638e4fb04dfa39b6c3889859c7e1cde9564703b"
+    },
+    {
+      "path": "/mnt/storage/crispasr/issue485/validation-f32-36915483750/heavy-36915483750/validation-provenance.json",
+      "sha256": "98b0431bd4e1a7a5b0b60bcd334b844fdad0c9555217adc58065a84492834d96"
+    },
+    {
+      "path": "/mnt/storage/crispasr/issue485/validation-36912744733/heavy-36912744733/stage-results-f16.json",
+      "sha256": "539db208b8bb3dae7b105d67a638e4fb04dfa39b6c3889859c7e1cde9564703b"
+    },
+    {
+      "path": "/mnt/storage/crispasr/issue485/validation-36912744733/heavy-36912744733/decoded-f16.json",
+      "sha256": "427bee49d11c22bb59b16c685bd39e287a98e885df9430691d7ca33182933e89"
+    },
+    {
+      "path": "/mnt/storage/crispasr/issue485/validation-36912744733/heavy-36912744733/pipeline-f16.json",
+      "sha256": "709c0928808d4c36bdde73a6f0da030a2c6fb93883bb12717ae58c30257f1fe2"
+    },
+    {
+      "path": "/mnt/storage/crispasr/issue485/validation-36912744733/heavy-36912744733/stage-results-q8_0.json",
+      "sha256": "539db208b8bb3dae7b105d67a638e4fb04dfa39b6c3889859c7e1cde9564703b"
+    },
+    {
+      "path": "/mnt/storage/crispasr/issue485/validation-36912744733/heavy-36912744733/decoded-q8_0.json",
+      "sha256": "427bee49d11c22bb59b16c685bd39e287a98e885df9430691d7ca33182933e89"
+    },
+    {
+      "path": "/mnt/storage/crispasr/issue485/validation-36912744733/heavy-36912744733/pipeline-q8_0.json",
+      "sha256": "0803650ad36816b3cc7588bf8a324710001ccb01b4744d93373f57d5f7f8b5aa"
+    },
+    {
+      "path": "/mnt/storage/crispasr/issue485/validation-36912744733/heavy-36912744733/cohort-results.json",
+      "sha256": "fb5f59f8a5cf72ebaf7cc616dc248a331062b3f61fb42e2d6745a45a14a1493a"
+    }
+  ]
+}

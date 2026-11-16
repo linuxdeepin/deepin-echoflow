@@ -1,0 +1,72 @@
+name: Finnish Chatterbox Nano live proof (#382)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cpu-auto-download:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      XDG_CACHE_HOME: /tmp/chatterbox-finnish-${{ github.run_id }}/cache
+      OUT: /tmp/chatterbox-finnish-${{ github.run_id }}/out.wav
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Build bounded CPU CLI and registry unit test
+        run: |
+          set -euo pipefail
+          cmake -G Ninja -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCRISPASR_BUILD_TESTS=ON \
+            -DCRISPASR_BUILD_SERVER=OFF
+          cmake --build build --target crispasr-cli test-registry -j2
+          build/bin/test-registry --reporter compact
+          CRISPASR_BIN=build/bin/crispasr python tests/test_backend_caps.py
+
+      - name: Audit all backend wiring and regenerate matrix
+        run: |
+          set -euo pipefail
+          python tools/gen-feature-matrix.py --crispasr build/bin/crispasr
+          python tools/check-backend-wiring.py --crispasr build/bin/crispasr
+
+      - name: Prove registry auto-download and Finnish synthesis
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$OUT")"
+          build/bin/crispasr --backend chatterbox-finnish-nano \
+            --gpu-backend cpu -m auto --auto-download --cache-dir "$XDG_CACHE_HOME" \
+            -l fi --seed 42 \
+            --tts "Hyvää huomenta. Tämä on suomalainen Chatterbox Nano." \
+            --no-spoken-disclaimer --accept-marking-responsibility \
+            --tts-output "$OUT"
+          python - <<'PY'
+          import os, wave
+          path = os.environ["OUT"]
+          with wave.open(path, "rb") as wav:
+              seconds = wav.getnframes() / wav.getframerate()
+              assert wav.getnchannels() == 1
+              assert wav.getframerate() == 24000
+              assert 0.5 < seconds < 60, seconds
+              print(f"live proof: {seconds:.2f}s, {wav.getnframes()} samples")
+          PY
+          find "$XDG_CACHE_HOME" -type f -name '*.gguf' -printf '%f %s bytes\n'
+
+      - name: Upload live and generated proof
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chatterbox-finnish-nano-live-${{ github.run_id }}
+          path: |
+            /tmp/chatterbox-finnish-${{ github.run_id }}/out.wav
+            docs/feature-matrix.md
+            docs/feature-matrix.html
+
+      - name: Remove downloaded models
+        if: always()
+        run: rm -rf -- /tmp/chatterbox-finnish-${{ github.run_id }}

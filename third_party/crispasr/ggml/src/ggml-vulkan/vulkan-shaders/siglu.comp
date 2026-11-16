@@ -1,0 +1,9 @@
+#version 450
+
+#include "glu_head.glsl"
+
+float op(float a, float b) {
+    return (1.0f / (1.0f + exp(-a))) * b;
+}
+
+#include "glu_main.glsl"

@@ -1,0 +1,262 @@
+# Quantize
+
+CrispASR ships a single, model-agnostic GGUF re-quantization tool,
+**`crispasr-quantize`**, that works across all supported model
+families: Whisper, Parakeet, Canary, Cohere, Voxtral, Qwen3, Granite,
+Wav2Vec2, MiMo-ASR, GLM-ASR, Moonshine, VibeVoice, Kokoro, Qwen3-TTS,
+and others. It iterates through the GGUF tensor list and re-quantizes
+eligible 2D weight matrices while preserving metadata and
+non-quantizable tensors (norms, positional embeddings, biases) in
+their original types.
+
+Replaces the legacy per-model tools (`cohere-quantize`,
+`parakeet-quantize`, …) — those are no longer built. If a model card
+references one of them, use `crispasr-quantize` instead with the same
+arguments.
+
+> **GGUF only.** `crispasr-quantize` opens its input with
+> `gguf_init_from_file`, so it reads GGUF and nothing else. The original
+> whisper.cpp `ggml-*.bin` files are the *pre-GGUF* format and are not
+> accepted; quantize those with the separate **`crispasr-legacy-quantize`**
+> tool (`examples/quantize/`), which is also built by default.
+
+## Build
+
+`crispasr-quantize` is built automatically as part of the default
+build target. The shortest path:
+
+```bash
+git clone https://github.com/CrispStrobe/CrispASR
+cd CrispASR
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc)
+
+ls build/bin/crispasr-quantize    # confirm it exists
+```
+
+> If you previously built with `--target crispasr-lib` (which only builds
+> the main library), re-run **without** `--target` or with
+> `--target crispasr-quantize` to produce the quantize tool.
+
+The `scripts/dev-build.sh` wrapper accepts `--target` directly:
+
+```bash
+scripts/dev-build.sh --target crispasr-quantize
+```
+
+> **glibc note.** Pre-built binaries on some HuggingFace model cards
+> (e.g. `bin/cohere-quantize`) require glibc 2.38 and fail on Ubuntu
+> 22.04 with:
+> ```
+> /lib/x86_64-linux-gnu/libc.so.6: version 'GLIBC_2.38' not found
+> ```
+> Building from source (above) avoids this — CrispASR has no glibc
+> minimum of its own and builds cleanly against whatever glibc your
+> distro ships.
+
+## Usage
+
+```bash
+./build/bin/crispasr-quantize <input.gguf> <output.gguf> <type> \
+    [--imatrix <file>] [--tensor-type <regex>=<type> ...]
+```
+
+`<type>` is one of the `ggml_ftype` names below.
+
+`<input.gguf>` may be an **F16/F32 base OR an already-quantized GGUF**
+(e.g. a shipped `q8_0`). A quantized input is dequantized to F32 and
+then re-quantized to the target, so you can produce a `q4_k` / `iq4_xs`
+build straight from a `q8_0` download without keeping the multi-GB F16
+base on disk (q8_0 is ~lossless, so `q8→f32→q4 ≈ f32→q4`).
+
+`--imatrix <file>` (optional) supplies an **importance matrix** — a
+per-tensor, per-column activation-energy vector from a calibration
+run — which steers k-quant / IQ-quant precision toward the columns the
+model actually uses (activation-weighted error instead of plain L2,
+the same idea as llama.cpp's `llama-imatrix`). It helps most for the
+low-bit types (`iq4_*`, `q3_k`, `q2_k`); it is always safe to pass
+(missing / shape-mismatched entries fall back to unweighted).
+
+`--tensor-type <regex>=<type>` (optional, repeatable) overrides the
+per-tensor precision for tensors whose name matches `<regex>`, on top of
+the built-in per-architecture guards. First matching rule wins. `<type>`
+may be `f16` / `f32` or any quant type below; a quant that doesn't tile a
+tensor's row width falls back (or is skipped, with a note). The match is a
+**partial** regex (llama.cpp semantics) — anchor with `^…$` for an exact
+name. Examples:
+
+```bash
+# Keep the LM head at Q8_0 while the body is Q4_K, and pin FFN gates to Q6_K:
+crispasr-quantize model-f16.gguf model.gguf q4_k \
+    --tensor-type '^output\.weight$=q8_0' --tensor-type '\.ffn_gate\.=q6_k'
+```
+
+### Supported types
+
+| Type   | Description                                                          |
+|--------|----------------------------------------------------------------------|
+| `q4_0` | 4-bit (scale only)                                                   |
+| `q4_1` | 4-bit (scale + minimum; slightly higher accuracy than q4_0)          |
+| `q5_0` | 5-bit (scale only)                                                   |
+| `q5_1` | 5-bit (scale + minimum; slightly higher accuracy than q5_0)          |
+| `q8_0` | 8-bit (scale only) — usually indistinguishable from F16 quality      |
+| `q2_k` | 2-bit K-quant (very lossy; use only when memory is critical)         |
+| `q3_k` | 3-bit K-quant                                                        |
+| `q4_k` | 4-bit K-quant (preferred over legacy q4_0/q4_1)                      |
+| `q5_k` | 5-bit K-quant (preferred over legacy q5_0/q5_1)                      |
+| `q6_k` | 6-bit K-quant (close to F16 quality, 60% of F16 size)                |
+| `iq4_nl` | 4-bit non-linear codebook (32-wide blocks)                         |
+| `iq4_xs` | 4-bit non-linear codebook (256-wide super-blocks) — beats `q4_k` on quality *and* size for the same ~4-bit budget; pair with `--imatrix` |
+
+### Examples
+
+```bash
+# Whisper base.en F16 → Q4_K (small + fast).
+# NOTE: the classic whisper.cpp `ggml-*.bin` is pre-GGUF — use the legacy tool:
+./build/bin/crispasr-legacy-quantize ggml-base.en.bin ggml-base.en-q4_k.bin q4_k
+
+# Parakeet TDT 0.6B F16 → Q4_K
+./build/bin/crispasr-quantize parakeet-tdt-0.6b-f16.gguf parakeet-tdt-0.6b-q4_k.gguf q4_k
+
+# Voxtral Mini 4B F16 → Q5_0
+./build/bin/crispasr-quantize voxtral-mini-4b-realtime-f16.gguf \
+                              voxtral-mini-4b-realtime-q5_0.gguf q5_0
+
+# Canary 1B F16 → Q6_K (near-lossless)
+./build/bin/crispasr-quantize canary-1b-v2-f16.gguf canary-1b-v2-q6_k.gguf q6_k
+
+# Re-quantize straight from a shipped q8_0 (no F16 base needed) → IQ4_XS
+./build/bin/crispasr-quantize mega-asr-1.7b-q8_0.gguf mega-asr-1.7b-iq4_xs.gguf iq4_xs
+
+# IQ4_XS with an importance matrix for best low-bit quality
+./build/bin/crispasr-quantize model-f16.gguf model-iq4_xs.gguf iq4_xs --imatrix model.imatrix.gguf
+```
+
+### Alignment fallback
+
+K-quants (`q2_k` through `q6_k`) and `iq4_xs` require tensor row sizes
+to be multiples of 256. If a tensor doesn't meet this requirement (e.g.
+the 896-wide tensors in some Qwen3-ASR layers), the tool transparently
+falls back to a compatible smaller-block quant for that tensor only
+(`q2_k`/`q3_k`/`q4_k`→`q4_0`, `q5_k`→`q5_0`, `q6_k`→`q8_0`,
+`iq4_xs`→`iq4_nl`, `iq4_nl`→`q4_0`), and the rest of the model still gets
+the requested type. The fallback is a single step, not a chain: if the
+fallback type does not tile the row either (a width that is not a
+multiple of 32), that one tensor is left at its source precision and the
+run still succeeds — so a failed fit costs size, never a failed
+quantization.
+
+### Generating an importance matrix (calibration)
+
+An importance matrix records, per weight and per input column, how much
+activation energy the model actually put through that column on a
+representative corpus. Feeding it to the quantizer (`--imatrix`) lets
+k-quant / IQ-quant spend its bits where they matter, which recovers
+quality at low bit-widths (`iq4_*`, `q3_k`, `q2_k`).
+
+CrispASR produces the imatrix as a **side effect of normal
+transcription**. Set `CRISPASR_IMATRIX_OUT` and run the model over your
+calibration audio; every run **merges into** the same file, so you can
+stream a corpus across many invocations:
+
+```bash
+export CRISPASR_IMATRIX_OUT=mega-asr.imatrix.gguf
+for f in calib/*.wav; do
+    ./build/bin/crispasr -m mega-asr-1.7b-q8_0.gguf -f "$f"
+done
+# → "imatrix: wrote N tensors to 'mega-asr.imatrix.gguf'" after each run
+
+# Then quantize with it:
+./build/bin/crispasr-quantize mega-asr-1.7b-q8_0.gguf \
+    mega-asr-1.7b-iq4_xs.gguf iq4_xs --imatrix mega-asr.imatrix.gguf
+```
+
+A small **CC0** starter corpus (Common Voice EN + DE) lives at
+[`cstr/crispasr-imatrix-calib`](https://huggingface.co/datasets/cstr/crispasr-imatrix-calib)
+(see [`tools/imatrix-calib/`](../tools/imatrix-calib/)). The A/B harness
+[`tools/imatrix_ab.py`](../tools/imatrix_ab.py) measures the effect
+(prefill-logit cosine + transcript CER vs the f16 gold).
+
+Notes:
+
+- **No-op unless the env var is set** — production paths are unaffected.
+- Collection copies each `mul_mat` activation to host, so a calibration
+  run is slower than a normal transcription; that cost is only paid when
+  `CRISPASR_IMATRIX_OUT` is set.
+- Calibrate on **in-distribution audio** (the languages / domain you
+  care about), not a single clip — the matrix is only as good as the
+  corpus that produced it. Measured on qwen3-asr-0.6b q4_k: an EN+DE
+  Common Voice set lifted cosine-to-f16 **0.890 → 0.941**, while an
+  English-only set **regressed** it. Language/domain coverage is decisive.
+- **imatrix helps most at aggressive bit-widths.** On qwen3-asr-0.6b
+  **q3_k**, imatrix roughly *thirded* the transcript error vs f16
+  (CER **0.37 → 0.13**, 6/12 held-out clips improved). Note the two A/B
+  signals can diverge there: the prefill-logit **cosine** dipped
+  (−0.04) even as **CER** — the real quality metric — improved sharply.
+  Trust CER; the single-position cosine is only a proxy.
+- Implemented for the ASR backends whose large weights actually benefit
+  (whisper, parakeet, canary, canary-qwen, cohere, qwen3-asr / mega-asr,
+  higgs-stt, ark-asr, moss-transcribe, granite-speech, granite-nle,
+  glm-asr, mimo-asr, voxtral, voxtral4b). The collector is installed on
+  the decode scheduler (`crispasr_imatrix_install`); adding it to another
+  backend is a one-line call after its `ggml_backend_sched_new`.
+  **moss-diarize is not instrumented** — `src/moss_transcribe_diarize.cpp`
+  includes the header but never calls `crispasr_imatrix_install`, so a
+  calibration run against it collects nothing.
+
+## Recommended quants per backend
+
+These reflect the trade-offs we measured on the regression suite. F16
+is always the reference; Q4_K is the daily-driver default for most
+ASR backends.
+
+| Backend             | F16   | Q8_0  | Q5_K  | Q4_K  | Notes                                                                    |
+|---------------------|:-----:|:-----:|:-----:|:-----:|--------------------------------------------------------------------------|
+| whisper             | ✓     | ✓     | ✓     | ✓     | All sizes work; Q4_K is upstream's recommended size/quality balance.     |
+| parakeet            | ✓     | ✓     | ✓     | ✓     | Q4_K is the shipped default.                                             |
+| canary              | ✓     | ✓     | ✓     | ✓     | Q4_K validated on test-all-backends.                                     |
+| cohere              | ✓     | ✓     | ✓     | ✓     |                                                                          |
+| voxtral / voxtral4b | ✓     | ✓     | ✓     | ✓     | Q4_K is the shipped HF default.                                          |
+| qwen3-asr           | ✓     | ✓     | ✓     | ✓     | Some 896-wide tensors trigger the alignment fallback (still works).      |
+| granite             | ✓     | ✓     | ✓     | ✓     |                                                                          |
+| mimo-asr            | ✓     | ✓     | ✓     | ✓     | F16 + Q4_K shipped to HF; Q4_K validated.                                |
+| glm-asr             | ✓     | ✓     | ✓     | ✓     |                                                                          |
+| firered-asr         | ✓     | ✓     | ✓     | ✓     |                                                                          |
+| moonshine           | ✓     | ✓     | ✓     | ✓     |                                                                          |
+| wav2vec2 / fc-ctc   | ✓     | ✓     | ✓     | ✓     | CTC heads are small; Q4_K barely changes WER.                            |
+| nemotron            | ✓     | ✓     | ✓     | ✓     | F16 + Q4_K produce identical text. Streaming works on all quants.         |
+| paraformer           | ✓     | ✓     | ✓     | ✓     | Q4_K is the shipped default.                                             |
+| lfm2-audio          | ✓     | ✓     | ✓     | —     | **Q4_K produces 0 tokens** — hybrid backbone too sensitive. Q5_K minimum. |
+| dia (TTS)           | ✓     | ✓     | ✓     | ✓     | Q4_K validated.                                                          |
+| outetts (TTS)       | ✓     | ✓     | ✓     | ✓     | WavTokenizer decoder always F16.                                         |
+| audioseal           | ✓     | ✓     | ✓     | ✓     | Small model; quant gains minimal.                                        |
+| kokoro (TTS)        | ✓     | ✓     | —     | —     | Q5_K and below break the German backbone — ship F16 + Q8_0 only.         |
+| qwen3-tts           | ✓     | ✓     | ✓     | ✓     |                                                                          |
+| vibevoice (TTS)     | ✓     | ✓     | ✓     | ✓     | F16 + Q4_K shipped.                                                      |
+| vibevoice-streaming (ASR) | ✓ | ✓ | ✓ | ✓ | Q4_K is validated against the persistent-stream F16 path; set `CRISPASR_VIBEVOICE_ASR_FRONTEND_F16=1` while quantizing to keep the encoder frontend in F16 for an A/B arm. |
+| chatterbox (TTS)    | ✓     | ✓     | ✓     | ✓     | Vocoder/F0/embeddings auto-skipped. F16 + Q8_0 + Q4_K shipped. On **Metal** a quantized S3Gen CFM has its `s3.fd.*` weights dequantised to F16 at load and kept GPU-resident (Metal's q8 mat-vec kernel requantises activations to q8 and corrupts the CFM — NaN/garbage; F16 weights take the correct `mul_mm_f16_f32_hp` path at full GPU speed). F16 S3Gen and all CUDA are unaffected. `CRISPASR_S3GEN_UNET_CPU=1` forces the slower all-CPU route. |
+
+> The cells marked `—` are not just "untested" — they have a known
+> quality regression. See [`PERFORMANCE.md`](../PERFORMANCE.md) for
+> the full benchmark numbers and the per-quant WER deltas.
+>
+> **Chatterbox q8 on Apple Silicon:** the auto CFM→CPU route (above) makes the
+> q8 S3Gen flow-matcher correct but slower than F16-on-GPU on Metal. For fast
+> *and* correct synthesis on M1/M2, prefer the F16 S3Gen GGUF.
+
+
+## Index-Echo decoder calibration
+
+Index-Echo's llama decoder now composes the shared imatrix observer with its
+existing stage-capture callback when `CRISPASR_IMATRIX_OUT` or activation dumping
+is explicitly enabled. Without those variables, its original callback remains
+unchanged. The collector keeps only named leaf weight matrix operations and
+writes per-column activation sums and row counts in the existing format.
+
+Calibration must actually exercise the decoder: verify the resulting file
+contains `blk.*` decoder weights with positive row counts and importance-vector
+lengths matching the quantized weight rows. An empty or encoder-only file does
+not calibrate the 9B decoder. Keep model/source/corpus pins, public recipe
+hashes and the full stage/norm/output gates; calibration is not acceptance.
+EN and Chinese coverage remain required. The four previous public Q4 recipes
+remain rejected until a newly calibrated candidate passes full validation.

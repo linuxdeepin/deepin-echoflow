@@ -1,0 +1,16 @@
+{
+  "id": "${KAGGLE_ACCOUNT}/crispasr-lahgtna-ab-170",
+  "title": "crispasr lahgtna ab 170",
+  "code_file": "lahgtna_ab.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_internet": "true",
+  "dataset_sources": [
+    "${KAGGLE_ACCOUNT}/crispasr-hf-token"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

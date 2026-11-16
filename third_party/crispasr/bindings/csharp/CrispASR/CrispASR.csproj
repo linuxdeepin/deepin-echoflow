@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>CrispASR</RootNamespace>
+    <!-- Issue #291: the native library is crispasr.dll. Windows file names are
+         case-insensitive, so an assembly named CrispASR.dll is the SAME file —
+         the two could not sit in one directory, and bare-name P/Invoke probing
+         found the managed assembly. CrispASR.Net.dll is the same convention
+         Whisper.net uses for the same reason. Namespace and type names are
+         unchanged, so no source change is needed on the consumer side. -->
+    <AssemblyName>CrispASR.Net</AssemblyName>
+    <Description>C# bindings for CrispASR — multi-backend ASR/TTS inference via the unified Session C ABI.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="CrispASR.Tests" />
+  </ItemGroup>
+
+</Project>

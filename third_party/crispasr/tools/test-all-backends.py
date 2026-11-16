@@ -1,0 +1,1730 @@
+#!/usr/bin/env python3
+"""
+CrispASR — All-backends regression test.
+
+Sister to `tools/macbook-benchmark-all-backends.py` (which is a perf
+benchmark). This is a **regression gate**: pass/fail per backend per
+capability, not timing.
+
+Test framework: each backend has a set of advertised capabilities
+(transcribe, stream, beam, best-of-n, temperature, word-timestamps,
+punctuation, vad, lid). For each capability, three tiers exist:
+
+    ignore  — don't run this test for this backend
+    smoke   — quick sanity check (output present + obvious correctness)
+    full    — strict regression (e.g. WER threshold, deterministic
+              output, timestamp accuracy bounds)
+
+Per-capability tier is set by:
+
+  --profile=smoke (default)   transcribe=smoke, others=ignore
+  --profile=full              everything=full
+  --profile=feature           transcribe=smoke + every advertised
+                              capability=smoke
+  --<cap>=ignore|smoke|full   override one capability
+                              (e.g. --beam=full --timestamps=smoke)
+
+Selection (subset of backends):
+
+  --backends whisper,parakeet
+  --capabilities stream,beam   # backends advertising any of these
+
+Model resolution:
+
+  default --models = /Volumes/backups/ai/crispasr-models on macOS,
+  ~/.cache/crispasr elsewhere. CRISPASR_MODELS_DIR env overrides.
+  Missing models trigger huggingface_hub.hf_hub_download with HF_TOKEN
+  picked up automatically; --skip-missing turns the download off.
+
+Pre-download disk-space check uses each backend's approx_size_mb hint
+plus a 2 GB safety margin against shutil.disk_usage(dir).free.
+
+Auto-detects crispasr binary in build-ninja-compile/, build/,
+build-release/, or PATH (macOS + Ubuntu both work).
+
+Exit code: 0 if all selected tests PASS or are SKIP, non-zero on FAIL.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json as _json
+import os
+import platform
+import re
+import shutil
+import subprocess
+import sys
+import time
+import wave
+from dataclasses import dataclass, field
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+JFK_WAV = REPO_ROOT / "samples" / "jfk.wav"
+JFK_REF = (
+    "and so my fellow americans ask not what your country can do for you "
+    "ask what you can do for your country"
+)
+
+
+# ---------------------------------------------------------------------------
+# Backend registry
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Backend:
+    name: str            # crispasr --backend value
+    display: str         # human label
+    local_file: str      # filename to look for in --models
+    hf_repo: str         # HF repo id for download fallback
+    hf_file: str         # filename within the repo (often == local_file)
+    timeout_s: int = 90
+    capabilities: tuple[str, ...] = ("transcribe",)
+    notes: str = ""
+    extra_files: tuple[tuple[str, str, str], ...] = ()
+    approx_size_mb: int | None = None
+    # TTS-specific extras (only needed for tts-roundtrip capability)
+    voice_file: str | None = None     # e.g. kokoro-voice-af_heart.gguf
+    codec_model: str | None = None    # e.g. qwen3-tts-tokenizer-12hz-q8_0.gguf
+    tts_extra_args: tuple[str, ...] = ()
+    # Reference / shared models — never auto-deleted in --cache-mode=ephemeral.
+    # Used by other backends as ground truth (parakeet for TTS roundtrip;
+    # whisper-tiny for LID; silero for VAD). Set True for any backend whose
+    # download is reused across capability tests of OTHER backends.
+    is_reference: bool = False
+
+
+# Capability → ALL backends that advertise it, populated below.
+CAPABILITIES_KNOWN = (
+    "transcribe", "json-output", "stream", "beam", "best-of-n",
+    "temperature", "word-timestamps", "punctuation", "vad", "lid",
+    "tts-roundtrip", "translate", "voice-cloning",
+)
+
+
+REGISTRY: tuple[Backend, ...] = (
+    Backend("whisper",    "Whisper (tiny)",      "ggml-tiny.bin",
+            "ggerganov/crispasr", "ggml-tiny.bin",
+            timeout_s=60, approx_size_mb=80,
+            capabilities=("transcribe", "json-output", "stream", "lid", "vad",
+                          "beam", "word-timestamps", "temperature", "translate"),
+            # Pinned: every other backend triggers LID via this model.
+            is_reference=True),
+    Backend("parakeet",   "Parakeet TDT 0.6B",   "parakeet-tdt-0.6b-v3-q4_k.gguf",
+            "cstr/parakeet-tdt-0.6b-v3-GGUF", "parakeet-tdt-0.6b-v3-q4_k.gguf",
+            timeout_s=60, approx_size_mb=420,
+            capabilities=("transcribe", "json-output", "word-timestamps",
+                          "temperature", "punctuation"),
+            # Pinned: TTS-roundtrip uses parakeet ASR as ground truth.
+            is_reference=True),
+    Backend("moonshine",  "Moonshine Tiny",      "moonshine-tiny-q4_k.gguf",
+            "cstr/moonshine-tiny-GGUF", "moonshine-tiny-q4_k.gguf",
+            timeout_s=30, approx_size_mb=30,
+            capabilities=("transcribe", "json-output", "beam",
+                          "temperature", "word-timestamps", "punctuation"),
+            extra_files=(("tokenizer.bin", "cstr/moonshine-tiny-GGUF", "tokenizer.bin"),)),
+    Backend("moonshine-de", "Moonshine Base DE (fidoriel)",
+            "moonshine-base-de-fidoriel-q4_k.gguf",
+            "cstr/moonshine-base-de-fidoriel-GGUF", "moonshine-base-de-fidoriel-q4_k.gguf",
+            timeout_s=30, approx_size_mb=39,
+            capabilities=("transcribe", "json-output", "beam",
+                          "temperature", "word-timestamps", "punctuation"),
+            extra_files=(("tokenizer.bin", "cstr/moonshine-base-de-fidoriel-GGUF", "tokenizer.bin"),)),
+    Backend("moonshine-tiny-de", "Moonshine Tiny DE (fidoriel)",
+            "moonshine-tiny-de-fidoriel-q4_k.gguf",
+            "cstr/moonshine-tiny-de-fidoriel-GGUF", "moonshine-tiny-de-fidoriel-q4_k.gguf",
+            timeout_s=30, approx_size_mb=17,
+            capabilities=("transcribe", "json-output", "beam",
+                          "temperature", "word-timestamps", "punctuation"),
+            extra_files=(("tokenizer.bin", "cstr/moonshine-tiny-de-fidoriel-GGUF", "tokenizer.bin"),)),
+    Backend("moonshine-streaming", "Moonshine Streaming Tiny",
+            "moonshine-streaming-tiny-q4_k.gguf",
+            "cstr/moonshine-streaming-tiny-GGUF", "moonshine-streaming-tiny-q4_k.gguf",
+            timeout_s=60, approx_size_mb=35,
+            capabilities=("transcribe", "stream", "json-output", "word-timestamps"),
+            extra_files=(("tokenizer.bin", "cstr/moonshine-streaming-tiny-GGUF", "tokenizer.bin"),)),
+    Backend("wav2vec2",   "Wav2Vec2 XLSR-EN",    "wav2vec2-xlsr-en-q4_k.gguf",
+            "cstr/wav2vec2-large-xlsr-53-english-GGUF",
+            "wav2vec2-xlsr-en-q4_k.gguf",
+            timeout_s=60, approx_size_mb=200,
+            capabilities=("transcribe", "json-output", "word-timestamps")),
+    Backend("fastconformer-ctc", "FastConformer CTC Large",
+            "stt-en-fastconformer-ctc-large-q4_k.gguf",
+            "cstr/stt-en-fastconformer-ctc-large-GGUF",
+            "stt-en-fastconformer-ctc-large-q4_k.gguf",
+            timeout_s=30, approx_size_mb=80,
+            capabilities=("transcribe", "json-output", "word-timestamps")),
+    Backend("canary",     "Canary 1B",           "canary-1b-v2-q4_k.gguf",
+            "cstr/canary-1b-v2-GGUF", "canary-1b-v2-q4_k.gguf",
+            timeout_s=120, approx_size_mb=620,
+            capabilities=("transcribe", "json-output", "temperature",
+                          "word-timestamps", "punctuation", "translate")),
+    Backend("cohere",     "Cohere Transcribe",   "cohere-transcribe-q4_k.gguf",
+            "cstr/cohere-transcribe-03-2026-GGUF", "cohere-transcribe-q4_k.gguf",
+            timeout_s=120, approx_size_mb=1300,
+            capabilities=("transcribe", "json-output", "temperature",
+                          "word-timestamps", "punctuation")),
+    Backend("qwen3",      "Qwen3 ASR 0.6B",      "qwen3-asr-0.6b-q4_k.gguf",
+            "cstr/qwen3-asr-0.6b-GGUF", "qwen3-asr-0.6b-q4_k.gguf",
+            timeout_s=120, approx_size_mb=400,
+            capabilities=("transcribe", "json-output", "beam",
+                          "temperature", "word-timestamps", "punctuation",
+                          "translate")),
+    # OmniASR CTC Q4_K now uses mixed quantization (head=4 encoder layers
+    # at F16, rest at Q4_K) by default in crispasr-quantize. Recovers
+    # nearly all of Q8_0's quality (5% WER on JFK from 1-word "americas"→
+    # "americans" diff that omniasr-llm shares; uniform Q4_K had 22.7%)
+    # at 658 MB vs Q8_0's 1.0 GB. See LEARNINGS "Q4_K is too lossy as
+    # the default for CTC-decoded ASR" + "head=4 sweep on omniasr-ctc"
+    # for the full diagnosis. To override (full quant, smaller, ~22% WER):
+    # CRISPASR_OMNIASR_QUANT_ALL=1 crispasr-quantize ...
+    Backend("omniasr",    "OmniASR CTC 1B v2",   "omniasr-ctc-1b-v2-q4_k.gguf",
+            "cstr/omniASR-CTC-1B-v2-GGUF", "omniasr-ctc-1b-v2-q4_k.gguf",
+            timeout_s=120, approx_size_mb=660,
+            capabilities=("transcribe", "json-output", "temperature", "beam",
+                          "word-timestamps")),
+    Backend("omniasr-llm", "OmniASR LLM 300M",   "omniasr-llm-300m-v2-q4_k.gguf",
+            "cstr/omniasr-llm-300m-v2-GGUF", "omniasr-llm-300m-v2-q4_k.gguf",
+            timeout_s=300, approx_size_mb=1100,
+            capabilities=("transcribe", "json-output", "beam",
+                          "temperature", "word-timestamps")),
+    Backend("glm-asr",    "GLM ASR Nano",        "glm-asr-nano-q4_k.gguf",
+            "cstr/glm-asr-nano-GGUF", "glm-asr-nano-q4_k.gguf",
+            timeout_s=300, approx_size_mb=900,
+            capabilities=("transcribe", "json-output", "beam",
+                          "temperature", "punctuation", "word-timestamps")),
+    Backend("firered-asr", "FireRed ASR2 AED",   "firered-asr2-aed-q4_k.gguf",
+            "cstr/firered-asr2-aed-GGUF", "firered-asr2-aed-q4_k.gguf",
+            timeout_s=300, approx_size_mb=600,
+            capabilities=("transcribe", "json-output", "beam", "word-timestamps")),
+    Backend("kyutai-stt", "Kyutai STT 1B",       "kyutai-stt-1b-q4_k.gguf",
+            "cstr/kyutai-stt-1b-GGUF", "kyutai-stt-1b-q4_k.gguf",
+            timeout_s=90, approx_size_mb=700,
+            capabilities=("transcribe", "json-output", "stream", "beam",
+                          "temperature", "word-timestamps", "punctuation")),
+    Backend("granite",    "Granite Speech 1B",   "granite-speech-4.0-1b-q4_k.gguf",
+            "cstr/granite-speech-4.0-1b-GGUF", "granite-speech-4.0-1b-q4_k.gguf",
+            timeout_s=300, approx_size_mb=1700,
+            capabilities=("transcribe", "json-output", "beam",
+                          "temperature", "word-timestamps", "punctuation",
+                          "translate")),
+    Backend("granite-4.1", "Granite Speech 4.1 2B", "granite-speech-4.1-2b-q4_k.gguf",
+            "cstr/granite-speech-4.1-2b-GGUF", "granite-speech-4.1-2b-q4_k.gguf",
+            timeout_s=300, approx_size_mb=1500,
+            capabilities=("transcribe", "json-output", "beam",
+                          "temperature", "word-timestamps", "punctuation",
+                          "translate")),
+    Backend("vibevoice",  "VibeVoice ASR",       "vibevoice-asr-7b-q4_k-fixed.gguf",
+            "cstr/vibevoice-asr-GGUF", "vibevoice-asr-q4_k.gguf",
+            timeout_s=600, approx_size_mb=4500,
+            capabilities=("transcribe", "json-output", "temperature",
+                          "word-timestamps", "tts-roundtrip")),
+    # vibevoice-1.5b: base VibeVoice TTS model with WAV cloning. Larger
+    # than the ASR-optimised vibevoice; produces higher-fidelity TTS.
+    Backend("vibevoice-1.5b", "VibeVoice 1.5B TTS", "vibevoice-1.5b-tts-q4_k.gguf",
+            "cstr/vibevoice-1.5b-GGUF", "vibevoice-1.5b-tts-q4_k.gguf",
+            timeout_s=600, approx_size_mb=1600,
+            capabilities=("tts-roundtrip", "temperature", "voice-cloning")),
+    Backend("voxtral",    "Voxtral Mini 3B",     "voxtral-mini-3b-2507-q4_k.gguf",
+            "cstr/voxtral-mini-3b-2507-GGUF", "voxtral-mini-3b-2507-q4_k.gguf",
+            timeout_s=300, approx_size_mb=1900,
+            capabilities=("transcribe", "json-output", "temperature",
+                          "beam", "word-timestamps", "punctuation",
+                          "translate")),
+
+    Backend("gemma4-e2b", "Gemma4 E2B IT",       "gemma4-e2b-it-q4_k.gguf",
+            "cstr/gemma4-e2b-it-GGUF", "gemma4-e2b-it-q4_k.gguf",
+            timeout_s=300, approx_size_mb=2500,
+            capabilities=("transcribe", "temperature", "lid", "word-timestamps")),
+
+    # ---- ASR backends added by capability-widening audit (2026-05-04) ----
+    # The capability tuples reflect what the binary declares via
+    # --list-backends-json. Run tools/audit-backend-capabilities.py to
+    # check for further drift after backend changes.
+    Backend("voxtral4b", "Voxtral Mini 4B Realtime", "voxtral-mini-4b-realtime-q4_k.gguf",
+            "cstr/voxtral-mini-4b-realtime-GGUF", "voxtral-mini-4b-realtime-q4_k.gguf",
+            timeout_s=600, approx_size_mb=2500,
+            capabilities=("transcribe", "json-output", "temperature",
+                          "word-timestamps", "punctuation", "stream")),
+    Backend("mimo-asr",  "MiMo-V2.5-ASR (Q4_K)",   "mimo-asr-q4_k.gguf",
+            "cstr/mimo-asr-GGUF", "mimo-asr-q4_k.gguf",
+            timeout_s=600, approx_size_mb=4200,
+            capabilities=("transcribe", "json-output", "temperature",
+                          "word-timestamps")),
+
+    # mega-asr: Qwen3-1.7B variant with robustness LoRA. Same qwen3-asr
+    # runtime; ships as a separate GGUF with the LoRA baked in.
+    Backend("mega-asr",  "Mega-ASR 1.7B",           "mega-asr-1.7b-q4_k.gguf",
+            "cstr/mega-asr-GGUF", "mega-asr-1.7b-q4_k.gguf",
+            timeout_s=300, approx_size_mb=1300,
+            capabilities=("transcribe", "json-output", "beam",
+                          "temperature", "word-timestamps", "punctuation")),
+
+    # FunASR LLM-decoder family (70-block SANM encoder + 2-block adaptor
+    # + Qwen3-0.6B AR decode). Same runtime path; mlt-nano is the
+    # multilingual fine-tune. Both were ported 2026-05-20 (HISTORY) but
+    # never landed in this registry, so the !-loop regression in v0.6.10
+    # shipped silent (issue #125 reports 01/07/08/09).
+    Backend("funasr",     "FunASR Nano 2512",        "funasr-nano-2512-f16.gguf",
+            "cstr/funasr-nano-GGUF", "funasr-nano-2512-f16.gguf",
+            timeout_s=120, approx_size_mb=1980,
+            capabilities=("transcribe", "json-output")),
+    Backend("fun-asr-mlt-nano", "FunASR MLT-Nano 2512",
+            "funasr-mlt-nano-2512-f16.gguf",
+            "cstr/funasr-mlt-nano-GGUF", "funasr-mlt-nano-2512-f16.gguf",
+            timeout_s=120, approx_size_mb=1980,
+            capabilities=("transcribe", "json-output")),
+    # SenseVoice + paraformer-zh share the SANM block helper with funasr
+    # but ship as encoder-only / NAR backends. Missing from the registry
+    # in parallel with funasr; same coverage gap.
+    Backend("sensevoice", "SenseVoice Small (CTC)", "sensevoice-small-q4_k.gguf",
+            "cstr/sensevoice-small-GGUF", "sensevoice-small-q4_k.gguf",
+            timeout_s=60, approx_size_mb=470,
+            capabilities=("transcribe", "json-output", "lid")),
+    Backend("paraformer", "Paraformer-zh (NAR)",     "paraformer-zh-q4_k.gguf",
+            "cstr/paraformer-zh-GGUF", "paraformer-zh-q4_k.gguf",
+            timeout_s=60, approx_size_mb=130,
+            capabilities=("transcribe", "json-output")),
+
+    # granite-4.1-plus: 2B speech-LLM with translate + src/tgt language.
+    # Same runtime path as granite-4.1; -plus adds bigger LM head + extra
+    # capability declarations (translate, src-tgt-language).
+    Backend("granite-4.1-plus", "Granite Speech 4.1 2B Plus", "granite-speech-4.1-2b-plus-q4_k.gguf",
+            "cstr/granite-speech-4.1-2b-plus-GGUF", "granite-speech-4.1-2b-plus-q4_k.gguf",
+            timeout_s=300, approx_size_mb=2960,
+            capabilities=("transcribe", "json-output", "beam",
+                          "temperature", "word-timestamps", "punctuation",
+                          "translate")),
+    # granite-4.1-nar: non-autoregressive variant (encoder + projector
+    # only, no LLM decode). Smaller capability surface — no beam, no
+    # temperature; CTC-style decoding.
+    Backend("granite-4.1-nar", "Granite Speech 4.1 2B NAR", "granite-speech-4.1-2b-nar-q4_k.gguf",
+            "cstr/granite-speech-4.1-2b-nar-GGUF", "granite-speech-4.1-2b-nar-q4_k.gguf",
+            timeout_s=300, approx_size_mb=3200,
+            capabilities=("transcribe", "json-output", "word-timestamps")),
+    # hubert: HuBERT-large CTC ASR. wav2vec2-family runtime, ~200 MB.
+    Backend("hubert",    "HuBERT Large LS960-FT",  "hubert-large-ls960-ft-q4_k.gguf",
+            "cstr/hubert-large-ls960-ft-GGUF", "hubert-large-ls960-ft-q4_k.gguf",
+            timeout_s=120, approx_size_mb=200,
+            capabilities=("transcribe", "json-output", "word-timestamps")),
+    # data2vec: data2vec-audio CTC ASR, smallest (~60 MB) of the
+    # wav2vec2-family backends.
+    Backend("data2vec",  "Data2Vec Audio Base 960h", "data2vec-audio-base-960h-q4_k.gguf",
+            "cstr/data2vec-audio-960h-GGUF", "data2vec-audio-base-960h-q4_k.gguf",
+            timeout_s=120, approx_size_mb=60,
+            capabilities=("transcribe", "json-output", "word-timestamps")),
+
+    # ---- TTS backends (tts-roundtrip capability) ----
+    Backend("kokoro",     "Kokoro 82M (TTS)",    "kokoro-82m-q8_0.gguf",
+            "cstr/kokoro-82m-GGUF", "kokoro-82m-q8_0.gguf",
+            timeout_s=120, approx_size_mb=90,
+            capabilities=("tts-roundtrip",),
+            voice_file="kokoro-voice-af_heart.gguf",
+            extra_files=(("kokoro-voice-af_heart.gguf",
+                          "cstr/kokoro-82m-GGUF",
+                          "kokoro-voice-af_heart.gguf"),)),
+    # qwen3-tts: speech-LLM with separate talker + 12 Hz codec models.
+    # Auto-download pulls both. -m auto resolves the talker; the codec is
+    # picked up via the registry entry's companion-file field.
+    Backend("qwen3-tts", "Qwen3-TTS 0.6B (TTS)", "qwen3-tts-12hz-0.6b-base-q8_0.gguf",
+            "cstr/qwen3-tts-0.6b-base-GGUF", "qwen3-tts-12hz-0.6b-base-q8_0.gguf",
+            timeout_s=300, approx_size_mb=1300,
+            capabilities=("tts-roundtrip", "temperature")),
+    # qwen3-tts-customvoice: 0.6B fixed-speaker fine-tune (9 baked
+    # speakers via --voice <name>); same 12 Hz codec.
+    Backend("qwen3-tts-customvoice", "Qwen3-TTS 0.6B CustomVoice (TTS)",
+            "qwen3-tts-12hz-0.6b-customvoice-q8_0.gguf",
+            "cstr/qwen3-tts-0.6b-customvoice-GGUF",
+            "qwen3-tts-12hz-0.6b-customvoice-q8_0.gguf",
+            timeout_s=300, approx_size_mb=1280,
+            capabilities=("tts-roundtrip", "temperature")),
+    # qwen3-tts-1.7b-base: larger talker (~1.9 GB Q8_0); same ICL
+    # voice-clone path as 0.6B-Base.
+    Backend("qwen3-tts-1.7b-base", "Qwen3-TTS 1.7B (TTS)",
+            "qwen3-tts-12hz-1.7b-base-q8_0.gguf",
+            "cstr/qwen3-tts-1.7b-base-GGUF",
+            "qwen3-tts-12hz-1.7b-base-q8_0.gguf",
+            timeout_s=600, approx_size_mb=2200,
+            capabilities=("tts-roundtrip", "temperature")),
+    # qwen3-tts-1.7b-customvoice: 9 baked speakers on the 1.7B talker.
+    Backend("qwen3-tts-1.7b-customvoice", "Qwen3-TTS 1.7B CustomVoice (TTS)",
+            "qwen3-tts-12hz-1.7b-customvoice-q8_0.gguf",
+            "cstr/qwen3-tts-1.7b-customvoice-GGUF",
+            "qwen3-tts-12hz-1.7b-customvoice-q8_0.gguf",
+            timeout_s=600, approx_size_mb=2300,
+            capabilities=("tts-roundtrip", "temperature")),
+    # qwen3-tts-1.7b-voicedesign: instruct-tuned variant; pick voice via
+    # natural-language --instruct (no reference WAV, no preset speaker).
+    Backend("qwen3-tts-1.7b-voicedesign", "Qwen3-TTS 1.7B VoiceDesign (TTS)",
+            "qwen3-tts-12hz-1.7b-voicedesign-q8_0.gguf",
+            "cstr/qwen3-tts-1.7b-voicedesign-GGUF",
+            "qwen3-tts-12hz-1.7b-voicedesign-q8_0.gguf",
+            timeout_s=600, approx_size_mb=2200,
+            capabilities=("tts-roundtrip", "temperature")),
+    # orpheus: Llama-3.2-3B talker + SNAC 24 kHz codec. Auto-download
+    # pulls both. --voice tara is the default English speaker.
+    Backend("orpheus",   "Orpheus 3B-FT (TTS)",  "orpheus-3b-0.1-ft-q8_0.gguf",
+            "cstr/orpheus-3b-0.1-ft-GGUF", "orpheus-3b-0.1-ft-q8_0.gguf",
+            timeout_s=600, approx_size_mb=3500,
+            capabilities=("tts-roundtrip", "temperature")),
+    # lex-au-orpheus-de: lex-au's German fine-tune of Orpheus-3B.
+    # Single-file repo (the .gguf is the repo name itself, lex-au's
+    # convention). Same SNAC codec as base orpheus.
+    Backend("lex-au-orpheus-de", "Orpheus-3b-German-FT (lex-au, TTS)",
+            "Orpheus-3b-German-FT-Q8_0.gguf",
+            "lex-au/Orpheus-3b-German-FT-Q8_0.gguf",
+            "Orpheus-3b-German-FT-Q8_0.gguf",
+            timeout_s=600, approx_size_mb=3500,
+            capabilities=("tts-roundtrip", "temperature")),
+    # kartoffel-orpheus-de-natural: 19-speaker German fine-tune.
+    # ASR-roundtrip word-exact via parakeet-v3 -l de (per README).
+    Backend("kartoffel-orpheus-de-natural", "Kartoffel-Orpheus 3B DE Natural (TTS)",
+            "kartoffel-orpheus-de-natural-q8_0.gguf",
+            "cstr/kartoffel-orpheus-3b-german-natural-GGUF",
+            "kartoffel-orpheus-de-natural-q8_0.gguf",
+            timeout_s=600, approx_size_mb=3500,
+            capabilities=("tts-roundtrip", "temperature")),
+    # kartoffel-orpheus-de-synthetic: 4-speaker variant with emotion +
+    # outburst control via "{Speaker} - {Emotion}: {text}" syntax.
+    Backend("kartoffel-orpheus-de-synthetic", "Kartoffel-Orpheus 3B DE Synthetic (TTS)",
+            "kartoffel-orpheus-de-synthetic-q8_0.gguf",
+            "cstr/kartoffel-orpheus-3b-german-synthetic-GGUF",
+            "kartoffel-orpheus-de-synthetic-q8_0.gguf",
+            timeout_s=600, approx_size_mb=3500,
+            capabilities=("tts-roundtrip", "temperature")),
+    # chatterbox family: T3 (text->speech tokens) + S3Gen (tokens->24 kHz
+    # waveform via CFM + HiFTGenerator). Two-GGUF runtime, registry pulls
+    # both via the companion field. The runtime carries a known ~30 %
+    # rel-pos magnitude gap in the C++ Conformer encoder vs Python ref;
+    # tts-roundtrip is left in the capabilities tuple so the smoke tier
+    # exercises load + synth, but ASR-roundtrip word-match is not
+    # expected to pass at the `full` tier until the parity gap closes
+    # (the test runner's tts-roundtrip tier picks up backend tuples but
+    # `--tts-roundtrip=full` is opt-in).
+    Backend("chatterbox", "Chatterbox (TTS)",     "chatterbox-t3-q8_0.gguf",
+            "cstr/chatterbox-GGUF", "chatterbox-t3-q8_0.gguf",
+            timeout_s=600, approx_size_mb=900,
+            capabilities=("tts-roundtrip", "temperature", "voice-cloning")),
+    Backend("chatterbox-turbo", "Chatterbox-Turbo (TTS)", "chatterbox-turbo-t3-f16.gguf",
+            "cstr/chatterbox-turbo-GGUF", "chatterbox-turbo-t3-f16.gguf",
+            timeout_s=600, approx_size_mb=1600,
+            capabilities=("tts-roundtrip", "temperature", "voice-cloning")),
+    Backend("kartoffelbox-turbo", "Kartoffelbox-Turbo (TTS, DE)", "kartoffelbox-turbo-t3-q8_0.gguf",
+            "cstr/kartoffelbox-turbo-GGUF", "kartoffelbox-turbo-t3-q8_0.gguf",
+            timeout_s=600, approx_size_mb=1280,
+            capabilities=("tts-roundtrip", "temperature", "voice-cloning")),
+    Backend("lahgtna-chatterbox", "Lahgtna Chatterbox v1 (TTS, AR)", "chatterbox-t3-f16.gguf",
+            "cstr/lahgtna-chatterbox-v1-GGUF", "chatterbox-t3-f16.gguf",
+            timeout_s=600, approx_size_mb=1400,
+            capabilities=("tts-roundtrip", "temperature", "voice-cloning")),
+    # indextts: IndexTTS-1.5 GPT-2 AR mel-code generator + BigVGAN vocoder.
+    # Voice cloning via Conformer+Perceiver on reference audio. Two GGUFs.
+    Backend("indextts",  "IndexTTS 1.5 (TTS)",  "indextts-gpt-q8_0.gguf",
+            "cstr/indextts-1.5-GGUF", "indextts-gpt-q8_0.gguf",
+            timeout_s=600, approx_size_mb=870,
+            capabilities=("tts-roundtrip", "temperature", "voice-cloning"),
+            extra_files=(("indextts-bigvgan.gguf",
+                          "cstr/indextts-1.5-GGUF",
+                          "indextts-bigvgan.gguf"),)),
+    # voxcpm2-tts: VoxCPM2 diffusion AR TTS, 30 languages, 48 kHz.
+    Backend("voxcpm2-tts", "VoxCPM2 TTS",       "voxcpm2-q4_k.gguf",
+            "cstr/voxcpm2-GGUF", "voxcpm2-q4_k.gguf",
+            timeout_s=600, approx_size_mb=1600,
+            capabilities=("tts-roundtrip", "temperature")),
+    # cosyvoice3-tts: CosyVoice3 0.5B streaming multilingual TTS. Three-
+    # stage pipeline (LLM AR -> flow Euler -> HiFT vocoder). Multiple
+    # GGUFs: LLM + flow + HiFT + campplus + s3tok + voices.
+    Backend("cosyvoice3-tts", "CosyVoice3 0.5B (TTS)", "cosyvoice3-llm-q4_k.gguf",
+            "cstr/cosyvoice3-0.5b-2512-GGUF", "cosyvoice3-llm-q4_k.gguf",
+            timeout_s=600, approx_size_mb=1200,
+            capabilities=("tts-roundtrip", "temperature"),
+            extra_files=(("cosyvoice3-flow-q8_0.gguf",
+                          "cstr/cosyvoice3-0.5b-2512-GGUF",
+                          "cosyvoice3-flow-q8_0.gguf"),
+                         ("cosyvoice3-hift-f16.gguf",
+                          "cstr/cosyvoice3-0.5b-2512-GGUF",
+                          "cosyvoice3-hift-f16.gguf"),
+                         ("cosyvoice3-campplus-f16.gguf",
+                          "cstr/cosyvoice3-0.5b-2512-GGUF",
+                          "cosyvoice3-campplus-f16.gguf"),
+                         ("cosyvoice3-s3tok-f16.gguf",
+                          "cstr/cosyvoice3-0.5b-2512-GGUF",
+                          "cosyvoice3-s3tok-f16.gguf"),
+                         ("cosyvoice3-voices.gguf",
+                          "cstr/cosyvoice3-0.5b-2512-GGUF",
+                          "cosyvoice3-voices.gguf"),)),
+    # f5-tts: DiT-based flow-matching TTS with zero-shot voice cloning.
+    # Single GGUF containing DiT + Vocos vocoder. Character-level tokenizer.
+    Backend("f5-tts",    "F5-TTS v1 Base (TTS)", "f5-tts-v1-base-f16.gguf",
+            "cstr/f5-tts-GGUF", "f5-tts-v1-base-f16.gguf",
+            timeout_s=600, approx_size_mb=953,
+            capabilities=("tts-roundtrip", "temperature")),
+    # outetts: OuteTTS 0.3 1B — OLMo-1B LLM + WavTokenizer VQ-GAN. Two
+    # GGUFs: talker + WavTokenizer decoder.
+    Backend("outetts",   "OuteTTS 0.3 1B (TTS)", "outetts-0.3-1b-q8_0.gguf",
+            "cstr/outetts-0.3-1b-GGUF", "outetts-0.3-1b-q8_0.gguf",
+            timeout_s=600, approx_size_mb=2500,
+            capabilities=("tts-roundtrip", "temperature"),
+            extra_files=(("wavtokenizer-decoder-f16.gguf",
+                          "cstr/outetts-0.3-1b-GGUF",
+                          "wavtokenizer-decoder-f16.gguf"),)),
+    # csm: Sesame CSM-1B conversational TTS. Llama-3.2 1B backbone + depth
+    # decoder + Mimi codec, all in one GGUF.
+    Backend("csm",       "CSM-1B (TTS)",         "csm-1b-q4_k.gguf",
+            "cstr/csm-1b-GGUF", "csm-1b-q4_k.gguf",
+            timeout_s=600, approx_size_mb=1400,
+            capabilities=("tts-roundtrip", "temperature")),
+    # dia: Nari Labs Dia-1.6B. Byte-level text encoder + AR audio decoder
+    # emitting 9 interleaved DAC codebooks. DAC 44.1 kHz codec companion.
+    Backend("dia",       "Dia 1.6B (TTS)",       "dia-1.6b-f16.gguf",
+            "cstr/dia-1.6b-GGUF", "dia-1.6b-f16.gguf",
+            timeout_s=600, approx_size_mb=3000,
+            capabilities=("tts-roundtrip", "temperature"),
+            extra_files=(("dac-44khz.gguf",
+                          "cstr/dia-1.6b-GGUF",
+                          "dac-44khz.gguf"),)),
+    # speecht5: SpeechT5 TTS — 80M param AR mel decoder + HiFi-GAN vocoder.
+    # Deterministic (no sampling). Needs 512-d x-vector for speaker
+    # conditioning via --voice <xvector.bin>.
+    Backend("speecht5",  "SpeechT5 TTS",         "speecht5-tts-f16.gguf",
+            "cstr/speecht5-tts-GGUF", "speecht5-tts-f16.gguf",
+            timeout_s=120, approx_size_mb=300,
+            capabilities=("tts-roundtrip",)),
+    # piper: Piper VITS TTS. Deterministic, ~30 MB. No auto-download yet
+    # (community voices on rhasspy/piper, not HuggingFace GGUF).
+    Backend("piper",     "Piper VITS (TTS)",     "piper-en_US-lessac-medium-f16.gguf",
+            "cstr/piper-en_US-lessac-medium-GGUF", "piper-en_US-lessac-medium-f16.gguf",
+            timeout_s=120, approx_size_mb=30,
+            capabilities=("tts-roundtrip",)),
+    # pocket-tts: Kyutai Pocket TTS 100M. Continuous-latent AR TTS at 12.5 Hz,
+    # decoded by Mimi VAE to 24 kHz PCM. Single GGUF, no codec companion.
+    Backend("pocket-tts", "Pocket TTS (TTS)",    "pocket-tts-english-novc-f16.gguf",
+            "cstr/pocket-tts-GGUF", "pocket-tts-english-novc-f16.gguf",
+            timeout_s=300, approx_size_mb=200,
+            capabilities=("tts-roundtrip", "temperature")),
+    # bark: Suno Bark small — 3-stage hierarchical TTS (semantic + coarse +
+    # fine GPT-2) + EnCodec decoder. Single GGUF.
+    Backend("bark",      "Bark Small (TTS)",     "bark-small-q8_0.gguf",
+            "cstr/bark-small-GGUF", "bark-small-q8_0.gguf",
+            timeout_s=600, approx_size_mb=500,
+            capabilities=("tts-roundtrip", "temperature")),
+    # parler-tts: Parler TTS Mini v1.1 — T5 encoder + DAC-based AR decoder.
+    # 44.1 kHz output. Voice described via natural-language --instruct.
+    Backend("parler-tts", "Parler TTS Mini v1.1 (TTS)", "parler-tts-mini-v1.1-q8_0.gguf",
+            "cstr/parler-tts-mini-v1.1-GGUF", "parler-tts-mini-v1.1-q8_0.gguf",
+            timeout_s=600, approx_size_mb=1000,
+            capabilities=("tts-roundtrip", "temperature")),
+    # zonos: Zyphra Zonos v0.1 — GGUF repo not yet uploaded to HF.
+    # TODO: add entry once cstr/zonos-v0.1-transformer-GGUF is created.
+    # M2M-100 multilingual text-to-text translation (facebook/m2m100_418M).
+    # NOT an ASR or TTS backend — input is text, not audio. The test
+    # script's test_translate runs `--translate -tl de samples/jfk.wav`
+    # which doesn't apply (m2m100's transcribe() errors as "transcription
+    # not supported"). Empty capability tuple keeps the backend tracked
+    # by the audit (so drift is zero) without scheduling any audio-based
+    # test against it. Standalone-text-translate is exposed via
+    # crispasr_session_translate_text in the C ABI today; a CLI flag
+    # is a follow-up.
+    Backend("m2m100",   "M2M-100 418M (translate)", "m2m100-418m-q8_0.gguf",
+            "cstr/m2m100-418m-GGUF", "m2m100-418m-q8_0.gguf",
+            timeout_s=120, approx_size_mb=502,
+            capabilities=()),
+    # WMT21 dense-24-wide-en-x — same m2m100 runtime, scaled to 4.7B,
+    # English → 7 target languages. Empty caps tuple (text-to-text;
+    # the audio test harness doesn't apply); kept here to keep audit
+    # drift at zero.
+    Backend("m2m100-wmt21", "M2M-100 WMT21 4.7B (translate)",
+            "wmt21-dense-24-wide-en-x-q4_k.gguf",
+            "cstr/wmt21-dense-24-wide-en-x-GGUF",
+            "wmt21-dense-24-wide-en-x-q4_k.gguf",
+            timeout_s=300, approx_size_mb=2543,
+            capabilities=()),
+    # MADLAD-400 3B (Google, Apache-2.0) — multilingual T5 translation,
+    # 419 languages. Routes through the t5_translate runtime, which is
+    # WIP per upstream commit 1d9026c (rel-pos bias produces a
+    # repeating-token loop in decode). Empty caps tuple — audit drift
+    # zero, but no audio harness applies and the runtime isn't
+    # production-ready yet. Track the rel-pos debugging in PLAN.
+    Backend("madlad",   "MADLAD-400 3B-mt (translate, WIP)",
+            "madlad400-3b-mt-q4_k.gguf",
+            "cstr/madlad400-3b-mt-GGUF", "madlad400-3b-mt-q4_k.gguf",
+            timeout_s=300, approx_size_mb=1900,
+            capabilities=()),
+)
+
+
+# ---------------------------------------------------------------------------
+# crispasr binary + model resolution
+# ---------------------------------------------------------------------------
+
+
+def find_crispasr() -> Path | None:
+    for rel in ("build-ninja-compile/bin/crispasr",
+                "build/bin/crispasr",
+                "build-release/bin/crispasr"):
+        p = REPO_ROOT / rel
+        if p.is_file():
+            return p
+    found = shutil.which("crispasr")
+    return Path(found) if found else None
+
+
+# Cache of binary-declared caps per backend (populated lazily on first use).
+# Read via `crispasr --list-backends-json`. Used by tests that need to
+# distinguish native capability from a post-step shim — e.g. word-timestamps
+# is native on whisper/parakeet/canary/cohere/kyutai-stt but requires a CTC
+# aligner (-am) on moonshine, wav2vec2, qwen3, granite, voxtral, etc.
+_BACKEND_CAPS_CACHE: dict[str, set[str]] | None = None
+
+
+def get_backend_caps(crispasr: Path, backend_name: str) -> set[str]:
+    global _BACKEND_CAPS_CACHE
+    if _BACKEND_CAPS_CACHE is None:
+        try:
+            out = subprocess.check_output([str(crispasr), "--list-backends-json"],
+                                          stderr=subprocess.DEVNULL)
+            data = _json.loads(out)
+            _BACKEND_CAPS_CACHE = {b["name"]: set(b["caps"]) for b in data["backends"]}
+        except Exception:
+            _BACKEND_CAPS_CACHE = {}
+    return _BACKEND_CAPS_CACHE.get(backend_name, set())
+
+
+def free_mb(path: Path) -> int:
+    p = path if path.exists() else path.parent
+    return shutil.disk_usage(p).free // (1024 * 1024)
+
+
+# ---------------------------------------------------------------------------
+# VAD / streaming probe — multi-segment clip stitched at runtime from a
+# single-segment source audio. Caches into build/test-fixtures/. Used by
+# vad-full and stream-long tiers as deterministic ground truth without
+# committing a binary fixture to the repo.
+# ---------------------------------------------------------------------------
+
+
+def make_multi_segment_probe(src: Path, n_repeats: int = 4,
+                             silence_ms: int = 800,
+                             unit_ms: int = 2200) -> Path:
+    """Stitch `n_repeats` copies of `src` truncated to `unit_ms` (must
+    be 16k mono PCM WAV) separated by `silence_ms` of silence each.
+
+    `unit_ms` should match a single silero speech segment in the source
+    so the resulting probe has exactly `n_repeats` detectable segments.
+    For samples/jfk.wav the first silero segment is ~0.3-2.2s, so
+    unit_ms=2200 captures it cleanly without crossing into segment 2.
+
+    Cached so repeated calls don't redo the work.
+    """
+    cache_dir = REPO_ROOT / "build" / "test-fixtures"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    out = cache_dir / f"{src.stem}_unit{unit_ms}_x{n_repeats}_gap{silence_ms}.wav"
+    if out.is_file():
+        return out
+    with wave.open(str(src), "rb") as wf:
+        if wf.getnchannels() != 1 or wf.getsampwidth() != 2 or wf.getframerate() != 16000:
+            raise RuntimeError(
+                f"probe source {src} must be 16-bit 16kHz mono PCM "
+                f"(got {wf.getnchannels()}ch / {wf.getsampwidth()*8}-bit / "
+                f"{wf.getframerate()}Hz)"
+            )
+        unit_frames = (unit_ms * 16000) // 1000
+        pcm = wf.readframes(min(unit_frames, wf.getnframes()))
+    silence_bytes = bytes(silence_ms * 16 * 2)  # 16k, 16-bit mono
+    payload = (pcm + silence_bytes) * (n_repeats - 1) + pcm
+    with wave.open(str(out), "wb") as ow:
+        ow.setnchannels(1)
+        ow.setsampwidth(2)
+        ow.setframerate(16000)
+        ow.writeframes(payload)
+    return out
+
+
+@dataclass
+class FetchedModel:
+    """Result of fetch_model — tracks which files we downloaded *this run*
+    vs which were already on disk. Only "downloaded this run" files are
+    eligible for ephemeral cleanup."""
+    path: Path
+    downloaded_files: list[Path] = field(default_factory=list)
+
+
+def fetch_model(b: Backend, models_dir: Path, skip_missing: bool,
+                space_margin_mb: int = 2048) -> FetchedModel | None:
+    # Locate the main model — disk first, fall through to download.
+    for cand in (b.local_file, b.hf_file):
+        p = models_dir / cand
+        if p.is_file():
+            # Pre-existing main file. Still try to fetch missing extras
+            # (tokenizer.bin, voice file, etc.) — they may be needed and
+            # the cleanup logic only deletes what we ourselves downloaded.
+            downloaded: list[Path] = []
+            for ex_local, ex_repo, ex_file in b.extra_files:
+                if not (models_dir / ex_local).is_file() and not skip_missing:
+                    try:
+                        from huggingface_hub import hf_hub_download
+                        ep = Path(hf_hub_download(ex_repo, ex_file, local_dir=str(models_dir)))
+                        downloaded.append(ep)
+                    except Exception as e:
+                        print(f"    extra file {ex_file} failed: {e} (continuing)")
+            return FetchedModel(p, downloaded)
+
+    if skip_missing:
+        return None
+    needed_mb = (b.approx_size_mb or 0) + space_margin_mb
+    have_mb = free_mb(models_dir)
+    if b.approx_size_mb and have_mb < needed_mb:
+        print(f"    skip download: need ~{needed_mb} MB, only {have_mb} MB free")
+        return None
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError:
+        print("    huggingface_hub not installed — pip install huggingface_hub hf_xet")
+        return None
+    print(f"    downloading {b.hf_file} from {b.hf_repo}…", flush=True)
+    t0 = time.time()
+    try:
+        downloaded_main = hf_hub_download(b.hf_repo, b.hf_file, local_dir=str(models_dir))
+    except Exception as e:
+        print(f"    download failed: {e}")
+        return None
+    sz_mb = os.path.getsize(downloaded_main) / 1024 / 1024
+    print(f"    ✓ {sz_mb:.0f} MB in {time.time()-t0:.1f}s")
+    fetched = FetchedModel(Path(downloaded_main), [Path(downloaded_main)])
+    for ex_local, ex_repo, ex_file in b.extra_files:
+        if not (models_dir / ex_local).is_file():
+            try:
+                ep = Path(hf_hub_download(ex_repo, ex_file, local_dir=str(models_dir)))
+                fetched.downloaded_files.append(ep)
+            except Exception as e:
+                print(f"    extra file {ex_file} failed: {e} (continuing)")
+    return fetched
+
+
+def cleanup_downloaded(b: Backend, fetched: FetchedModel | None) -> None:
+    """Delete files we downloaded for this backend in this run.
+    Reference models (whisper/parakeet/etc., is_reference=True) are
+    skipped — other backends rely on them as ground truth or for LID."""
+    if fetched is None or b.is_reference:
+        if fetched is not None and b.is_reference:
+            print(f"    keep (reference model — used by other backends)")
+        return
+    freed = 0
+    for p in fetched.downloaded_files:
+        if p.is_file():
+            sz = p.stat().st_size
+            try:
+                p.unlink()
+                freed += sz
+            except OSError as e:
+                print(f"    cleanup failed for {p.name}: {e}")
+    if freed:
+        print(f"    cleaned up {freed/1024/1024:.0f} MB ({len(fetched.downloaded_files)} file(s))")
+
+
+# ---------------------------------------------------------------------------
+# Test outcome model
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TestOutcome:
+    backend: str
+    capability: str
+    tier: str            # smoke | full | ignore
+    status: str          # PASS | FAIL | SKIP | NO_MODEL | TIMEOUT | CRASH | EMPTY
+    detail: str = ""
+    wall_s: float = 0.0
+    extra: dict = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Test runners — one per capability. Each returns a TestOutcome.
+# ---------------------------------------------------------------------------
+
+
+def normalize(s: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z ]", "", s.lower())).strip()
+
+
+def wer(ref: str, hyp: str) -> float | None:
+    try:
+        from jiwer import wer as compute_wer
+    except ImportError:
+        return None
+    r, h = normalize(ref), normalize(hyp)
+    if not r or not h:
+        return 1.0
+    return compute_wer(r, h)
+
+
+def _run_cli(crispasr: Path, b: Backend, model: Path, audio: Path,
+             extra_args: list[str], use_gpu: bool,
+             timeout_override: int | None = None,
+             quiet: bool = True) -> tuple[int, str, str, float]:
+    # Most tests want --no-prints to keep output predictable. test_lid
+    # is the exception: the framework's LID line + the qwen3 native-LID
+    # line are gated on `!no_prints`, so the test would never see them
+    # (whisper's LID uses CRISPASR_LOG_INFO and ignores the gate, which
+    # is why we got away with --no-prints for whisper-only LID before).
+    base = [str(crispasr), "--backend", b.name, "-m", str(model),
+            "-f", str(audio)]
+    if quiet:
+        base.append("--no-prints")
+    cmd = base + list(extra_args)
+    if not use_gpu:
+        cmd.append("-ng")
+    timeout = timeout_override or b.timeout_s
+    t0 = time.time()
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return -1, "", f"TIMEOUT after {timeout}s", time.time() - t0
+    return r.returncode, r.stdout, r.stderr, time.time() - t0
+
+
+def parse_transcript(stdout: str) -> str:
+    return re.sub(r"\[[\d:.]+\s*-->\s*[\d:.]+\]\s*", "", stdout.strip()).strip()
+
+
+# ---- transcribe ----------------------------------------------------------------
+
+
+def test_transcribe(b: Backend, tier: str, ctx: dict) -> TestOutcome:
+    crispasr, model, audio, use_gpu, threshold = (
+        ctx["crispasr"], ctx["model"], ctx["audio"], ctx["use_gpu"],
+        ctx["wer_threshold"])
+    rc, out, err, w = _run_cli(crispasr, b, model, audio, [], use_gpu)
+    if rc < 0:
+        return TestOutcome(b.name, "transcribe", tier, "TIMEOUT", err, w)
+    if rc != 0:
+        return TestOutcome(b.name, "transcribe", tier, "CRASH",
+                           (err or "")[-300:], w)
+    transcript = parse_transcript(out)
+    if not transcript:
+        return TestOutcome(b.name, "transcribe", tier, "EMPTY",
+                           (err or "")[-200:], w)
+    werv = wer(JFK_REF, transcript)
+    extra = {"transcript": transcript[:120], "wer": werv}
+    if tier == "smoke":
+        # Smoke: transcript must be non-empty + WER <= 2× threshold
+        if werv is not None and werv > 2 * threshold:
+            return TestOutcome(b.name, "transcribe", tier, "FAIL",
+                               f"WER {werv:.1%} > {2*threshold:.0%} (smoke)",
+                               w, extra)
+        return TestOutcome(b.name, "transcribe", tier, "PASS",
+                           f"transcript={len(transcript)} chars; WER={werv:.1%}"
+                           if werv is not None else "transcript present (no jiwer)",
+                           w, extra)
+    # full
+    if werv is None:
+        return TestOutcome(b.name, "transcribe", tier, "PASS",
+                           "transcript present (jiwer missing)", w, extra)
+    if werv > threshold:
+        return TestOutcome(b.name, "transcribe", tier, "FAIL",
+                           f"WER {werv:.1%} > {threshold:.0%}", w, extra)
+    return TestOutcome(b.name, "transcribe", tier, "PASS",
+                       f"WER={werv:.1%}", w, extra)
+
+
+# ---- json-output ------------------------------------------------------------
+
+
+def test_json_output(b: Backend, tier: str, ctx: dict) -> TestOutcome:
+    crispasr, model, audio, use_gpu = (
+        ctx["crispasr"], ctx["model"], ctx["audio"], ctx["use_gpu"])
+    rc, out, err, w = _run_cli(crispasr, b, model, audio, ["-oj"], use_gpu)
+    if rc < 0:
+        return TestOutcome(b.name, "json-output", tier, "TIMEOUT", err, w)
+    if rc != 0:
+        return TestOutcome(b.name, "json-output", tier, "CRASH",
+                           (err or "")[-200:], w)
+    json_path = audio.with_suffix(".json")
+    if not json_path.is_file():
+        return TestOutcome(b.name, "json-output", tier, "FAIL",
+                           f"-oj didn't produce {json_path.name}", w)
+    try:
+        d = _json.loads(json_path.read_text())
+    except Exception as e:
+        return TestOutcome(b.name, "json-output", tier, "FAIL",
+                           f"invalid JSON: {e}", w)
+    segs = d.get("transcription") or []
+    if not segs:
+        return TestOutcome(b.name, "json-output", tier, "FAIL",
+                           "no transcription segments in JSON", w)
+    s0 = segs[0]
+    if not s0.get("text"):
+        return TestOutcome(b.name, "json-output", tier, "FAIL",
+                           "first segment has no text", w)
+    if tier == "full":
+        # Full: timestamps must be present and within audio duration bounds
+        offsets = s0.get("offsets") or {}
+        t1 = offsets.get("to")
+        if t1 is None:
+            return TestOutcome(b.name, "json-output", tier, "FAIL",
+                               "no offsets.to in first segment", w)
+        audio_ms = int(ctx["audio_duration"] * 1000) + 500  # 500ms tolerance
+        if t1 > audio_ms:
+            return TestOutcome(b.name, "json-output", tier, "FAIL",
+                               f"offsets.to={t1}ms exceeds audio {audio_ms}ms", w)
+    return TestOutcome(b.name, "json-output", tier, "PASS",
+                       f"{len(segs)} segment(s)", w,
+                       {"n_segments": len(segs)})
+
+
+# ---- temperature -----------------------------------------------------------
+
+
+def test_temperature(b: Backend, tier: str, ctx: dict) -> TestOutcome:
+    """T=0 should be deterministic across two runs."""
+    crispasr, model, audio, use_gpu = (
+        ctx["crispasr"], ctx["model"], ctx["audio"], ctx["use_gpu"])
+    rc1, out1, err1, w1 = _run_cli(crispasr, b, model, audio,
+                                   ["-tp", "0"], use_gpu)
+    if rc1 != 0:
+        return TestOutcome(b.name, "temperature", tier, "CRASH",
+                           f"T=0 run failed: {(err1 or '')[-200:]}", w1)
+    rc2, out2, err2, w2 = _run_cli(crispasr, b, model, audio,
+                                   ["-tp", "0"], use_gpu)
+    if rc2 != 0:
+        return TestOutcome(b.name, "temperature", tier, "CRASH",
+                           f"T=0 rerun failed: {(err2 or '')[-200:]}", w1 + w2)
+    t1, t2 = parse_transcript(out1), parse_transcript(out2)
+    if t1 != t2:
+        return TestOutcome(b.name, "temperature", tier, "FAIL",
+                           f"T=0 not deterministic across runs", w1 + w2,
+                           {"run1": t1[:80], "run2": t2[:80]})
+    return TestOutcome(b.name, "temperature", tier, "PASS",
+                       "T=0 deterministic across 2 runs", w1 + w2)
+
+
+# ---- stream (Python wrapper round-trip) ------------------------------------
+
+
+_STREAM_PY = """
+import sys, wave, numpy as np
+from crispasr import Session
+backend = sys.argv[1]
+model = sys.argv[2]
+wav = sys.argv[3]
+s = Session(model, backend=backend)
+with wave.open(wav,'rb') as w:
+    pcm = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).astype(np.float32) / 32768.0
+out=''; lc=0; n_decodes=0
+kwargs = {'step_ms': 2000, 'length_ms': 15000}
+# Whisper streaming needs an explicit language to bypass per-decode LID.
+if backend == 'whisper':
+    kwargs['language'] = 'en'
+with s.stream_open(**kwargs) as st:
+    for i in range(0, len(pcm), 1600):
+        rc = st.feed(pcm[i:i+1600])
+        if rc == 1:
+            d = st.get_text()
+            if d['counter'] != lc: lc=d['counter']; out=d['text']; n_decodes += 1
+    st.flush()
+    d = st.get_text()
+    if d['counter'] != lc: out=d['text']; n_decodes += 1
+# Print as: "<n_decodes>|<final_transcript>" so the parent can verify
+# we got incremental emission, not just one decode at the end.
+sys.stdout.write(f'{n_decodes}|{out}')
+"""
+
+
+def test_stream(b: Backend, tier: str, ctx: dict) -> TestOutcome:
+    crispasr, model, audio = ctx["crispasr"], ctx["model"], ctx["audio"]
+    # Locate libcrispasr next to the binary.
+    libdir = crispasr.parent.parent / "src"
+    libname = "libcrispasr.dylib" if platform.system() == "Darwin" else "libcrispasr.so"
+    libpath = libdir / libname
+    if not libpath.is_file():
+        return TestOutcome(b.name, "stream", tier, "SKIP",
+                           f"libcrispasr not found at {libpath} (Python wrapper needs it)")
+    env = {**os.environ, "CRISPASR_LIB_PATH": str(libpath),
+           "PYTHONPATH": str(REPO_ROOT / "python")}
+    cmd = [sys.executable, "-c", _STREAM_PY, b.name, str(model), str(audio)]
+    t0 = time.time()
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=b.timeout_s * 2, env=env)
+    except subprocess.TimeoutExpired:
+        return TestOutcome(b.name, "stream", tier, "TIMEOUT",
+                           "Python stream subprocess timed out",
+                           time.time() - t0)
+    elapsed = time.time() - t0
+    if r.returncode != 0:
+        return TestOutcome(b.name, "stream", tier, "CRASH",
+                           (r.stderr or "")[-300:], elapsed)
+    raw = r.stdout.strip()
+    # Parse "<n_decodes>|<final>" from _STREAM_PY.
+    n_decodes, _, transcript = raw.partition("|")
+    try:
+        n_decodes = int(n_decodes)
+    except ValueError:
+        return TestOutcome(b.name, "stream", tier, "FAIL",
+                           f"unparseable stream output: {raw[:80]!r}", elapsed)
+    if not transcript:
+        return TestOutcome(b.name, "stream", tier, "EMPTY",
+                           f"stream produced empty transcript ({n_decodes} decodes)",
+                           elapsed)
+    werv = wer(JFK_REF, transcript)
+    extra = {"transcript": transcript[:120], "wer": werv, "n_decodes": n_decodes}
+    # Smoke: counter must have advanced at least once (incremental emission)
+    # and final transcript must be reasonable.
+    if n_decodes < 1:
+        return TestOutcome(b.name, "stream", tier, "FAIL",
+                           "no decode events fired during streaming feed", elapsed, extra)
+    if werv is not None and werv > 0.30:
+        return TestOutcome(b.name, "stream", tier, "FAIL",
+                           f"stream WER {werv:.1%} > 30%", elapsed, extra)
+    if tier == "full":
+        # Full tier: for an 11s clip with step_ms=2000, expect at least 3
+        # decode events (chunks at ~2/4/6/8/10s + flush). Below that, the
+        # streaming nature isn't really being exercised.
+        expected_min = max(2, int(ctx["audio_duration"] // 3))
+        if n_decodes < expected_min:
+            return TestOutcome(b.name, "stream", tier, "FAIL",
+                               f"only {n_decodes} decode events (expected >= {expected_min})",
+                               elapsed, extra)
+    detail = f"WER={werv:.1%}, {n_decodes} decodes" if werv is not None else f"{n_decodes} decodes"
+    return TestOutcome(b.name, "stream", tier, "PASS", detail, elapsed, extra)
+
+
+# ---- beam -----------------------------------------------------------------
+
+
+def test_beam(b: Backend, tier: str, ctx: dict) -> TestOutcome:
+    """Smoke: -bs 4 doesn't crash and produces a non-empty transcript with
+    bounded WER. Full: beam transcript matches greedy or differs by
+    at most 1 word edit (JFK is too clean to expect strict WER<).
+    """
+    crispasr, model, audio, use_gpu = (
+        ctx["crispasr"], ctx["model"], ctx["audio"], ctx["use_gpu"])
+    rc, out, err, w = _run_cli(crispasr, b, model, audio, ["-bs", "4"], use_gpu)
+    if rc < 0:
+        return TestOutcome(b.name, "beam", tier, "TIMEOUT", err, w)
+    if rc != 0:
+        return TestOutcome(b.name, "beam", tier, "CRASH",
+                           (err or "")[-300:], w)
+    transcript = parse_transcript(out)
+    if not transcript:
+        return TestOutcome(b.name, "beam", tier, "EMPTY",
+                           (err or "")[-200:], w)
+    werv = wer(JFK_REF, transcript)
+    if werv is not None and werv > 0.30:
+        return TestOutcome(b.name, "beam", tier, "FAIL",
+                           f"-bs 4 WER {werv:.1%} > 30%", w,
+                           {"transcript": transcript[:80], "wer": werv})
+    return TestOutcome(b.name, "beam", tier, "PASS",
+                       f"-bs 4 WER={werv:.1%}" if werv is not None else "-bs 4 produced output",
+                       w)
+
+
+# ---- best-of-n ------------------------------------------------------------
+
+
+def test_best_of_n(b: Backend, tier: str, ctx: dict) -> TestOutcome:
+    """Smoke: -bo 4 doesn't crash, produces transcript with bounded WER."""
+    crispasr, model, audio, use_gpu = (
+        ctx["crispasr"], ctx["model"], ctx["audio"], ctx["use_gpu"])
+    # best-of-N typically requires temperature > 0 to actually diversify
+    # candidates. Some backends accept -bo with -tp 0 as a no-op.
+    rc, out, err, w = _run_cli(crispasr, b, model, audio,
+                               ["-bo", "4", "-tp", "0.3"], use_gpu)
+    if rc < 0:
+        return TestOutcome(b.name, "best-of-n", tier, "TIMEOUT", err, w)
+    if rc != 0:
+        return TestOutcome(b.name, "best-of-n", tier, "CRASH",
+                           (err or "")[-300:], w)
+    transcript = parse_transcript(out)
+    if not transcript:
+        return TestOutcome(b.name, "best-of-n", tier, "EMPTY",
+                           (err or "")[-200:], w)
+    werv = wer(JFK_REF, transcript)
+    if werv is not None and werv > 0.30:
+        return TestOutcome(b.name, "best-of-n", tier, "FAIL",
+                           f"-bo 4 WER {werv:.1%} > 30%", w,
+                           {"transcript": transcript[:80], "wer": werv})
+    return TestOutcome(b.name, "best-of-n", tier, "PASS",
+                       f"-bo 4 WER={werv:.1%}" if werv is not None else "-bo 4 produced output",
+                       w)
+
+
+# ---- punctuation ----------------------------------------------------------
+
+
+_PUNCT_RE = re.compile(r"[,.!?]")
+
+
+def test_punctuation(b: Backend, tier: str, ctx: dict) -> TestOutcome:
+    """Run with and without --no-punctuation, verify the toggle has effect.
+    With: at least one punctuation char in transcript.
+    Without: zero punctuation chars in transcript.
+    """
+    crispasr, model, audio, use_gpu = (
+        ctx["crispasr"], ctx["model"], ctx["audio"], ctx["use_gpu"])
+    rc1, out1, err1, w1 = _run_cli(crispasr, b, model, audio, [], use_gpu)
+    if rc1 != 0:
+        return TestOutcome(b.name, "punctuation", tier, "CRASH",
+                           f"with-punct run failed: {(err1 or '')[-200:]}", w1)
+    rc2, out2, err2, w2 = _run_cli(crispasr, b, model, audio,
+                                   ["--no-punctuation"], use_gpu)
+    if rc2 != 0:
+        return TestOutcome(b.name, "punctuation", tier, "CRASH",
+                           f"--no-punctuation run failed: {(err2 or '')[-200:]}",
+                           w1 + w2)
+    t_with = parse_transcript(out1)
+    t_without = parse_transcript(out2)
+    has_with = bool(_PUNCT_RE.search(t_with))
+    has_without = bool(_PUNCT_RE.search(t_without))
+    if not has_with:
+        return TestOutcome(b.name, "punctuation", tier, "FAIL",
+                           "default run produced no punctuation chars",
+                           w1 + w2,
+                           {"with": t_with[:80], "without": t_without[:80]})
+    if has_without:
+        return TestOutcome(b.name, "punctuation", tier, "FAIL",
+                           "--no-punctuation still emitted punctuation",
+                           w1 + w2,
+                           {"with": t_with[:80], "without": t_without[:80]})
+    return TestOutcome(b.name, "punctuation", tier, "PASS",
+                       "with: punct present; without: punct absent", w1 + w2)
+
+
+# Capability → test runner. Capabilities not in this map count as
+# unimplemented (status SKIP at SMOKE/FULL tier).
+RUNNERS = {
+    "transcribe":   test_transcribe,
+    "json-output":  test_json_output,
+    "temperature":  test_temperature,
+    "stream":       test_stream,
+    "beam":         test_beam,
+    "best-of-n":    test_best_of_n,
+    "punctuation":  test_punctuation,
+    "word-timestamps": None,  # filled in below
+    "vad":          None,
+    "lid":          None,
+}
+
+
+# ---- word-timestamps -------------------------------------------------------
+
+
+def test_word_timestamps(b: Backend, tier: str, ctx: dict) -> TestOutcome:
+    """Smoke: -ojf produces JSON whose first segment has a `words` array
+    with >= 5 entries. Each word entry should have time offsets.
+    Full: each word's t0 < t1, t1 monotonically non-decreasing across
+    the array, last t1 within audio duration + 500ms.
+
+    Backends that produce word timestamps natively (whisper, parakeet,
+    canary, cohere, kyutai-stt) work with just -ojf. Backends that only
+    declare CAP_TIMESTAMPS_CTC (post-step via -am <aligner>) need the
+    aligner model to be passed explicitly — wiring an aligner default
+    into this runner is tracked separately, so we SKIP rather than FAIL
+    those backends here. The audit script
+    (tools/audit-backend-capabilities.py) still treats both caps as
+    served by this test for drift purposes.
+    """
+    crispasr, model, audio, use_gpu = (
+        ctx["crispasr"], ctx["model"], ctx["audio"], ctx["use_gpu"])
+    caps = get_backend_caps(crispasr, b.name)
+    if "word-timestamps" not in caps and "timestamps-ctc" in caps:
+        return TestOutcome(b.name, "word-timestamps", tier, "SKIP",
+                           "needs -am <aligner> (CTC post-step); not yet wired in test runner")
+    rc, out, err, w = _run_cli(crispasr, b, model, audio, ["-ojf"], use_gpu)
+    if rc != 0:
+        return TestOutcome(b.name, "word-timestamps", tier, "CRASH",
+                           (err or "")[-200:], w)
+    json_path = audio.with_suffix(".json")
+    try:
+        d = _json.loads(json_path.read_text())
+    except Exception as e:
+        return TestOutcome(b.name, "word-timestamps", tier, "FAIL",
+                           f"-ojf JSON unreadable: {e}", w)
+    segs = d.get("transcription") or []
+    if not segs:
+        return TestOutcome(b.name, "word-timestamps", tier, "FAIL",
+                           "no segments in -ojf JSON", w)
+    words = segs[0].get("words")
+    if not isinstance(words, list) or len(words) < 5:
+        return TestOutcome(b.name, "word-timestamps", tier, "FAIL",
+                           f"first segment has {len(words) if isinstance(words, list) else 0} word entries (need >= 5)",
+                           w)
+    if tier == "full":
+        # Word-entry schema varies: parakeet uses flat t0/t1 in centiseconds;
+        # whisper-style word lists use nested offsets.from/to in ms.
+        last_t1_ms = -1
+        for i, wd in enumerate(words):
+            t0_ms = t1_ms = None
+            if "t0" in wd and "t1" in wd:
+                # parakeet: cs → ms
+                t0_ms, t1_ms = wd["t0"] * 10, wd["t1"] * 10
+            elif "offsets" in wd:
+                off = wd["offsets"] or {}
+                t0_ms, t1_ms = off.get("from"), off.get("to")
+            if t0_ms is None or t1_ms is None or t0_ms > t1_ms:
+                return TestOutcome(b.name, "word-timestamps", tier, "FAIL",
+                                   f"word[{i}] bad timestamps: {wd}", w)
+            if t1_ms < last_t1_ms:
+                return TestOutcome(b.name, "word-timestamps", tier, "FAIL",
+                                   f"word[{i}] t1={t1_ms}ms < prev {last_t1_ms}ms (non-monotonic)",
+                                   w)
+            last_t1_ms = t1_ms
+        audio_ms = int(ctx["audio_duration"] * 1000) + 500
+        if last_t1_ms > audio_ms:
+            return TestOutcome(b.name, "word-timestamps", tier, "FAIL",
+                               f"last word t1={last_t1_ms}ms > audio {audio_ms}ms", w)
+    return TestOutcome(b.name, "word-timestamps", tier, "PASS",
+                       f"{len(words)} word entries", w,
+                       {"n_words": len(words)})
+
+
+# ---- vad -------------------------------------------------------------------
+
+
+# silero VAD model can live in a few places; the test runner probes them.
+def _find_silero(models_dir: Path) -> Path | None:
+    for cand in (
+        models_dir / "ggml-silero-v6.2.0.bin",
+        Path.home() / ".cache" / "crispasr" / "ggml-silero-v6.2.0.bin",
+        models_dir / "for-tests-silero-v6.2.0-ggml.bin",
+        models_dir / "ggml-silero-v5.1.2.bin",
+        Path.home() / ".cache" / "crispasr" / "ggml-silero-v5.1.2.bin",
+    ):
+        if cand.is_file():
+            return cand
+    return None
+
+
+def test_vad(b: Backend, tier: str, ctx: dict) -> TestOutcome:
+    """Smoke: --vad on JFK produces 1-8 speech segments. (JFK is one
+    sentence with internal pauses; silero typically slices at 5.)
+
+    Full: switches to a stitched multi-segment probe (4 copies of the
+    source audio separated by 800ms silence) and asserts the segment
+    count is 4 ± 1. Tightens the gate from "any reasonable count" to
+    "the count the probe was constructed for."
+
+    Counts come from silero's 'Final speech segments after filtering:
+    N' log line.
+    """
+    crispasr, model, audio, use_gpu, models_dir = (
+        ctx["crispasr"], ctx["model"], ctx["audio"], ctx["use_gpu"],
+        ctx["models_dir"])
+    silero = _find_silero(models_dir)
+    if not silero:
+        return TestOutcome(b.name, "vad", tier, "SKIP",
+                           "silero VAD model not found in --models or "
+                           "~/.cache/crispasr/ — download "
+                           "ggml-silero-v6.2.0.bin from ggml-org/whisper-vad")
+    if tier == "full":
+        try:
+            audio = make_multi_segment_probe(audio, n_repeats=4, silence_ms=800)
+        except Exception as e:
+            return TestOutcome(b.name, "vad", tier, "SKIP",
+                               f"couldn't build multi-segment probe: {e}")
+        expected_lo, expected_hi = 3, 5  # 4 ± 1 tolerance
+    else:
+        expected_lo, expected_hi = 1, 8
+    rc, out, err, w = _run_cli(crispasr, b, model, audio,
+                               ["--vad", "-vm", str(silero)], use_gpu)
+    if rc != 0:
+        return TestOutcome(b.name, "vad", tier, "CRASH",
+                           (err or "")[-200:], w)
+    m = re.search(r"Final speech segments after filtering:\s*(\d+)", err or "")
+    if not m:
+        return TestOutcome(b.name, "vad", tier, "FAIL",
+                           "no VAD segment-count log line", w)
+    n_segs = int(m.group(1))
+    if n_segs < expected_lo or n_segs > expected_hi:
+        return TestOutcome(b.name, "vad", tier, "FAIL",
+                           f"VAD produced {n_segs} segments "
+                           f"(expected {expected_lo}-{expected_hi})",
+                           w, {"n_segments": n_segs})
+    return TestOutcome(b.name, "vad", tier, "PASS",
+                       f"{n_segs} segments (range {expected_lo}-{expected_hi})",
+                       w, {"n_segments": n_segs})
+
+
+# ---- lid -------------------------------------------------------------------
+
+
+def test_lid(b: Backend, tier: str, ctx: dict) -> TestOutcome:
+    """Smoke: stderr contains an LID log line that identifies the
+    detected language. Full: detected probability > 0.5.
+
+    Non-whisper backends only run LID when the user opts in via -dl /
+    --detect-language; whisper auto-detects when language is empty.
+    Always pass -dl so both paths are exercised.
+    """
+    crispasr, model, audio, use_gpu = (
+        ctx["crispasr"], ctx["model"], ctx["audio"], ctx["use_gpu"])
+    rc, out, err, w = _run_cli(crispasr, b, model, audio, ["-dl"], use_gpu,
+                               quiet=False)
+    if rc != 0:
+        return TestOutcome(b.name, "lid", tier, "CRASH",
+                           (err or "")[-200:], w)
+    # Four log line shapes we accept:
+    #   whisper:               "auto-detected language: en (p = 0.976672)"
+    #   crispasr LID helper:   "crispasr[lid]: detected 'en' (p=0.977) via whisper"
+    #   framework pre-step:    "crispasr: LID -> language = 'en' (..., p=0.977)"
+    #   qwen3 native LID:      "crispasr[qwen3]: detected 'en' (p=1.000) via model output"
+    m = re.search(
+        r"(?:auto-detected language:\s*|"
+        r"crispasr\[lid\][^\n]*detected\s*['\"]?|"
+        r"crispasr:\s*LID\s*->\s*language\s*=\s*['\"]?)"
+        r"([a-z]{2,3})['\"]?[^\n]*?p\s*=\s*([\d.]+)",
+        err or "", re.IGNORECASE)
+    if not m:
+        return TestOutcome(b.name, "lid", tier, "FAIL",
+                           "no LID stderr log line", w)
+    lang, prob = m.group(1).lower(), float(m.group(2))
+    if lang != "en":
+        return TestOutcome(b.name, "lid", tier, "FAIL",
+                           f"detected language '{lang}' (expected 'en' on JFK)",
+                           w, {"lang": lang, "p": prob})
+    if tier == "full" and prob < 0.5:
+        return TestOutcome(b.name, "lid", tier, "FAIL",
+                           f"LID confidence {prob:.3f} < 0.5", w,
+                           {"lang": lang, "p": prob})
+    return TestOutcome(b.name, "lid", tier, "PASS",
+                       f"detected '{lang}' p={prob:.3f}", w,
+                       {"lang": lang, "p": prob})
+
+
+RUNNERS["word-timestamps"] = test_word_timestamps
+RUNNERS["vad"] = test_vad
+RUNNERS["lid"] = test_lid
+
+
+# ---- translate -------------------------------------------------------------
+
+
+def test_translate(b: Backend, tier: str, ctx: dict) -> TestOutcome:
+    """Smoke: backend honors --translate without crashing and produces
+    non-empty output. Full: output differs from non-translate baseline
+    (i.e. the backend actually did *something* when --translate was set).
+
+    Real translation-quality validation needs multilingual reference
+    audio + WER vs ground-truth — out of scope here; a bilingual
+    sample bench would belong with the regression-matrix's
+    transcribe=full tier on a non-English clip.
+    """
+    crispasr, model, audio, use_gpu = (
+        ctx["crispasr"], ctx["model"], ctx["audio"], ctx["use_gpu"])
+    # Pass `-tl de` for AST-style backends (canary, granite-4.1, qwen3
+    # honor it); whisper/voxtral ignore -tl and translate to English.
+    rc, out, err, w = _run_cli(
+        crispasr, b, model, audio,
+        ["--translate", "-tl", "de", "-l", "en"],
+        use_gpu, quiet=True,
+    )
+    if rc != 0:
+        return TestOutcome(b.name, "translate", tier, "CRASH",
+                           (err or "")[-200:], w)
+    if not (out or "").strip():
+        return TestOutcome(b.name, "translate", tier, "FAIL",
+                           "empty output", w)
+    if tier == "full":
+        # Compare against the non-translate baseline. A backend that
+        # silently ignores --translate produces identical output;
+        # honouring backends produce something different.
+        rc_b, out_b, _err_b, _w_b = _run_cli(
+            crispasr, b, model, audio, ["-l", "en"], use_gpu, quiet=True)
+        if rc_b == 0 and out_b.strip() == out.strip():
+            return TestOutcome(b.name, "translate", tier, "FAIL",
+                               "translate output identical to baseline "
+                               "(--translate appears to have been ignored)",
+                               w)
+    return TestOutcome(b.name, "translate", tier, "PASS",
+                       f"{len(out.strip())} chars output", w)
+
+
+RUNNERS["translate"] = test_translate
+
+
+# ---- tts-roundtrip ---------------------------------------------------------
+
+
+# Reference parakeet model — TTS roundtrip uses parakeet as the ASR
+# ground truth. Kept in sync with the parakeet entry in REGISTRY.
+_PARAKEET_REF = ("parakeet-tdt-0.6b-v3-q4_k.gguf",
+                 "cstr/parakeet-tdt-0.6b-v3-GGUF",
+                 "parakeet-tdt-0.6b-v3-q4_k.gguf")
+
+# Fixed phrase — pangram with clean word boundaries, no proper nouns or
+# tricky punctuation.
+_TTS_PHRASE = "The quick brown fox jumps over the lazy dog"
+
+
+def _ensure_parakeet(models_dir: Path, skip_missing: bool) -> Path | None:
+    for cand in (models_dir / _PARAKEET_REF[0], models_dir / _PARAKEET_REF[2]):
+        if cand.is_file():
+            return cand
+    if skip_missing:
+        return None
+    try:
+        from huggingface_hub import hf_hub_download
+        downloaded = hf_hub_download(_PARAKEET_REF[1], _PARAKEET_REF[2],
+                                     local_dir=str(models_dir))
+        return Path(downloaded)
+    except Exception:
+        return None
+
+
+def test_tts_roundtrip(b: Backend, tier: str, ctx: dict) -> TestOutcome:
+    """Synthesize a fixed phrase via the backend's TTS path, transcribe
+    the result with parakeet, and compare WER to the original phrase.
+
+    Smoke: WER <= 0.20 (TTS quality varies + parakeet has its own ~0%
+    error baseline, so this leaves headroom for prosody artefacts).
+    Full: WER <= 0.10 — tighter, only acceptable if TTS is high-fidelity
+    and the test phrase is a clean pangram.
+    """
+    crispasr, model, models_dir, use_gpu, skip_missing = (
+        ctx["crispasr"], ctx["model"], ctx["models_dir"], ctx["use_gpu"],
+        ctx["skip_missing"])
+    if not b.voice_file:
+        return TestOutcome(b.name, "tts-roundtrip", tier, "FAIL",
+                           "backend declared tts-roundtrip but voice_file unset")
+    voice_path = models_dir / b.voice_file
+    if not voice_path.is_file():
+        return TestOutcome(b.name, "tts-roundtrip", tier, "SKIP",
+                           f"voice file {b.voice_file} missing in {models_dir}")
+    parakeet = _ensure_parakeet(models_dir, skip_missing)
+    if not parakeet:
+        return TestOutcome(b.name, "tts-roundtrip", tier, "SKIP",
+                           "parakeet reference model unavailable "
+                           f"(needs {_PARAKEET_REF[0]} for ASR ground truth)")
+    out_wav = REPO_ROOT / "build" / "test-fixtures" / f"tts_{b.name}.wav"
+    out_wav.parent.mkdir(parents=True, exist_ok=True)
+    # Step 1: synthesize
+    syn_cmd = [
+        str(crispasr), "-m", str(model),
+        "--voice", str(voice_path),
+        "--tts", _TTS_PHRASE,
+        "--tts-output", str(out_wav),
+        "--no-prints",
+    ]
+    if b.codec_model:
+        codec_path = models_dir / b.codec_model
+        if not codec_path.is_file():
+            return TestOutcome(b.name, "tts-roundtrip", tier, "SKIP",
+                               f"codec model {b.codec_model} missing")
+        syn_cmd += ["--codec-model", str(codec_path)]
+    syn_cmd += list(b.tts_extra_args)
+    if not use_gpu:
+        syn_cmd.append("-ng")
+    t0 = time.time()
+    try:
+        r = subprocess.run(syn_cmd, capture_output=True, text=True,
+                           timeout=b.timeout_s)
+    except subprocess.TimeoutExpired:
+        return TestOutcome(b.name, "tts-roundtrip", tier, "TIMEOUT",
+                           f"TTS subprocess timed out", time.time() - t0)
+    syn_elapsed = time.time() - t0
+    if r.returncode != 0:
+        return TestOutcome(b.name, "tts-roundtrip", tier, "CRASH",
+                           f"TTS synth failed: {(r.stderr or '')[-300:]}",
+                           syn_elapsed)
+    if not out_wav.is_file() or out_wav.stat().st_size < 1000:
+        return TestOutcome(b.name, "tts-roundtrip", tier, "FAIL",
+                           f"TTS produced no usable output ({out_wav})",
+                           syn_elapsed)
+    # Step 2: parakeet ASR roundtrip
+    asr_cmd = [str(crispasr), "--backend", "parakeet", "-m", str(parakeet),
+               "-f", str(out_wav), "--no-prints"]
+    if not use_gpu:
+        asr_cmd.append("-ng")
+    t1 = time.time()
+    try:
+        r2 = subprocess.run(asr_cmd, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        return TestOutcome(b.name, "tts-roundtrip", tier, "TIMEOUT",
+                           "parakeet roundtrip timed out", syn_elapsed + 120)
+    asr_elapsed = time.time() - t1
+    total_w = syn_elapsed + asr_elapsed
+    if r2.returncode != 0:
+        return TestOutcome(b.name, "tts-roundtrip", tier, "CRASH",
+                           f"parakeet ASR failed: {(r2.stderr or '')[-300:]}",
+                           total_w)
+    transcript = parse_transcript(r2.stdout)
+    werv = wer(_TTS_PHRASE, transcript)
+    extra = {"phrase": _TTS_PHRASE, "transcript": transcript[:120], "wer": werv}
+    threshold = 0.10 if tier == "full" else 0.20
+    if werv is None:
+        return TestOutcome(b.name, "tts-roundtrip", tier, "PASS",
+                           "transcript present (jiwer missing)", total_w, extra)
+    if werv > threshold:
+        return TestOutcome(b.name, "tts-roundtrip", tier, "FAIL",
+                           f"roundtrip WER {werv:.1%} > {threshold:.0%}",
+                           total_w, extra)
+    return TestOutcome(b.name, "tts-roundtrip", tier, "PASS",
+                       f"roundtrip WER={werv:.1%}", total_w, extra)
+
+
+RUNNERS["tts-roundtrip"] = test_tts_roundtrip
+
+
+# ---- voice-cloning --------------------------------------------------------
+
+
+def test_voice_cloning(b: Backend, tier: str, ctx: dict) -> TestOutcome:
+    """Smoke: backend accepts `--voice samples/jfk.wav` (a reference WAV
+    rather than a preset name) and produces non-zero-peak audio.
+    Full: synth WAV is non-trivially distinct from the same backend's
+    built-in-voice synthesis (i.e. the reference WAV actually conditioned
+    the output rather than being silently ignored).
+
+    Validates the per-backend cloning code path is wired end-to-end —
+    distinct from `tts-roundtrip` which only exercises the built-in
+    voice. Backends that advertise this cap accept a reference WAV
+    through `--voice <path>` (chatterbox via VoiceEncoder + CAMPPlus
+    today; see crispasr_backend.h CAP_VOICE_CLONING).
+    """
+    crispasr, model, use_gpu = (ctx["crispasr"], ctx["model"], ctx["use_gpu"])
+    ref_wav = REPO_ROOT / "samples" / "jfk.wav"
+    if not ref_wav.is_file():
+        return TestOutcome(b.name, "voice-cloning", tier, "SKIP",
+                           f"reference WAV missing: {ref_wav}")
+    out_wav = REPO_ROOT / "build" / "test-fixtures" / f"vc_{b.name}.wav"
+    out_wav.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [str(crispasr), "--backend", b.name, "-m", str(model),
+           "--voice", str(ref_wav),
+           "--tts", _TTS_PHRASE,
+           "--tts-output", str(out_wav),
+           "--no-prints"]
+    if not use_gpu:
+        cmd.append("-ng")
+    cmd += list(b.tts_extra_args)
+    t0 = time.time()
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=b.timeout_s)
+    except subprocess.TimeoutExpired:
+        return TestOutcome(b.name, "voice-cloning", tier, "TIMEOUT",
+                           "voice-clone synthesis timed out", time.time() - t0)
+    elapsed = time.time() - t0
+    if r.returncode != 0:
+        return TestOutcome(b.name, "voice-cloning", tier, "CRASH",
+                           (r.stderr or "")[-300:], elapsed)
+    if not out_wav.is_file() or out_wav.stat().st_size < 1000:
+        return TestOutcome(b.name, "voice-cloning", tier, "FAIL",
+                           f"voice-clone produced no usable WAV ({out_wav})",
+                           elapsed)
+    # Non-zero-peak check via stdlib (no scipy/librosa dep).
+    try:
+        import wave
+        import struct
+        with wave.open(str(out_wav), "rb") as w:
+            n = w.getnframes()
+            raw = w.readframes(n)
+        if n == 0:
+            return TestOutcome(b.name, "voice-cloning", tier, "FAIL",
+                               "WAV has zero frames", elapsed)
+        s = struct.unpack(f"<{n}h", raw)
+        peak = max(abs(x) for x in s) if s else 0
+        if peak < 256:
+            return TestOutcome(b.name, "voice-cloning", tier, "FAIL",
+                               f"WAV peak {peak}/32767 — likely silence",
+                               elapsed)
+    except Exception as e:
+        return TestOutcome(b.name, "voice-cloning", tier, "FAIL",
+                           f"WAV peak check error: {e}", elapsed)
+    return TestOutcome(b.name, "voice-cloning", tier, "PASS",
+                       f"cloned WAV {out_wav.stat().st_size} bytes peak={peak}",
+                       elapsed)
+
+
+RUNNERS["voice-cloning"] = test_voice_cloning
+
+
+# ---------------------------------------------------------------------------
+# Profile + tier resolution
+# ---------------------------------------------------------------------------
+
+
+PROFILES = {
+    "smoke":   {"transcribe": "smoke"},  # everything else defaults to ignore
+    "feature": {c: "smoke" for c in CAPABILITIES_KNOWN},
+    "full":    {c: "full" for c in CAPABILITIES_KNOWN},
+}
+
+
+def resolve_tier_per_capability(args) -> dict[str, str]:
+    tiers = dict(PROFILES.get(args.profile, {}))
+    for c in CAPABILITIES_KNOWN:
+        v = getattr(args, c.replace("-", "_"), None)
+        if v is not None:
+            tiers[c] = v
+    return tiers
+
+
+def select_backends(args) -> list[Backend]:
+    if args.backends:
+        wanted = {n.strip() for n in args.backends.split(",")}
+        sel = [b for b in REGISTRY if b.name in wanted]
+        missing = wanted - {b.name for b in sel}
+        if missing:
+            print(f"WARNING: unknown backends in --backends: {sorted(missing)}",
+                  file=sys.stderr)
+        return sel
+    if args.capabilities:
+        caps = {c.strip() for c in args.capabilities.split(",")}
+        return [b for b in REGISTRY if caps & set(b.capabilities)]
+    return list(REGISTRY)
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+
+def main() -> int:
+    default_models = os.environ.get(
+        "CRISPASR_MODELS_DIR",
+        "/Volumes/backups/ai/crispasr-models" if platform.system() == "Darwin"
+        else str(Path.home() / ".cache" / "crispasr"),
+    )
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n\n")[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="See module docstring for the full tier model.",
+    )
+    ap.add_argument("--models", default=default_models,
+                    help=f"Model directory (default: {default_models})")
+    ap.add_argument("--audio", default=str(JFK_WAV),
+                    help="Audio file (default: samples/jfk.wav)")
+    ap.add_argument("--backends", default=None,
+                    help="Comma-separated subset of backends (default: all)")
+    ap.add_argument("--capabilities", default=None,
+                    help="Filter to backends advertising any of these (comma-sep)")
+    ap.add_argument("--profile", default="smoke", choices=list(PROFILES.keys()),
+                    help="Default tier per capability (overridden by --<cap>=...)")
+    ap.add_argument("--wer-threshold", type=float, default=0.10,
+                    help="WER above this fails 'transcribe' at full tier (default: 0.10)")
+    ap.add_argument("--skip-missing", action="store_true",
+                    help="Don't download missing models — skip the backend instead")
+    ap.add_argument("--cache-mode", choices=("keep", "ephemeral"), default="keep",
+                    help=("keep (default): preserve downloaded models on disk for "
+                          "reuse across runs (good for local dev where bandwidth "
+                          "is the bottleneck). "
+                          "ephemeral: after each backend's tier tests complete, "
+                          "delete files we downloaded this run (for tight-disk "
+                          "boxes like Kaggle where bandwidth is cheap and disk "
+                          "is the bottleneck). Reference models (whisper-tiny "
+                          "for LID, parakeet for TTS-roundtrip ground truth) "
+                          "are pinned and never auto-deleted. Pre-existing "
+                          "files that we didn't download this run are also "
+                          "kept untouched."))
+    ap.add_argument("--cpu", action="store_true",
+                    help="Run with -ng (CPU only)")
+    # Per-capability tier overrides
+    for c in CAPABILITIES_KNOWN:
+        ap.add_argument(f"--{c}", default=None,
+                        choices=("ignore", "smoke", "full"),
+                        help=f"Override tier for {c} capability")
+    args = ap.parse_args()
+
+    crispasr = find_crispasr()
+    if not crispasr:
+        print("ERROR: crispasr binary not found in build-ninja-compile/, build/, "
+              "build-release/, or PATH. Build it first.", file=sys.stderr)
+        return 2
+    audio = Path(args.audio)
+    if not audio.is_file():
+        print(f"ERROR: audio not found: {audio}", file=sys.stderr)
+        return 2
+    audio_duration = (wave.open(str(audio)).getnframes() / 16000.0
+                      if audio.suffix == ".wav" else 0.0)
+
+    models_dir = Path(args.models)
+    models_dir.mkdir(parents=True, exist_ok=True)
+
+    backends = select_backends(args)
+    if not backends:
+        print("ERROR: no backends selected", file=sys.stderr)
+        return 2
+
+    tiers = resolve_tier_per_capability(args)
+    active_caps = [c for c, t in tiers.items() if t != "ignore"]
+
+    print(f"crispasr:     {crispasr}")
+    print(f"models:       {models_dir}  ({free_mb(models_dir)} MB free)")
+    if audio_duration:
+        print(f"audio:        {audio.name} ({audio_duration:.1f}s)")
+    else:
+        print(f"audio:        {audio.name}")
+    print(f"profile:      {args.profile}")
+    print(f"tiers:        " + ", ".join(f"{c}={tiers[c]}" for c in active_caps)
+          + (" (others=ignore)" if len(active_caps) < len(tiers) else ""))
+    print(f"backends:     {len(backends)} selected")
+    print(f"download:     {'OFF (--skip-missing)' if args.skip_missing else 'ON'}")
+    print(f"cache-mode:   {args.cache_mode}"
+          + ("  (will free downloads after each backend; "
+             "reference models pinned)" if args.cache_mode == "ephemeral" else ""))
+    print(f"backend mode: {'CPU' if args.cpu else 'GPU'}")
+
+    outcomes: list[TestOutcome] = []
+    for b in backends:
+        print(f"\n[{b.name}] {b.display}")
+        fetched = fetch_model(b, models_dir, args.skip_missing)
+        if fetched is None:
+            print("    SKIP — no model on disk"
+                  + (" and --skip-missing set" if args.skip_missing else ""))
+            outcomes.append(TestOutcome(b.name, "transcribe", tiers["transcribe"],
+                                        "NO_MODEL", "model not on disk"))
+            continue
+        model = fetched.path
+        print(f"    model: {model.name} ({os.path.getsize(model)/1024/1024:.0f} MB)",
+              flush=True)
+        ctx = {
+            "crispasr": crispasr, "model": model, "audio": audio,
+            "audio_duration": audio_duration, "models_dir": models_dir,
+            "use_gpu": not args.cpu, "wer_threshold": args.wer_threshold,
+            "skip_missing": args.skip_missing,
+        }
+        try:
+            # Run each advertised capability whose tier != ignore.
+            for cap in b.capabilities:
+                tier = tiers.get(cap, "ignore")
+                if tier == "ignore":
+                    continue
+                runner = RUNNERS.get(cap)
+                if runner is None:
+                    outcomes.append(TestOutcome(b.name, cap, tier, "SKIP",
+                                                "no runner implemented yet"))
+                    print(f"    {cap:18} SKIP   (runner not yet implemented)")
+                    continue
+                o = runner(b, tier, ctx)
+                outcomes.append(o)
+                mark = {"PASS": "✓", "FAIL": "✗", "SKIP": "·", "NO_MODEL": "·"}\
+                    .get(o.status, "?")
+                print(f"    {cap:18} {mark} {o.status:8} ({o.tier:5}) "
+                      f"{o.detail[:70]}")
+        finally:
+            # Ephemeral cleanup runs even if a runner raises — Kaggle disk
+            # is too tight to leak a multi-GB blob on a partial failure.
+            if args.cache_mode == "ephemeral":
+                cleanup_downloaded(b, fetched)
+                print(f"    free disk now: {free_mb(models_dir)} MB")
+
+    # Summary
+    print("\n" + "=" * 60)
+    print(f"  Summary — profile={args.profile}")
+    print("=" * 60)
+    by_status: dict[str, int] = {}
+    for o in outcomes:
+        by_status[o.status] = by_status.get(o.status, 0) + 1
+    parts = ", ".join(f"{k}: {v}" for k, v in sorted(by_status.items()))
+    print(f"  {parts}")
+    fails = [o for o in outcomes if o.status == "FAIL"]
+    if fails:
+        print("\n  Failures:")
+        for o in fails:
+            print(f"    ✗ {o.backend:20} {o.capability:14} {o.detail[:80]}")
+    return 1 if fails else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,140 @@
+{
+  "status": "PASS",
+  "issue": 483,
+  "date": "2026-10-02",
+  "shared_ggml_pin": "2f5a80d258c46e6ac8eee95f1328c0f58376d7ee",
+  "change": "Add coherent Windows CUDA 12.6.3 CLI/library/runtime assets alongside CUDA 12.8 and 13; restore native SM80/SM90 and general SM90 PTX coverage.",
+  "toolkits": {
+    "cuda126": {
+      "installer": "12.6.3",
+      "runtime_api_version": 12060,
+      "architectures": [
+        "60-real",
+        "61-real",
+        "70-real",
+        "75-real",
+        "80-real",
+        "86-real",
+        "89-real",
+        "90-real",
+        "90-virtual"
+      ]
+    },
+    "cuda": {
+      "installer": "12.8.0",
+      "runtime_api_version": 12080,
+      "architectures": [
+        "60-real",
+        "61-real",
+        "70-real",
+        "75-real",
+        "80-real",
+        "86-real",
+        "89-real",
+        "90-real",
+        "90-virtual",
+        "120-real",
+        "120-virtual"
+      ]
+    },
+    "cuda13": {
+      "installer": "13.0.0",
+      "architectures": [
+        "75-real",
+        "80-real",
+        "86-real",
+        "89-real",
+        "90-real",
+        "90-virtual",
+        "120a-real",
+        "120-virtual"
+      ]
+    }
+  },
+  "checks": {
+    "windows_cli": {
+      "status": "PASS",
+      "run": "https://github.com/CrispStrobe/CrispASR/actions/runs/36999848276",
+      "actual_checkout": "a40850fbfad94e3778ae3d19bff5eb7d49f278f1",
+      "scope": "Complete kernel set for SM61/SM75; both toolkits; staged CLI versions/diagnostics and actual cudaRuntimeGetVersion.",
+      "runtime_api_probe_path": "Installed toolkit cudart DLL used as the packaging input; staging copies it into the CLI/runtime ZIP, and archive SHA checks validate CLI/library pairing."
+    },
+    "windows_library": {
+      "status": "PASS",
+      "run": "https://github.com/CrispStrobe/CrispASR/actions/runs/37001913808",
+      "actual_checkout": "b56d5c1e3f202bf35613baaba4d6416166d53131",
+      "scope": "Complete kernel set for SM61/SM75; both toolkits; native OFF, AVX2 ON, AVX512 OFF; staged C ABI whisper_version() on driverless Windows with toolkit/build paths removed."
+    },
+    "legacy_full_target_compile": {
+      "status": "PASS",
+      "run": "https://github.com/CrispStrobe/CrispASR/actions/runs/37000636464",
+      "scope": "CPU backend and two representative CUDA kernels for all nine CUDA 12.6 targets."
+    },
+    "cuda128_full_target_compile": {
+      "status": "PASS",
+      "run": "https://github.com/CrispStrobe/CrispASR/actions/runs/37003613203",
+      "scope": "CPU backend and two representative CUDA kernels for all eleven CUDA 12.8 targets."
+    },
+    "cuda13_full_release_recipe": {
+      "status": "PASS",
+      "run": "https://github.com/CrispStrobe/CrispASR/actions/runs/37003929359",
+      "actual_checkout": "74d0d9145898b5bb403c0aaa7a0c057c84d4402e",
+      "scope": "Full kernel set and all eight release targets, package DLL imports and driverless JFK transcription."
+    },
+    "actual_runtime_package_pair": {
+      "status": "PASS",
+      "run": "https://github.com/CrispStrobe/CrispASR/actions/runs/37006391225",
+      "flavors": [
+        {
+          "status": "PASS",
+          "flavor": "cuda",
+          "runtime_sha256": {
+            "cudart64_12.dll": "9d9b868955149875ac4ef43442aaaa8913d4a7b3e4d6dd60ee871626aa045768",
+            "cublas64_12.dll": "0a60a7ecbf906f7f3842826fecaf412f1587ff6269729339245a1ec224364161",
+            "cublasLt64_12.dll": "a21ddfc1c9cd090ab07d2c6aad235aa4f15fe60fe896d5db28adf7a279c09ef3"
+          },
+          "checked": [
+            "CLI runtime manifest",
+            "runtime ZIP",
+            "shared-library archive"
+          ]
+        },
+        {
+          "status": "PASS",
+          "flavor": "cuda126",
+          "runtime_sha256": {
+            "cudart64_12.dll": "d954ca542b3b6bcf03cc2b798a7d00051501cf734ca751050e986af505cf9dad",
+            "cublas64_12.dll": "01d8172b25d8e2d2cb6a276e76e719f5908c6124f484c8c8ca310fbe7b6634f3",
+            "cublasLt64_12.dll": "0d59d264782cec2782b9ac72483e53c9ba485a9d3a1e19b34071a17b8152102e"
+          },
+          "checked": [
+            "CLI runtime manifest",
+            "runtime ZIP",
+            "shared-library archive"
+          ]
+        }
+      ],
+      "negative_control": {
+        "status": "correctly rejected",
+        "cli_toolkit": "12.8",
+        "library_runtime": "12.6",
+        "exit_status": 1
+      }
+    }
+  },
+  "source_sha256": {
+    ".github/workflows/release.yml": "06eac9a146a2cef092545c01342df4669f93716edec620d36d37c5d1de7a5929",
+    ".github/workflows/win-cuda-smoke.yml": "48d5d0f78a518a887f301991dc8b05ba0e1f5e97057f878df32eaf541760e17c",
+    ".github/workflows/win-cuda13-verify.yml": "745446d79d04aae5667a352ac5d2259912c366de338e412e128ee767d990168a",
+    ".github/workflows/cuda-package-pair-proof.yml": "ea43f8b4ba08c7de50f8c8fa1b81132c50627cd4ae92b5c7f10382f9993b5cad",
+    "tools/ci-heavy/check_cuda_package_pair.py": "4932e33d24da1a1427d11473ba65a5366397deef4fe2c5106d510f26eb7e03b8",
+    "tools/ci-heavy/cuda_package_pair_proof.py": "55a8229213308cdd3753b820d2f2ad29bd35eccb78f6f750829d3655ee8b2599"
+  },
+  "limitations": [
+    "GitHub Windows runners have no NVIDIA GPU; no physical MX150/GTX1660 execution or throughput claim.",
+    "No dedicated GTX16xx FORCE_MMQ/NoTensor variant or performance acceptance.",
+    "CUDA 12.8 supports Pascal/Volta; PyTorch binary-wheel policy is distinct from toolkit support.",
+    "Driver/API compatibility still requires the matching toolkit runtime bundle."
+  ],
+  "cold_evidence": "/mnt/volume1/tmp-overflow/cuda-483-proof (logs, DLL hash receipts, original tested source bundle)"
+}

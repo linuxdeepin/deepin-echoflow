@@ -1,0 +1,295 @@
+{
+  "issue": 486,
+  "date": "2026-10-02",
+  "runtime_and_worker_test_source": "51faf7b27034427ab5f70e7be69f83a16818da19",
+  "final_file_sha256": {
+    "src/nemotron.cpp": "f7d152e4e9ae78881c324199961747dc473de56aa6f02cd7d92e71c74338905c",
+    "src/paraformer.cpp": "471edbad4def0cd6047303fc3121f51e2acb3a6991d80f459df64f67c8ef7840",
+    "src/dia_tts.cpp": "266ddfe219f48aafd649e5851998cadec5f791eaf8ced56af722c8b22971f34b",
+    "tests/CMakeLists.txt": "348f8657dafc00072433a0e16f4644210ac8b8fc5cf32b0d67669e8a2aa42925",
+    "tests/test-model-cpu-threads.cpp": "705c8bbb6e3e959dd37c2e9cd299b2bcbac9a41135286da89ab32f669400ce62"
+  },
+  "baseline_worker_guard": {
+    "run": 36961987735,
+    "runtime": "f25f5cc5c13c9e2249083b677726f6cae6dd9f0f",
+    "permanent_equivalent_runtime": "d5582e8fdf79b18dd9b1c300c91e180c57da533a",
+    "modes": [
+      "linked",
+      "module"
+    ],
+    "expected_failed_cases_per_mode": 4,
+    "expected_worker_mismatches_per_mode": 11,
+    "observed_workers_for_positive_requests": 4
+  },
+  "fixed_worker_test": {
+    "run": 36961990177,
+    "modes": [
+      "linked",
+      "module"
+    ],
+    "passed_cases_per_mode": 6,
+    "passed_assertions_per_mode": 136,
+    "init_requests": [
+      1,
+      3,
+      8,
+      0,
+      -2
+    ],
+    "dia_setter_requests": [
+      1,
+      8,
+      0,
+      -2
+    ],
+    "nonpositive_default": 4
+  },
+  "ci": {
+    "run": 36961993401,
+    "passed_jobs": 13
+  },
+  "lint": {
+    "run": 36961996140,
+    "passed_checks": 10
+  },
+  "live_run": 36968384035,
+  "live": {
+    "sha": "95fce81666e40de4c243f34c7ab5b500bb6d54b3",
+    "models": {
+      "nemotron": {
+        "repo": "cstr/nemotron-3.5-asr-streaming-GGUF",
+        "revision": "bbd95a9ca5fa0dfca3312a122dfc45a2b578b9c2",
+        "_revision_note": "TODO: replace with actual 40-char SHA from HF repo.",
+        "file": "nemotron-3.5-asr-streaming-0.6b-q4_k.gguf",
+        "approx_size_mb": 458
+      },
+      "paraformer": {
+        "repo": "cstr/paraformer-zh-GGUF",
+        "revision": "86ea220d4110aac4be7c031ed2c8d8e2eeef6aa6",
+        "file": "paraformer-zh-q8_0.gguf",
+        "approx_size_mb": 226,
+        "_revision_note": "pinned to repo main HEAD (verified via list_repo_files 2026-07-13)"
+      },
+      "dia": {
+        "repo": "cstr/dia-1.6b-GGUF",
+        "revision": "3233fbcb32be47761d2e736857b6d1a075b9ba7e",
+        "file": "dia-1.6b-q8_0.gguf",
+        "approx_size_mb": 1600
+      }
+    },
+    "cases": {
+      "nemotron-1": {
+        "backend": "nemotron",
+        "threads": 1,
+        "outputs": [
+          {
+            "text": "And so my fellow Americans ask not what your country can do for you. <en-US> Ask what you can do for your country. <en-US>",
+            "seconds": 4.369925987999977
+          },
+          {
+            "text": "And so my fellow Americans ask not what your country can do for you. <en-US> Ask what you can do for your country. <en-US>",
+            "seconds": 4.324054238999963
+          }
+        ],
+        "seed": null
+      },
+      "nemotron-4": {
+        "backend": "nemotron",
+        "threads": 4,
+        "outputs": [
+          {
+            "text": "And so my fellow Americans ask not what your country can do for you. <en-US> Ask what you can do for your country. <en-US>",
+            "seconds": 4.377327908999973
+          },
+          {
+            "text": "And so my fellow Americans ask not what your country can do for you. <en-US> Ask what you can do for your country. <en-US>",
+            "seconds": 4.330758911000032
+          }
+        ],
+        "seed": null
+      },
+      "nemotron-8": {
+        "backend": "nemotron",
+        "threads": 8,
+        "outputs": [
+          {
+            "text": "And so my fellow Americans ask not what your country can do for you. <en-US> Ask what you can do for your country. <en-US>",
+            "seconds": 4.444871598999953
+          },
+          {
+            "text": "And so my fellow Americans ask not what your country can do for you. <en-US> Ask what you can do for your country. <en-US>",
+            "seconds": 4.407182273999979
+          }
+        ],
+        "seed": null
+      },
+      "nemotron-cli-8": {
+        "text": "And so my fellow Americans ask not what your country can do for you en-US Ask what you can do for your country en-US"
+      },
+      "paraformer-1": {
+        "backend": "paraformer",
+        "threads": 1,
+        "outputs": [
+          {
+            "text": "and so my fellow americans ask not what your country can do for you ask what you can do for your country",
+            "seconds": 0.8326251319999756
+          },
+          {
+            "text": "and so my fellow americans ask not what your country can do for you ask what you can do for your country",
+            "seconds": 0.7876625159999548
+          }
+        ],
+        "seed": null
+      },
+      "paraformer-4": {
+        "backend": "paraformer",
+        "threads": 4,
+        "outputs": [
+          {
+            "text": "and so my fellow americans ask not what your country can do for you ask what you can do for your country",
+            "seconds": 0.83120265499997
+          },
+          {
+            "text": "and so my fellow americans ask not what your country can do for you ask what you can do for your country",
+            "seconds": 0.7819170900000927
+          }
+        ],
+        "seed": null
+      },
+      "paraformer-8": {
+        "backend": "paraformer",
+        "threads": 8,
+        "outputs": [
+          {
+            "text": "and so my fellow americans ask not what your country can do for you ask what you can do for your country",
+            "seconds": 0.9814699669999527
+          },
+          {
+            "text": "and so my fellow americans ask not what your country can do for you ask what you can do for your country",
+            "seconds": 0.8872873200000413
+          }
+        ],
+        "seed": null
+      },
+      "paraformer-cli-8": {
+        "text": "and so my fellow americans ask not what your country can do for you ask what you can do for your country"
+      },
+      "dia-extended-baseline-4": {
+        "backend": "dia",
+        "threads": 4,
+        "outputs": [
+          {
+            "text": "The quick brown fox jumps over the lazy dog. <en-US>"
+          }
+        ],
+        "seed": 123,
+        "seconds": 26.537840143999915,
+        "sample_rate": 44100,
+        "audio_seconds": 2.147845804988662,
+        "phrase": "The quick brown fox jumps over the lazy dog. Please listen carefully, because this is a test of speech synthesis with a chosen number of CPU threads.",
+        "wer": 0.6666666666666666
+      },
+      "dia-extended-candidate-4": {
+        "backend": "dia",
+        "threads": 4,
+        "outputs": [
+          {
+            "text": "The quick brown fox jumps over the lazy dog. <en-US>"
+          }
+        ],
+        "seed": 123,
+        "seconds": 26.399730178000027,
+        "sample_rate": 44100,
+        "audio_seconds": 2.147845804988662,
+        "phrase": "The quick brown fox jumps over the lazy dog. Please listen carefully, because this is a test of speech synthesis with a chosen number of CPU threads.",
+        "wer": 0.6666666666666666
+      },
+      "dia-1": {
+        "backend": "dia",
+        "threads": 1,
+        "outputs": [
+          {
+            "text": "The quick brown fox jumps over the lazy dog. <en-US>"
+          }
+        ],
+        "seed": 123,
+        "seconds": 52.60292097499996,
+        "sample_rate": 44100,
+        "audio_seconds": 2.147845804988662,
+        "phrase": "The quick brown fox jumps over the lazy dog. Please listen carefully, because this is a test of speech synthesis with a chosen number of CPU threads.",
+        "wer": 0.6666666666666666
+      },
+      "dia-4": {
+        "backend": "dia",
+        "threads": 4,
+        "outputs": [
+          {
+            "text": "The quick brown fox jumps over the lazy dog. <en-US>"
+          }
+        ],
+        "seed": 123,
+        "seconds": 26.328095778000034,
+        "sample_rate": 44100,
+        "audio_seconds": 2.147845804988662,
+        "phrase": "The quick brown fox jumps over the lazy dog. Please listen carefully, because this is a test of speech synthesis with a chosen number of CPU threads.",
+        "wer": 0.6666666666666666
+      },
+      "dia-8": {
+        "backend": "dia",
+        "threads": 8,
+        "outputs": [
+          {
+            "text": "The quick brown fox jumps over the lazy dog. <en-US>"
+          }
+        ],
+        "seed": 123,
+        "seconds": 31.40768863300002,
+        "sample_rate": 44100,
+        "audio_seconds": 2.147845804988662,
+        "phrase": "The quick brown fox jumps over the lazy dog. Please listen carefully, because this is a test of speech synthesis with a chosen number of CPU threads.",
+        "wer": 0.6666666666666666
+      }
+    },
+    "timing_note": "Functional proof, not a performance benchmark.",
+    "dia_quality_scope": "Decoded-output parity with the unfixed default; full-prompt quality remains failing.",
+    "dia_existing_default_step_cap": 200,
+    "baseline_runtime_sha": "d5582e8fdf79b18dd9b1c300c91e180c57da533a"
+  },
+  "rejected_dia_cap_removal": {
+    "shipped": false,
+    "baseline_diagnostics": [
+      {
+        "run": 36965187732,
+        "seed": 123,
+        "step_override": 1024,
+        "wer": 0.8518518518518519
+      },
+      {
+        "run": 36966653943,
+        "seed": 42,
+        "step_override": 1024,
+        "wer": 0.72
+      }
+    ],
+    "note": "Full-length Dia quality failed in the unfixed runtime too. Production generation defaults are unchanged; live Dia acceptance is strict decoded-output/duration parity, not a full-prompt quality pass."
+  },
+  "landed_commit": "b33138b057268f573757ded8258e4afef2461ea8",
+  "main_validation": {
+    "ci": {
+      "run": 36969566591,
+      "passed_jobs": 13
+    },
+    "lint": {
+      "run": 36969566638,
+      "passed_checks": 10
+    },
+    "selected_nightly": {
+      "run": 36969566635,
+      "passed_jobs": 6,
+      "models": [
+        "nemotron-3.5-asr-streaming-0.6b",
+        "paraformer-zh"
+      ]
+    }
+  }
+}

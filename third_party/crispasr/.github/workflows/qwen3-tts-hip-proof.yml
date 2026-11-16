@@ -1,0 +1,101 @@
+name: Qwen3-TTS HIP proof (#337)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gfx1100-proof:
+    # GitHub-hosted GPU runners are NVIDIA. Attach an ephemeral AMD machine
+    # with these labels; the job then proves the shipping fallback on real HIP.
+    runs-on: [self-hosted, linux, x64, gfx1100]
+    timeout-minutes: 120
+    env:
+      WORK: /var/tmp/crispasr-337-${{ github.run_id }}
+      TALKER_URL: https://huggingface.co/cstr/qwen3-tts-0.6b-base-GGUF/resolve/main/qwen3-tts-12hz-0.6b-base.gguf
+      CODEC_URL: https://huggingface.co/cstr/qwen3-tts-tokenizer-12hz-GGUF/resolve/main/qwen3-tts-tokenizer-12hz.gguf
+      WHISPER_URL: https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin
+      DAPHNE_URL: https://commons.wikimedia.org/wiki/Special:FilePath/Daphne_Park_in_MI6_A_Century_in_the_Shadows_b00lv0bm.flac
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Prove this is the affected hardware class
+        run: |
+          set -euo pipefail
+          rocminfo | tee rocminfo.txt
+          grep -q 'gfx1100' rocminfo.txt
+
+      - name: Build the HIP CLI
+        run: |
+          set -euo pipefail
+          cmake -G Ninja -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_HIP=ON \
+            -DGPU_TARGETS=gfx1100 \
+            -DAMDGPU_TARGETS=gfx1100 \
+            -DCRISPASR_BUILD_TESTS=ON \
+            -DCRISPASR_BUILD_SERVER=OFF
+          cmake --build build --target crispasr-cli test-qwen3tts-params -j2
+          ctest --test-dir build -R qwen3_tts --output-on-failure
+
+      - name: Fetch the public reproduction assets
+        run: |
+          set -euo pipefail
+          mkdir -p "$WORK"
+          curl --fail --location --retry 5 "$TALKER_URL" -o "$WORK/talker-f16.gguf"
+          curl --fail --location --retry 5 "$CODEC_URL" -o "$WORK/codec.gguf"
+          curl --fail --location --retry 5 "$WHISPER_URL" -o "$WORK/whisper-tiny.en.bin"
+          curl --fail --location --retry 5 "$DAPHNE_URL" -o "$WORK/daphne.flac"
+          ffmpeg -y -i "$WORK/daphne.flac" -ar 24000 -ac 1 "$WORK/daphne.wav"
+
+      - name: Run the exact affected 0.6B-F16 shape on HIP
+        run: |
+          set -euo pipefail
+          REF_TEXT="I wanted to learn Russian. I wanted to serve in Russia. The enemy, the most interesting enemy. And also I was deeply interested by the Russians. I'd seen them on the streets of Vienna and how they behaved, and I felt anger about that. But also I felt an enormous interest in the country and the people as distinct from the philosophy, which I hated."
+          build/bin/crispasr --backend qwen3-tts \
+            -m "$WORK/talker-f16.gguf" --codec-model "$WORK/codec.gguf" \
+            --voice "$WORK/daphne.wav" --ref-text "$REF_TEXT" --i-have-rights \
+            --no-spoken-disclaimer --accept-marking-responsibility \
+            --tts "Good evening. I am the voice assistant running on this workstation." \
+            --tts-output "$WORK/hip.wav" -v 2>&1 | tee "$WORK/hip.log"
+
+          test -s "$WORK/hip.wav"
+          grep -q '#337 ROCm correctness fallback' "$WORK/hip.log"
+          grep -q 'ROCm 0.6B-F16 code predictor routed to CPU' "$WORK/hip.log"
+          if grep -Eqi 'non-finite|runaway|kv cache full' "$WORK/hip.log"; then
+            exit 1
+          fi
+          duration=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$WORK/hip.wav")
+          awk -v d="$duration" 'BEGIN { exit !(d > 1.0 && d < 30.0) }'
+
+          build/bin/crispasr -m "$WORK/whisper-tiny.en.bin" --gpu-backend cpu \
+            -f "$WORK/hip.wav" 2>&1 | tee "$WORK/roundtrip.log"
+          python - "$WORK/roundtrip.log" <<'PY'
+          import pathlib, re, sys
+          text = pathlib.Path(sys.argv[1]).read_text(errors="replace").lower()
+          wanted = {"good", "evening", "voice", "assistant", "workstation"}
+          got = set(re.findall(r"[a-z]+", text))
+          overlap = wanted & got
+          print(f"roundtrip word overlap: {len(overlap)}/{len(wanted)} {sorted(overlap)}")
+          if len(overlap) < 3:
+              raise SystemExit("ASR round-trip did not recognize the requested sentence")
+          PY
+
+      - name: Upload the proof log and WAV
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qwen3-tts-337-gfx1100-proof
+          path: |
+            /var/tmp/crispasr-337-${{ github.run_id }}/hip.log
+            /var/tmp/crispasr-337-${{ github.run_id }}/hip.wav
+            /var/tmp/crispasr-337-${{ github.run_id }}/roundtrip.log
+            rocminfo.txt
+
+      - name: Remove downloaded models and generated audio
+        if: always()
+        run: rm -rf -- /var/tmp/crispasr-337-${{ github.run_id }}

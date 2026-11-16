@@ -1,0 +1,48 @@
+name: AudioSeal CUDA proof bundle
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audioseal-cuda-proof-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bundle:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y ninja-build ccache patchelf
+      - uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: '12.4.1'
+          method: network
+          sub-packages: '["nvcc", "cudart", "cudart-dev", "nvrtc", "nvrtc-dev"]'
+          non-cuda-sub-packages: '["libcublas", "libcublas-dev"]' 
+      - uses: actions/cache/restore@v4
+        id: ccache
+        with:
+          path: ~/.cache/ccache
+          key: audioseal-cuda124-${{ runner.os }}-${{ github.sha }}
+          restore-keys: audioseal-cuda124-${{ runner.os }}-
+      - name: Build targeted CUDA proof and package runtime
+        run: python3 tools/ci-heavy/audioseal_cuda_bundle.py
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ~/.cache/ccache
+          key: ${{ steps.ccache.outputs.cache-primary-key }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: audioseal-cuda-proof-${{ github.sha }}
+          path: audioseal-cuda-out/
+          if-no-files-found: error
+          retention-days: 14

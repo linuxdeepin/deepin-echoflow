@@ -1,0 +1,83 @@
+name: Chatterbox KV-view live proof (#410)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  nano-cpu-ab:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      WORK: /tmp/chatterbox-kv-view-${{ github.run_id }}
+      T3_URL: https://huggingface.co/cstr/chatterbox-nano-GGUF/resolve/main/chatterbox-nano-t3-q4_k.gguf
+      S3GEN_URL: https://huggingface.co/cstr/chatterbox-turbo-GGUF/resolve/main/chatterbox-turbo-s3gen-q4_k.gguf
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Build bounded CPU CLI and unit regression
+        run: |
+          set -euo pipefail
+          cmake -G Ninja -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCRISPASR_BUILD_TESTS=ON \
+            -DCRISPASR_BUILD_SERVER=OFF
+          cmake --build build --target crispasr-cli test-flash-attn-kv-view -j2
+          build/bin/test-flash-attn-kv-view --reporter compact
+
+      - name: Fetch public Nano assets
+        run: |
+          set -euo pipefail
+          mkdir -p "$WORK"
+          curl --fail --location --retry 5 "$T3_URL" -o "$WORK/t3.gguf"
+          curl --fail --location --retry 5 "$S3GEN_URL" -o "$WORK/s3gen.gguf"
+
+      - name: Compare direct view with the old materialized path
+        run: |
+          set -euo pipefail
+          common=(--backend chatterbox-nano --gpu-backend cpu
+                  -m "$WORK/t3.gguf" --codec-model "$WORK/s3gen.gguf"
+                  --seed 42 --tts "Hello from Chatterbox Nano."
+                  --no-spoken-disclaimer --accept-marking-responsibility)
+
+          CRISPASR_CHATTERBOX_BENCH=1 \
+            build/bin/crispasr "${common[@]}" --tts-output "$WORK/direct.wav" \
+            2>&1 | tee "$WORK/direct.log"
+          CRISPASR_CHATTERBOX_BENCH=1 CRISPASR_CHATTERBOX_KV_CONT=1 \
+            build/bin/crispasr "${common[@]}" --tts-output "$WORK/materialized.wav" \
+            2>&1 | tee "$WORK/materialized.log"
+
+          test -s "$WORK/direct.wav"
+          # The container carries timestamped provenance metadata, so whole-file
+          # bytes legitimately differ. Compare decoded PCM and stream metadata.
+          python - "$WORK/direct.wav" "$WORK/materialized.wav" <<'PY'
+          import hashlib, sys, wave
+          def read(path):
+              with wave.open(path, "rb") as wav:
+                  params = wav.getparams()
+                  pcm = wav.readframes(wav.getnframes())
+              return params, pcm
+          direct, materialized = map(read, sys.argv[1:])
+          assert direct[0] == materialized[0], (direct[0], materialized[0])
+          assert direct[1] == materialized[1]
+          print("PCM sha256:", hashlib.sha256(direct[1]).hexdigest())
+          PY
+          grep -q 'chatterbox_bench: t3_ar_decode' "$WORK/direct.log"
+          grep -q 'chatterbox_bench: t3_ar_decode' "$WORK/materialized.log"
+
+      - name: Upload A/B proof
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chatterbox-kv-view-live-${{ github.run_id }}
+          path: |
+            /tmp/chatterbox-kv-view-${{ github.run_id }}/*.log
+            /tmp/chatterbox-kv-view-${{ github.run_id }}/*.wav
+
+      - name: Remove downloaded models
+        if: always()
+        run: rm -rf -- /tmp/chatterbox-kv-view-${{ github.run_id }}

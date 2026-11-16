@@ -1,0 +1,163 @@
+*.o
+*.a
+*.d
+*.bak
+.cache/
+.coreml/
+.test/
+.venv/
+.env
+.env.*
+!.env.example
+.vs/
+.vscode/
+.DS_Store
+.vimspector.json
+/CMakeSettings.json
+/talk-llama.dSYM/
+bandit_bench.json
+
+build/
+build-*/
+build_*/
+tmp/
+
+# In-source cmake artifacts (from accidental in-source cmake runs)
+CMakeCache.txt
+**/CMakeFiles/
+**/CTestTestfile.cmake
+DartConfiguration.tcl
+**/cmake_install.cmake
+**/Makefile
+whisper-config.cmake
+whisper-version.cmake
+whisper.pc
+ggml/ggml-config.cmake
+ggml/ggml-version.cmake
+
+# SPM
+.build/
+.swiftpm
+*.metallib
+
+# local benchmark models + profiling artifacts
+.bench-models/
+
+ggml-metal-embed.metal
+ggml-metal-embed.metal.tmp
+
+/main
+/stream
+/command
+/talk
+/talk-llama
+/bench
+/quantize
+/server
+/lsp
+
+arm_neon.h
+sync.sh
+libwhisper.a
+libwhisper.so
+compile_commands.json
+
+examples/arm_neon.h
+examples/crispasr.objc/crispasr.objc.xcodeproj/xcshareddata
+examples/crispasr.objc/crispasr.objc.xcodeproj/xcuserdata/
+examples/crispasr.objc/crispasr.objc.xcodeproj/project.xcworkspace/xcuserdata
+
+extra/bench-gg.txt
+
+models/*.mlmodel
+models/*.mlmodelc
+models/*.mlpackage
+models/*-encoder-openvino.xml
+models/*-encoder-openvino-cache/
+bindings/java/.gradle/
+bindings/java/.idea/
+.idea/
+
+benchmark_results.csv
+cmake-build-debug/
+.cxx/
+.gradle/
+local.properties
+.log
+.exe
+SETUP.md
+.claude/worktrees/
+.claude/CLAUDE.md
+.claude/scheduled_tasks.lock
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Local TTS scratch outputs
+tts_output.wav
+tidy.log
+
+# Rust build output
+target/
+**/*.rlib
+Cargo.lock
+
+# Claude session notes (private, do not publish)
+CLAUDE.md
+CLAUDE.*.md
+HANDOFF_NEXT_SESSION.md
+HANDOFF_*.md
+ref/
+
+# Qwen3-TTS reference samples (large WAV files, not source-controlled)
+samples/qwen3_tts/
+.local/
+SESSION_HANDOVER.md
+/handover-prompts/
+/docs/prompts/
+.ccache/
+tools/kaggle/q8-quantize/kaggle_harness.py
+
+# Fuzzer / parser-test runtime artifacts (tests/fuzz + the crafted-input tests)
+crispasr_fuzz_input.bin
+crispasr_*_regression_tmp.*
+crash-*
+leak-*
+timeout-*
+/tests/fuzz/corpus/
+tools/kaggle/fc-pw-requant/kaggle_harness.py
+tools/kaggle/fc-unified-graph-ab/kaggle_harness.py
+tools/kaggle/fc-pw-requant/only.txt
+/handover-*.md
+
+# #254 omnivoice reference artifacts (belong on HF fixtures, not git)
+*.encode-ref.gguf
+omnivoice-encode-ref.gguf
+/third_party/c2pa/
+a.out
+a.out.js
+a.out.wasm
+
+# F7 repo hygiene — session throwaway artifacts that keep showing up untracked.
+# (Deliberately NOT ignoring source WIP or release notes — those stay visible so
+# their owners commit/remove them: examples/cli/*.cpp, RELEASE_NOTES_*.md, etc.)
+*.log
+/failed_logs.txt
+*.latents
+/*.gguf
+/models/*.gguf
+/ggml-*.bin
+/probe_mime*
+/.codex-scratch/
+/models-test/
+/issue*-sample/
+# Kaggle bundled-fallback harnesses — regenerated per push (already ignored one-by-one)
+tools/kaggle/*/kaggle_harness.py
+
+# Agent/worktree scratch dir convention (see .claude/CLAUDE.md) — temp
+# clips, enrollment DBs, and log captures from live validation runs.
+/scratch/
+
+# .NET build output for the C# binding (dotnet build/test writes these in place)
+/bindings/csharp/**/bin/
+/bindings/csharp/**/obj/

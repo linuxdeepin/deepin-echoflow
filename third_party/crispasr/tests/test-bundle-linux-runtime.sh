@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+# test-bundle-linux-runtime.sh — regression test for scripts/bundle-linux-runtime.sh.
+#
+# The bug this pins down shipped twice before anyone could see it, because the
+# packaging scripts only ever ran inside a release job: `bundle-linux-runtime.sh`
+# rewrote RUNPATH to $ORIGIN *before* asking `ldd` what the binaries needed, so
+# any dependency reachable only through the binary's own RUNPATH became
+# `=> not found` and was quietly filtered out with the blank lines. On the HIP
+# leg that was `libomp.so` (ROCm's clang links OpenMP against LLVM's, which
+# lives in /opt/rocm/lib/llvm/lib); the tarball failed to package at all, and
+# only because check-bundled-deps.py happened to be downstream.
+#
+# Nothing here needs ROCm, or a GPU, or a release. A private directory plus
+# -Wl,-rpath reproduces the exact condition: a library the loader can find only
+# via the RUNPATH the bundler is about to erase.
+#
+# Skips (exit 77) anywhere the tools are missing, so it is inert on macOS.
+
+set -euo pipefail
+
+SKIP=77
+[ "$(uname -s)" = "Linux" ] || { echo "SKIP: Linux-only (ELF/patchelf/ldd)"; exit $SKIP; }
+for tool in cc patchelf ldd; do
+    command -v "$tool" >/dev/null 2>&1 || { echo "SKIP: $tool not installed"; exit $SKIP; }
+done
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BUNDLE="$HERE/../scripts/bundle-linux-runtime.sh"
+[ -f "$BUNDLE" ] || { echo "FAIL: no $BUNDLE"; exit 1; }
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+cat > "$WORK/dep.c" <<'EOF'
+int crispasr_test_dep(void) { return 42; }
+EOF
+cat > "$WORK/app.c" <<'EOF'
+#include <stdio.h>
+int crispasr_test_dep(void);
+int main(void) { printf("dep=%d\n", crispasr_test_dep()); return 0; }
+EOF
+
+# ── 1. a dependency reachable only via RUNPATH must be bundled ───────────────
+# This is the regression. Pre-fix the bundler reported success and copied
+# nothing, and the staged binary could not start once the private dir was gone.
+priv="$WORK/private-lib"
+stage="$WORK/stage"
+mkdir -p "$priv" "$stage"
+cc -shared -fPIC -o "$priv/libcrispasrtestdep.so" "$WORK/dep.c"
+cc -o "$WORK/app" "$WORK/app.c" -L"$priv" -lcrispasrtestdep -Wl,-rpath,"$priv"
+cp "$WORK/app" "$stage/app"
+
+bash "$BUNDLE" "$stage" > "$WORK/bundle.log" 2>&1 || {
+    cat "$WORK/bundle.log"; fail "bundler exited nonzero on a resolvable dependency"; }
+
+[ -f "$stage/libcrispasrtestdep.so" ] || {
+    cat "$WORK/bundle.log"
+    fail "libcrispasrtestdep.so was not bundled — the RUNPATH-only dependency was dropped"; }
+
+rp="$(patchelf --print-rpath "$stage/app")"
+[ "$rp" = '$ORIGIN' ] || fail "staged app RUNPATH is '$rp', expected \$ORIGIN"
+
+# The acceptance test is the binary starting with the original directory gone,
+# not the file being present. v0.8.18 shipped bundles that had every dependency
+# beside them and still could not load one.
+mv "$priv" "$priv.gone"
+out="$("$stage/app" 2>&1)" || { echo "$out"; fail "staged app does not run once its build-time libdir is gone"; }
+[ "$out" = "dep=42" ] || fail "staged app printed '$out', expected 'dep=42'"
+echo "  ok: RUNPATH-only dependency bundled, and the relocated binary runs"
+
+# ── 2. a genuinely unresolvable dependency must fail the release ─────────────
+# Without this arm arm 1 would also pass against a bundler that simply reports
+# everything as fine.
+priv2="$WORK/private-lib2"
+stage2="$WORK/stage2"
+mkdir -p "$priv2" "$stage2"
+cc -shared -fPIC -o "$priv2/libcrispasrtestgone.so" "$WORK/dep.c"
+cc -o "$WORK/app2" "$WORK/app.c" -L"$priv2" -lcrispasrtestgone -Wl,-rpath,"$priv2"
+cp "$WORK/app2" "$stage2/app2"
+rm -rf "$priv2"   # the library no longer exists anywhere
+
+if bash "$BUNDLE" "$stage2" > "$WORK/bundle2.log" 2>&1; then
+    cat "$WORK/bundle2.log"
+    fail "bundler reported success with an unresolvable dependency"
+fi
+grep -q "libcrispasrtestgone.so" "$WORK/bundle2.log" || {
+    cat "$WORK/bundle2.log"; fail "failure did not name the missing library"; }
+echo "  ok: an unresolvable dependency fails the bundler, by name"
+
+# ── 3. host-provided GPU runtimes must NOT fail it ───────────────────────────
+# CI runners have no GPU driver, so `libcuda.so.1 => not found` is the normal
+# state of the CUDA legs. If arm 2's check did not consult the same exclusion
+# list the copy loop uses, this is where it would take the whole release down.
+priv3="$WORK/private-lib3"
+stage3="$WORK/stage3"
+mkdir -p "$priv3" "$stage3"
+cc -shared -fPIC -Wl,-soname,libcuda.so.1 -o "$priv3/libcuda.so.1" "$WORK/dep.c"
+cc -o "$WORK/app3" "$WORK/app.c" "$priv3/libcuda.so.1" -Wl,-rpath,"$priv3"
+cp "$WORK/app3" "$stage3/app3"
+rm -rf "$priv3"
+
+bash "$BUNDLE" "$stage3" > "$WORK/bundle3.log" 2>&1 || {
+    cat "$WORK/bundle3.log"; fail "an absent host-provided runtime must not fail the bundler"; }
+# `[ … ] && fail` would take the whole script down under `set -e` on the
+# success path, since the AND-list itself then returns 1.
+if [ -f "$stage3/libcuda.so.1" ]; then fail "libcuda.so.1 must never be bundled"; fi
+echo "  ok: an absent host-provided runtime is tolerated and not bundled"
+
+# ── 4. a dependency already staged, but not yet reachable ───────────────────
+# bundle-c2pa.sh drops libc2pa_c.so into the directory before this script runs,
+# and crispasr-quantize used to have no $ORIGIN in its RUNPATH at all — so the
+# library sits right there and `ldd` still says `not found`. Making an
+# unresolved dependency fatal without this exemption would have failed every
+# Linux leg. It resolves once step 2 grants $ORIGIN, which is what the run
+# check below proves.
+priv4="$WORK/private-lib4"
+stage4="$WORK/stage4"
+mkdir -p "$priv4" "$stage4"
+cc -shared -fPIC -o "$priv4/libcrispasrteststaged.so" "$WORK/dep.c"
+cc -o "$WORK/app4" "$WORK/app.c" -L"$priv4" -lcrispasrteststaged -Wl,-rpath,"$priv4"
+cp "$WORK/app4" "$stage4/app4"
+cp "$priv4/libcrispasrteststaged.so" "$stage4/"
+rm -rf "$priv4"
+
+bash "$BUNDLE" "$stage4" > "$WORK/bundle4.log" 2>&1 || {
+    cat "$WORK/bundle4.log"; fail "a dependency already staged must not be treated as missing"; }
+out4="$("$stage4/app4" 2>&1)" || { echo "$out4"; fail "staged app4 does not run"; }
+[ "$out4" = "dep=42" ] || fail "staged app4 printed '$out4', expected 'dep=42'"
+echo "  ok: an already-staged dependency is not missing, and resolves once \$ORIGIN is set"
+
+# ── 5. a declared host-toolkit directory is not bundled, but IS reachable ────
+# Resolving the HIP closure honestly copied 2.2 GB of the build image's ROCm
+# install into a 97 MB tarball. CRISPASR_BUNDLE_HOST_DIRS says "this belongs to
+# the user's toolkit"; CRISPASR_BUNDLE_EXTRA_RPATH is what makes that true
+# rather than merely asserted. Both halves are checked here, because the first
+# without the second is just the original bug with better manners.
+priv5="$WORK/opt-fake-toolkit/lib"
+stage5="$WORK/stage5"
+mkdir -p "$priv5" "$stage5"
+cc -shared -fPIC -o "$priv5/libcrispasrtesthost.so" "$WORK/dep.c"
+cc -o "$WORK/app5" "$WORK/app.c" -L"$priv5" -lcrispasrtesthost -Wl,-rpath,"$priv5"
+cp "$WORK/app5" "$stage5/app5"
+
+CRISPASR_BUNDLE_HOST_DIRS="$WORK/opt-fake-toolkit" \
+CRISPASR_BUNDLE_EXTRA_RPATH="$priv5" \
+    bash "$BUNDLE" "$stage5" > "$WORK/bundle5.log" 2>&1 || {
+    cat "$WORK/bundle5.log"; fail "a declared host-toolkit dependency must not fail the bundler"; }
+
+if [ -f "$stage5/libcrispasrtesthost.so" ]; then
+    fail "a host-toolkit library must not be copied into the archive"
+fi
+grep -q "host   libcrispasrtesthost.so" "$WORK/bundle5.log" || {
+    cat "$WORK/bundle5.log"; fail "the decision not to ship it must be visible in the log"; }
+
+rp5="$(patchelf --print-rpath "$stage5/app5")"
+[ "$rp5" = "\$ORIGIN:$priv5" ] || fail "RUNPATH is '$rp5', expected \$ORIGIN plus the toolkit dir"
+
+# $ORIGIN must stay FIRST, or a host copy of a soname we DO ship would win.
+case "$rp5" in '$ORIGIN'*) : ;; *) fail "\$ORIGIN must come first in '$rp5'" ;; esac
+
+out5="$("$stage5/app5" 2>&1)" || { echo "$out5"; fail "app5 cannot reach its host-provided dependency"; }
+[ "$out5" = "dep=42" ] || fail "app5 printed '$out5', expected 'dep=42'"
+echo "  ok: host-toolkit dependency left out of the archive and still resolvable"
+
+echo "PASS: bundle-linux-runtime"

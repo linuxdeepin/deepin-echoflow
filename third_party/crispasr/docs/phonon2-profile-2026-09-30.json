@@ -1,0 +1,688 @@
+{
+  "ci_run": "https://github.com/CrispStrobe/CrispASR/actions/runs/36784469150",
+  "runtime_commit": "9e981663129c834bab1b33d3af151892a70df47b",
+  "model_revision": "3ed3e6ad6e7ce63affffeede37328ff756efaa2f",
+  "fixture_revision": "cf16f4594149db53b2eb3fff6e772ff83384a356",
+  "upstream_revision": "9c7fef3584499a88fe8d394427f45851bbb8b446",
+  "method": "Sequential isolated processes; 4 threads; one warmup per 11/55-second shape; median of three load-excluded uninstrumented calls. JFK repeated five times for 55-second case. Peak RSS includes load/warmup/inference.",
+  "linux_cpu": {
+    "hardware": "AMD EPYC 9V74, 4 vCPUs, Ubuntu 22.04, OpenBLAS-linked build; ggml CPU encoder kernels, BLAS mel projection",
+    "parity": {
+      "stages": [
+        {
+          "stage": "mel_spectrogram",
+          "status": "PASS",
+          "cos_min": 1.0,
+          "relative_rms_error": 9.044152814286971e-05,
+          "norm_ratio_error_bound": 9.044152814286971e-05
+        },
+        {
+          "stage": "encoder_output",
+          "status": "PASS",
+          "cos_min": 0.999997,
+          "relative_rms_error": 0.0005573454474296776,
+          "norm_ratio_error_bound": 0.0005573454474296776
+        },
+        {
+          "stage": "encoder_output_ref_mel",
+          "status": "PASS",
+          "cos_min": 0.999994,
+          "relative_rms_error": 0.0006572469898934878,
+          "norm_ratio_error_bound": 0.0006572469898934878
+        },
+        {
+          "stage": "pre_encode_output",
+          "status": "PASS",
+          "cos_min": 1.0,
+          "relative_rms_error": 0.00022539241606782287,
+          "norm_ratio_error_bound": 0.00022539241606782287
+        },
+        {
+          "stage": "encoder_layer_0",
+          "status": "PASS",
+          "cos_min": 1.0,
+          "relative_rms_error": 0.00024437043846584777,
+          "norm_ratio_error_bound": 0.00024437043846584777
+        },
+        {
+          "stage": "encoder_layer_1",
+          "status": "PASS",
+          "cos_min": 1.0,
+          "relative_rms_error": 0.00024735592851282684,
+          "norm_ratio_error_bound": 0.00024735592851282684
+        },
+        {
+          "stage": "encoder_layer_2",
+          "status": "PASS",
+          "cos_min": 1.0,
+          "relative_rms_error": 0.0002726148719411383,
+          "norm_ratio_error_bound": 0.0002726148719411383
+        },
+        {
+          "stage": "encoder_layer_3",
+          "status": "PASS",
+          "cos_min": 1.0,
+          "relative_rms_error": 0.000294768638503143,
+          "norm_ratio_error_bound": 0.000294768638503143
+        },
+        {
+          "stage": "encoder_layer_4",
+          "status": "PASS",
+          "cos_min": 1.0,
+          "relative_rms_error": 0.0002907366195527023,
+          "norm_ratio_error_bound": 0.0002907366195527023
+        },
+        {
+          "stage": "encoder_layer_5",
+          "status": "PASS",
+          "cos_min": 1.0,
+          "relative_rms_error": 0.0003302482354274943,
+          "norm_ratio_error_bound": 0.0003302482354274943
+        },
+        {
+          "stage": "encoder_layer_6",
+          "status": "PASS",
+          "cos_min": 1.0,
+          "relative_rms_error": 0.0003393358413400457,
+          "norm_ratio_error_bound": 0.0003393358413400457
+        },
+        {
+          "stage": "encoder_layer_7",
+          "status": "PASS",
+          "cos_min": 1.0,
+          "relative_rms_error": 0.00032679660264743393,
+          "norm_ratio_error_bound": 0.00032679660264743393
+        },
+        {
+          "stage": "encoder_layer_8",
+          "status": "PASS",
+          "cos_min": 1.0,
+          "relative_rms_error": 0.0003110516200883274,
+          "norm_ratio_error_bound": 0.0003110516200883274
+        },
+        {
+          "stage": "encoder_layer_9",
+          "status": "PASS",
+          "cos_min": 1.0,
+          "relative_rms_error": 0.00034673408257915626,
+          "norm_ratio_error_bound": 0.00034673408257915626
+        },
+        {
+          "stage": "encoder_layer_10",
+          "status": "PASS",
+          "cos_min": 0.999999,
+          "relative_rms_error": 0.00038292749800981256,
+          "norm_ratio_error_bound": 0.00038292749800981256
+        },
+        {
+          "stage": "encoder_layer_11",
+          "status": "PASS",
+          "cos_min": 0.999999,
+          "relative_rms_error": 0.00042372528516906123,
+          "norm_ratio_error_bound": 0.00042372528516906123
+        },
+        {
+          "stage": "encoder_layer_12",
+          "status": "PASS",
+          "cos_min": 0.999999,
+          "relative_rms_error": 0.00040879520721817474,
+          "norm_ratio_error_bound": 0.00040879520721817474
+        },
+        {
+          "stage": "encoder_layer_13",
+          "status": "PASS",
+          "cos_min": 1.0,
+          "relative_rms_error": 0.00038786289574902855,
+          "norm_ratio_error_bound": 0.00038786289574902855
+        },
+        {
+          "stage": "encoder_layer_14",
+          "status": "PASS",
+          "cos_min": 0.999999,
+          "relative_rms_error": 0.0004077548928894604,
+          "norm_ratio_error_bound": 0.0004077548928894604
+        },
+        {
+          "stage": "encoder_layer_15",
+          "status": "PASS",
+          "cos_min": 0.999999,
+          "relative_rms_error": 0.000425422166074585,
+          "norm_ratio_error_bound": 0.000425422166074585
+        },
+        {
+          "stage": "encoder_layer_16",
+          "status": "PASS",
+          "cos_min": 0.999999,
+          "relative_rms_error": 0.00047156900059461417,
+          "norm_ratio_error_bound": 0.00047156900059461417
+        },
+        {
+          "stage": "encoder_layer_17",
+          "status": "PASS",
+          "cos_min": 0.999999,
+          "relative_rms_error": 0.0004977836979099044,
+          "norm_ratio_error_bound": 0.0004977836979099044
+        },
+        {
+          "stage": "encoder_layer_18",
+          "status": "PASS",
+          "cos_min": 0.999999,
+          "relative_rms_error": 0.00046271811808705005,
+          "norm_ratio_error_bound": 0.00046271811808705005
+        },
+        {
+          "stage": "encoder_layer_19",
+          "status": "PASS",
+          "cos_min": 0.999999,
+          "relative_rms_error": 0.0004693325463528165,
+          "norm_ratio_error_bound": 0.0004693325463528165
+        },
+        {
+          "stage": "encoder_layer_20",
+          "status": "PASS",
+          "cos_min": 0.999999,
+          "relative_rms_error": 0.00043402337419375,
+          "norm_ratio_error_bound": 0.00043402337419375
+        },
+        {
+          "stage": "encoder_layer_21",
+          "status": "PASS",
+          "cos_min": 1.0,
+          "relative_rms_error": 0.0003924295619585287,
+          "norm_ratio_error_bound": 0.0003924295619585287
+        },
+        {
+          "stage": "encoder_layer_22",
+          "status": "PASS",
+          "cos_min": 0.999999,
+          "relative_rms_error": 0.0003702855096774394,
+          "norm_ratio_error_bound": 0.0003702855096774394
+        },
+        {
+          "stage": "encoder_layer_23",
+          "status": "PASS",
+          "cos_min": 0.999994,
+          "relative_rms_error": 0.0006572469898934878,
+          "norm_ratio_error_bound": 0.0006572469898934878
+        }
+      ],
+      "min_cos": 0.999994,
+      "max_norm_ratio_error_bound": 0.0006572469898934878
+    },
+    "benchmarks": {
+      "runtime-f16": {
+        "engine": "runtime",
+        "model": "models-live/phonon2-f16.gguf",
+        "host": "Linux-6.8.0-1064-azure-x86_64-with-glibc2.35",
+        "threads": 4,
+        "load_s": 0.171896672999992,
+        "trace_only": false,
+        "clips": [
+          {
+            "audio_s": 11.0,
+            "seconds": [
+              3.742706005000059,
+              3.7312072249999346,
+              3.730167657000038
+            ],
+            "median_s": 3.7312072249999346,
+            "realtime_factor": 0.33920065681817585,
+            "realtime_speed": 2.9481074989074596,
+            "transcript": "And so my fellow Americans, ask not what your country can do for you, ask what you can do for your country.",
+            "word_count": 22
+          },
+          {
+            "audio_s": 55.0,
+            "seconds": [
+              19.222134436000033,
+              19.265018208000015,
+              19.214040684999986
+            ],
+            "median_s": 19.222134436000033,
+            "realtime_factor": 0.3494933533818188,
+            "realtime_speed": 2.8612847435399087,
+            "transcript": "And so my fellow Americans ask not what your country can do for you. Ask what you can do for your country. And so my fellow Americans ask not what your country can do for you. Ask what you can do for your country. And so my fellow Americans, ask not what your country can do for you. Ask what you can do for your country. And so my fellow Americans, ask not what your country can do for you. Ask what you can do for your country. And so my fellow Americans, ask not what your country can do for you. Ask what you can do for your country.",
+            "word_count": 110
+          }
+        ],
+        "peak_rss_mb": 2249.03515625
+      },
+      "runtime-q8_0": {
+        "engine": "runtime",
+        "model": "models-live/phonon2-q8_0.gguf",
+        "host": "Linux-6.8.0-1064-azure-x86_64-with-glibc2.35",
+        "threads": 4,
+        "load_s": 0.11604910800008383,
+        "trace_only": false,
+        "clips": [
+          {
+            "audio_s": 11.0,
+            "seconds": [
+              1.760252381999976,
+              1.7991081589999567,
+              1.7540930389999403
+            ],
+            "median_s": 1.760252381999976,
+            "realtime_factor": 0.16002294381817964,
+            "realtime_speed": 6.249103885604144,
+            "transcript": "And so my fellow Americans, ask not what your country can do for you, ask what you can do for your country.",
+            "word_count": 22
+          },
+          {
+            "audio_s": 55.0,
+            "seconds": [
+              9.28780833999997,
+              9.300994792000097,
+              9.445831326000075
+            ],
+            "median_s": 9.300994792000097,
+            "realtime_factor": 0.16910899621818357,
+            "realtime_speed": 5.913345962445457,
+            "transcript": "And so my fellow Americans ask not what your country can do for you. Ask what you can do for your country. And so my fellow Americans ask not what your country can do for you. Ask what you can do for your country. And so my fellow Americans, ask not what your country can do for you. Ask what you can do for your country. And so my fellow Americans, ask not what your country can do for you. Ask what you can do for your country. And so my fellow Americans, ask not what your country can do for you. Ask what you can do for your country.",
+            "word_count": 110
+          }
+        ],
+        "peak_rss_mb": 1614.19921875
+      },
+      "runtime-q4_k": {
+        "engine": "runtime",
+        "model": "models-live/phonon2-q4_k.gguf",
+        "host": "Linux-6.8.0-1064-azure-x86_64-with-glibc2.35",
+        "threads": 4,
+        "load_s": 0.07592422099992291,
+        "trace_only": false,
+        "clips": [
+          {
+            "audio_s": 11.0,
+            "seconds": [
+              2.034588246999988,
+              2.0471723809999958,
+              2.0428188810000165
+            ],
+            "median_s": 2.0428188810000165,
+            "realtime_factor": 0.18571080736363788,
+            "realtime_speed": 5.384716238091159,
+            "transcript": "And so my fellow Americans, ask not what your country can do for you, ask what you can do for your country.",
+            "word_count": 22
+          },
+          {
+            "audio_s": 55.0,
+            "seconds": [
+              10.85809073400003,
+              10.885812740999995,
+              10.878439704000016
+            ],
+            "median_s": 10.878439704000016,
+            "realtime_factor": 0.1977898128000003,
+            "realtime_speed": 5.055872119213607,
+            "transcript": "And so my fellow Americans ask not what your country can do for you. Ask what you can do for your country. And so my fellow Americans ask not what your country can do for you. Ask what you can do for your country. And so my fellow Americans ask not what your country can do for you. Ask what you can do for your country. And so my fellow Americans ask not what your country can do for you. Ask what you can do for your country. And so my fellow Americans ask not what your country can do for you. Ask what you can do for your country.",
+            "word_count": 110
+          }
+        ],
+        "peak_rss_mb": 1320.3828125
+      },
+      "reference-cpu": {
+        "engine": "reference",
+        "model": "phonon2-source",
+        "host": "Linux-6.8.0-1064-azure-x86_64-with-glibc2.35",
+        "threads": 4,
+        "load_s": 22.336283267,
+        "trace_only": false,
+        "clips": [
+          {
+            "audio_s": 11.0,
+            "seconds": [
+              1.6160893219999934,
+              1.5805181470000207,
+              1.5695340470000474
+            ],
+            "median_s": 1.5805181470000207,
+            "realtime_factor": 0.14368346790909278,
+            "realtime_speed": 6.9597429304301786,
+            "transcript": "And so my fellow Americans, ask not what your country can do for you, ask what you can do for your country.",
+            "word_count": 22
+          },
+          {
+            "audio_s": 55.0,
+            "seconds": [
+              8.041965764999986,
+              8.124053593999975,
+              7.985723865000068
+            ],
+            "median_s": 8.041965764999986,
+            "realtime_factor": 0.14621755936363612,
+            "realtime_speed": 6.839123866874618,
+            "transcript": "And so my fellow Americans ask not what your country can do for you. Ask what you can do for your country. And so my fellow Americans ask not what your country can do for you. Ask what you can do for your country. And so my fellow Americans, ask not what your country can do for you. Ask what you can do for your country. And so my fellow Americans, ask not what your country can do for you. Ask what you can do for your country. And so my fellow Americans, ask not what your country can do for you. Ask what you can do for your country.",
+            "word_count": 110
+          }
+        ],
+        "peak_rss_mb": 3413.8359375
+      }
+    }
+  },
+  "macos_metal_ci": {
+    "hardware": "Apple M1 virtual machine, 3 vCPUs, 7 GB; Apple Paravirtual Metal device without SIMD-group matrix multiply",
+    "limitation": "CI throughput only; not physical M1/M5 performance.",
+    "parity": {
+      "stages": [
+        {
+          "stage": "mel_spectrogram",
+          "status": "PASS",
+          "cos_min": 1.0,
+          "relative_rms_error": 9.554387099163781e-05,
+          "norm_ratio_error_bound": 9.554387099163781e-05
+        },
+        {
+          "stage": "encoder_output",
+          "status": "PASS",
+          "cos_min": 0.999999,
+          "relative_rms_error": 0.0005126526521169205,
+          "norm_ratio_error_bound": 0.0005126526521169205
+        },
+        {
+          "stage": "encoder_output_ref_mel",
+          "status": "PASS",
+          "cos_min": 0.999992,
+          "relative_rms_error": 0.0006887948454083752,
+          "norm_ratio_error_bound": 0.0006887948454083752
+        },
+        {
+          "stage": "pre_encode_output",
+          "status": "PASS",
+          "cos_min": 1.0,
+          "relative_rms_error": 0.00022539241606782287,
+          "norm_ratio_error_bound": 0.00022539241606782287
+        },
+        {
+          "stage": "encoder_layer_0",
+          "status": "PASS",
+          "cos_min": 1.0,
+          "relative_rms_error": 0.00024437043846584777,
+          "norm_ratio_error_bound": 0.00024437043846584777
+        },
+        {
+          "stage": "encoder_layer_1",
+          "status": "PASS",
+          "cos_min": 1.0,
+          "relative_rms_error": 0.00024735592851282684,
+          "norm_ratio_error_bound": 0.00024735592851282684
+        },
+        {
+          "stage": "encoder_layer_2",
+          "status": "PASS",
+          "cos_min": 1.0,
+          "relative_rms_error": 0.0002726148719411383,
+          "norm_ratio_error_bound": 0.0002726148719411383
+        },
+        {
+          "stage": "encoder_layer_3",
+          "status": "PASS",
+          "cos_min": 1.0,
+          "relative_rms_error": 0.0002937451362861182,
+          "norm_ratio_error_bound": 0.0002937451362861182
+        },
+        {
+          "stage": "encoder_layer_4",
+          "status": "PASS",
+          "cos_min": 1.0,
+          "relative_rms_error": 0.0002897443444006453,
+          "norm_ratio_error_bound": 0.0002897443444006453
+        },
+        {
+          "stage": "encoder_layer_5",
+          "status": "PASS",
+          "cos_min": 1.0,
+          "relative_rms_error": 0.0003302482354274943,
+          "norm_ratio_error_bound": 0.0003302482354274943
+        },
+        {
+          "stage": "encoder_layer_6",
+          "status": "PASS",
+          "cos_min": 1.0,
+          "relative_rms_error": 0.0003393358413400457,
+          "norm_ratio_error_bound": 0.0003393358413400457
+        },
+        {
+          "stage": "encoder_layer_7",
+          "status": "PASS",
+          "cos_min": 1.0,
+          "relative_rms_error": 0.00032679660264743393,
+          "norm_ratio_error_bound": 0.00032679660264743393
+        },
+        {
+          "stage": "encoder_layer_8",
+          "status": "PASS",
+          "cos_min": 1.0,
+          "relative_rms_error": 0.000312074816207039,
+          "norm_ratio_error_bound": 0.000312074816207039
+        },
+        {
+          "stage": "encoder_layer_9",
+          "status": "PASS",
+          "cos_min": 1.0,
+          "relative_rms_error": 0.0003497845290534597,
+          "norm_ratio_error_bound": 0.0003497845290534597
+        },
+        {
+          "stage": "encoder_layer_10",
+          "status": "PASS",
+          "cos_min": 1.0,
+          "relative_rms_error": 0.00038292749800981256,
+          "norm_ratio_error_bound": 0.00038292749800981256
+        },
+        {
+          "stage": "encoder_layer_11",
+          "status": "PASS",
+          "cos_min": 0.999999,
+          "relative_rms_error": 0.0004370859923590766,
+          "norm_ratio_error_bound": 0.0004370859923590766
+        },
+        {
+          "stage": "encoder_layer_12",
+          "status": "PASS",
+          "cos_min": 0.999999,
+          "relative_rms_error": 0.0004163480055039609,
+          "norm_ratio_error_bound": 0.0004163480055039609
+        },
+        {
+          "stage": "encoder_layer_13",
+          "status": "PASS",
+          "cos_min": 0.999999,
+          "relative_rms_error": 0.00039562015366400915,
+          "norm_ratio_error_bound": 0.00039562015366400915
+        },
+        {
+          "stage": "encoder_layer_14",
+          "status": "PASS",
+          "cos_min": 0.999999,
+          "relative_rms_error": 0.00042414704938752916,
+          "norm_ratio_error_bound": 0.00042414704938752916
+        },
+        {
+          "stage": "encoder_layer_15",
+          "status": "PASS",
+          "cos_min": 0.999999,
+          "relative_rms_error": 0.00044135207097165097,
+          "norm_ratio_error_bound": 0.00044135207097165097
+        },
+        {
+          "stage": "encoder_layer_16",
+          "status": "PASS",
+          "cos_min": 0.999999,
+          "relative_rms_error": 0.0004923298999918613,
+          "norm_ratio_error_bound": 0.0004923298999918613
+        },
+        {
+          "stage": "encoder_layer_17",
+          "status": "PASS",
+          "cos_min": 0.999999,
+          "relative_rms_error": 0.0005016650522795723,
+          "norm_ratio_error_bound": 0.0005016650522795723
+        },
+        {
+          "stage": "encoder_layer_18",
+          "status": "PASS",
+          "cos_min": 0.999998,
+          "relative_rms_error": 0.0004772385611232545,
+          "norm_ratio_error_bound": 0.0004772385611232545
+        },
+        {
+          "stage": "encoder_layer_19",
+          "status": "PASS",
+          "cos_min": 0.999999,
+          "relative_rms_error": 0.00047241350398751766,
+          "norm_ratio_error_bound": 0.00047241350398751766
+        },
+        {
+          "stage": "encoder_layer_20",
+          "status": "PASS",
+          "cos_min": 0.999999,
+          "relative_rms_error": 0.00043507682898548237,
+          "norm_ratio_error_bound": 0.00043507682898548237
+        },
+        {
+          "stage": "encoder_layer_21",
+          "status": "PASS",
+          "cos_min": 1.0,
+          "relative_rms_error": 0.00039492117822493205,
+          "norm_ratio_error_bound": 0.00039492117822493205
+        },
+        {
+          "stage": "encoder_layer_22",
+          "status": "PASS",
+          "cos_min": 0.999999,
+          "relative_rms_error": 0.0003702855096774394,
+          "norm_ratio_error_bound": 0.0003702855096774394
+        },
+        {
+          "stage": "encoder_layer_23",
+          "status": "PASS",
+          "cos_min": 0.999992,
+          "relative_rms_error": 0.0006887948454083752,
+          "norm_ratio_error_bound": 0.0006887948454083752
+        }
+      ],
+      "min_cos": 0.999992,
+      "max_norm_ratio_error_bound": 0.0006887948454083752
+    },
+    "benchmarks": {
+      "runtime-f16": {
+        "engine": "runtime",
+        "model": "models-live/phonon2-f16.gguf",
+        "host": "macOS-15.7.9-arm64-arm-64bit",
+        "threads": 4,
+        "load_s": 1.4095895000000382,
+        "trace_only": false,
+        "clips": [
+          {
+            "audio_s": 11.0,
+            "seconds": [
+              12.961691416999884,
+              13.682529166999984,
+              13.204630209000015
+            ],
+            "median_s": 13.204630209000015,
+            "realtime_factor": 1.2004209280909104,
+            "realtime_speed": 0.8330411246581231,
+            "transcript": "And so my fellow Americans, ask not what your country can do for you, ask what you can do for your country.",
+            "word_count": 22
+          },
+          {
+            "audio_s": 55.0,
+            "seconds": [
+              36.44937725,
+              34.91536645799988,
+              35.466672374999916
+            ],
+            "median_s": 35.466672374999916,
+            "realtime_factor": 0.6448485886363621,
+            "realtime_speed": 1.5507516301069428,
+            "transcript": "And so my fellow Americans ask not what your country can do for you. Ask what you can do for your country. And so my fellow Americans ask not what your country can do for you. Ask what you can do for your country. And so my fellow Americans, ask not what your country can do for you. Ask what you can do for your country. And so my fellow Americans, ask not what your country can do for you. Ask what you can do for your country. And so my fellow Americans, ask not what your country can do for you. Ask what you can do for your country.",
+            "word_count": 110
+          }
+        ],
+        "peak_rss_mb": 2577.65625
+      },
+      "runtime-q8_0": {
+        "engine": "runtime",
+        "model": "models-live/phonon2-q8_0.gguf",
+        "host": "macOS-15.7.9-arm64-arm-64bit",
+        "threads": 4,
+        "load_s": 1.3933535409998967,
+        "trace_only": false,
+        "clips": [
+          {
+            "audio_s": 11.0,
+            "seconds": [
+              8.396138625000049,
+              8.84470295899996,
+              7.862387542000079
+            ],
+            "median_s": 8.396138625000049,
+            "realtime_factor": 0.763285329545459,
+            "realtime_speed": 1.310126058096133,
+            "transcript": "And so my fellow Americans, ask not what your country can do for you, ask what you can do for your country.",
+            "word_count": 22
+          },
+          {
+            "audio_s": 55.0,
+            "seconds": [
+              15.167067792000125,
+              14.986046084000009,
+              15.451908959000093
+            ],
+            "median_s": 15.167067792000125,
+            "realtime_factor": 0.2757648689454568,
+            "realtime_speed": 3.626277719218066,
+            "transcript": "And so my fellow Americans ask not what your country can do for you. Ask what you can do for your country. And so my fellow Americans ask not what your country can do for you. Ask what you can do for your country. And so my fellow Americans, ask not what your country can do for you. Ask what you can do for your country. And so my fellow Americans, ask not what your country can do for you. Ask what you can do for your country. And so my fellow Americans, ask not what your country can do for you. Ask what you can do for your country.",
+            "word_count": 110
+          }
+        ],
+        "peak_rss_mb": 1958.46875
+      },
+      "runtime-q4_k": {
+        "engine": "runtime",
+        "model": "models-live/phonon2-q4_k.gguf",
+        "host": "macOS-15.7.9-arm64-arm-64bit",
+        "threads": 4,
+        "load_s": 0.8329222499999105,
+        "trace_only": false,
+        "clips": [
+          {
+            "audio_s": 11.0,
+            "seconds": [
+              8.387164749999783,
+              8.404330042000083,
+              8.501063082999963
+            ],
+            "median_s": 8.404330042000083,
+            "realtime_factor": 0.7640300038181894,
+            "realtime_speed": 1.3088491224200178,
+            "transcript": "And so my fellow Americans, ask not what your country can do for you. Ask what you can do for your country.",
+            "word_count": 22
+          },
+          {
+            "audio_s": 55.0,
+            "seconds": [
+              15.955181541000002,
+              15.676445166999883,
+              16.41551675000005
+            ],
+            "median_s": 15.955181541000002,
+            "realtime_factor": 0.2900942098363637,
+            "realtime_speed": 3.4471560137793857,
+            "transcript": "And so my fellow Americans ask not what your country can do for you. Ask what you can do for your country. And so my fellow Americans ask not what your country can do for you. Ask what you can do for your country. And so my fellow Americans ask not what your country can do for you. Ask what you can do for your country. And so my fellow Americans ask not what your country can do for you. Ask what you can do for your country. And so my fellow Americans ask not what your country can do for you. Ask what you can do for your country.",
+            "word_count": 110
+          }
+        ],
+        "peak_rss_mb": 1652.609375
+      }
+    }
+  },
+  "model_checksums": [
+    "57e9d16382a81282b4f03da60e6c9351c6ea9fdfcf25cdab8143b4314518148c  phonon2-f16.gguf",
+    "a8c4a874195b83604ceb5d87c0e9b5ddf641ef1d5ec2d8e1ca2a040d25b2563a  phonon2-q8_0.gguf",
+    "c8a55e1009da474f9ae96b1500a6901e739e862cc7b1c3923251bc37e72b16db  phonon2-q4_k.gguf"
+  ],
+  "parity_coverage": "28 frontend/encoder comparisons: mel, subsampling, 24 encoder layers, encoder output with runtime/reference mel. Decoder validated through transcripts; numerical predictor/joint stages not captured."
+}

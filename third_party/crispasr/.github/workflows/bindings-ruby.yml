@@ -1,0 +1,46 @@
+name: Bindings Tests (Ruby)
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ubuntu-22:
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: bindings/ruby
+    steps:
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.2'
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Cache whisper models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/crispasr
+          key: ruby-whisper-models-base-en
+
+      - name: Pre-download model (with retry)
+        run: |
+          mkdir -p ~/.cache/crispasr/huggingface.co/ggerganov/whisper.cpp/resolve/main
+          MODEL=~/.cache/crispasr/huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
+          if [ ! -f "$MODEL" ] || [ $(wc -c < "$MODEL") -lt 1000000 ]; then
+            for i in 1 2 3; do
+              curl -L --retry 3 --retry-delay 10 -o "$MODEL" \
+                https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin && break
+              sleep 15
+            done
+          fi
+
+      - run: rake test

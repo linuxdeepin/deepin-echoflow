@@ -1,0 +1,179 @@
+# Proof for #400 (Windows CUDA 13 package), in the #403 regime: never ship a
+# package recipe we have not executed. This workflow rebuilds the EXACT
+# build-windows-cuda13 release recipe (keep the two in lockstep), then proves
+# what a GPU-less GitHub runner can prove about it:
+#
+#   1. the full ggml-cuda kernel set compiles and links under nvcc 13 + MSVC;
+#   2. the packaged runtime DLLs are the CUDA 13 ones (cudart64_13.dll,
+#      cublas64_13.dll, cublasLt64_13.dll) and ggml-cuda.dll actually imports
+#      cudart64_13.dll — not a stray *_12 runtime;
+#   3. the packaged crispasr.exe, run from the package directory on a machine
+#      with NO NVIDIA driver, cleanly falls back to CPU and transcribes
+#      samples/jfk.wav (the zip's promise for driverless hosts).
+#
+# What it cannot prove: CUDA 13 kernels *executing* on a GPU — GitHub-hosted
+# runners have none, and Kaggle is no substitute (Linux-only, randomly assigns
+# P100 which CUDA 13 dropped entirely, and its r560 driver would need
+# forward-compat shims). GPU execution shares all device code with the proven
+# Linux cuda13 tarball; the Windows-specific deltas are toolchain, packaging,
+# and DLL wiring — which this workflow does prove.
+name: Win CUDA13 Verify
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/win-cuda13-verify.yml'
+      - '.github/workflows/release.yml'
+      - 'CMakeLists.txt'
+      - 'examples/cli/CMakeLists.txt'
+      - 'examples/cli/crispasr_diagnostics.cpp'
+
+# One run per workflow per branch: a newer push cancels the older run. On
+# main nothing is cancelled (every main commit keeps its verdict).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  # Cheap gate: on a branch push, run the heavy job only when the BRANCH ITSELF
+  # changes a watched path (vs its merge-base with main). A rebase onto a main
+  # that touched CMakeLists.txt no longer queues one heavy run per branch.
+  # main, pull requests and manual dispatch always run. See the script's header.
+  scope:
+    runs-on: ubuntu-latest
+    outputs:
+      relevant: ${{ steps.scope.outputs.relevant }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: scope
+        run: |
+          if [ "${{ github.event_name }}" != "push" ] || [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          else
+            git fetch --no-tags origin main || true   # no base -> script answers true
+            python3 .github/scripts/branch_touches_paths.py "$GITHUB_WORKFLOW_REF_PATH" origin/main >> "$GITHUB_OUTPUT" \
+              || echo "relevant=true" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GITHUB_WORKFLOW_REF_PATH: .github/workflows/win-cuda13-verify.yml
+
+  win-cuda13-verify:
+    needs: scope
+    if: needs.scope.outputs.relevant == 'true'
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      # ── lockstep with release.yml build-windows-cuda13 from here… ───────────
+      - name: Install CUDA Toolkit 13.0.0
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: '13.0.0'
+          method: 'network'
+          # "crt" and "nvvm" are NEW in the CUDA 13 Windows installer (crt/host_config.h, cicc).
+          sub-packages: '["nvcc", "crt", "nvvm", "cudart", "cublas", "cublas_dev", "nvrtc", "nvrtc_dev", "nvtx", "cuda_profiler_api", "visual_studio_integration"]'
+
+      - name: Build
+        shell: cmd
+        run: |
+          for /f "tokens=*" %%i in ('"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath') do set VSINSTALL=%%i
+          call "%VSINSTALL%\VC\Auxiliary\Build\vcvars64.bat"
+          cmake -S . -B build -G Ninja ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DGGML_CUDA=ON ^
+            -DGGML_NATIVE=OFF -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON ^
+            -DCMAKE_CUDA_ARCHITECTURES="75-real;80-real;86-real;89-real;90-real;90-virtual;120a-real;120-virtual" ^
+            -DCRISPASR_OPUS_FETCH=ON
+          cmake --build build --target crispasr-cli crispasr-quantize -j %NUMBER_OF_PROCESSORS%
+
+      - name: Package (complete CUDA 13 bundle, as the release job does)
+        shell: pwsh
+        run: |
+          $full = "release\crispasr-windows-x86_64-cuda13"
+          New-Item -ItemType Directory -Force $full | Out-Null
+
+          Copy-Item build\bin\crispasr.exe          $full\
+          Copy-Item build\bin\crispasr-quantize.exe $full\
+          $appDlls = Get-ChildItem build\bin\*.dll | Where-Object { $_.Name -notlike 'Catch2*' }
+          $appDlls | Copy-Item -Destination $full\
+
+          # CUDA 13.0 moved the Windows runtime DLLs from bin\ to bin\x64\ —
+          # search recursively so either layout works, dedupe by file name.
+          $cudaDlls = @('cudart64_*.dll', 'cublas64_*.dll', 'cublasLt64_*.dll') |
+            ForEach-Object { Get-ChildItem "$env:CUDA_PATH\bin" -Recurse -Filter $_ } |
+            Group-Object Name | ForEach-Object { $_.Group[0] }
+          if ($cudaDlls.Count -ne 3) {
+            throw "Expected exactly three CUDA runtime DLLs (cudart, cublas, cublasLt), found $($cudaDlls.Count)"
+          }
+          $notMajor13 = @($cudaDlls | Where-Object { $_.Name -notmatch '64_13\.dll$' })
+          if ($notMajor13.Count -ne 0) {
+            throw "CUDA 13 job picked up non-13 runtime DLLs: $($notMajor13.Name -join ', ')"
+          }
+          $cudaDlls | Copy-Item -Destination $full
+
+          Copy-Item LICENSE $full\
+          Copy-Item THIRD_PARTY_NOTICES.txt $full\
+          Get-ChildItem $full | Format-Table Name, Length
+      # ── …lockstep with release.yml build-windows-cuda13 to here ─────────────
+
+      - name: Prove packaged CLI reports CUDA 13 on both surfaces
+        shell: pwsh
+        run: |
+          $exe = Resolve-Path release\crispasr-windows-x86_64-cuda13\crispasr.exe
+          $version = (& $exe --version 2>&1) -join "`n"
+          if ($LASTEXITCODE -ne 0) { throw "--version exited $LASTEXITCODE" }
+          Write-Host $version
+          if ($version -notmatch 'ggml backends\s*:\s*.*cuda') { throw '--version omitted the CUDA backend' }
+          if ($version -notmatch 'cuda toolkit\s*:\s*13\.') { throw '--version omitted the CUDA 13 toolkit' }
+          if ($version -notmatch 'cuda runtime ABI\s*:\s*13\b') { throw '--version omitted CUDA runtime ABI 13' }
+
+          $diagnostics = (& $exe --diagnostics 2>&1) -join "`n"
+          if ($LASTEXITCODE -ne 0) { throw "--diagnostics exited $LASTEXITCODE" }
+          Write-Host $diagnostics
+          if ($diagnostics -notmatch 'cuda toolkit\s*:\s*13\.') { throw '--diagnostics omitted CUDA toolkit 13' }
+          if ($diagnostics -notmatch 'cuda runtime ABI\s*:\s*13\b') { throw '--diagnostics omitted CUDA runtime ABI 13' }
+          Write-Host 'WIN_CUDA13_REPORT_OK — --version and --diagnostics identify CUDA 13'
+
+      - name: Assert ggml-cuda.dll is wired to the CUDA 13 runtime
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
+          $deps = (& $dumpbin.FullName /dependents release\crispasr-windows-x86_64-cuda13\ggml-cuda.dll) -join "`n"
+          Write-Host $deps
+          # cudart is linked STATICALLY (CMake's CUDA_USE_STATIC_CUDA_RUNTIME
+          # default), so it never appears in the import table — run 33264970611
+          # proved that the hard way. cublas is the dynamic CUDA dependency, and
+          # its major-suffixed name is the CUDA-13-linkage proof.
+          if ($deps -notmatch 'cublas64_13\.dll') { throw "ggml-cuda.dll does not import cublas64_13.dll" }
+          if ($deps -match '64_12\.dll')          { throw "ggml-cuda.dll imports a CUDA 12 runtime DLL" }
+
+      - name: Run the packaged exe on a GPU-less host (CPU fallback E2E)
+        shell: pwsh
+        run: |
+          cmd /c "models\download-ggml-model.cmd tiny.en models/"
+          if (-not (Test-Path models\ggml-tiny.en.bin)) { throw "model download failed" }
+          Copy-Item models\ggml-tiny.en.bin release\crispasr-windows-x86_64-cuda13\
+          Copy-Item samples\jfk.wav         release\crispasr-windows-x86_64-cuda13\
+          Push-Location release\crispasr-windows-x86_64-cuda13
+          # Run exactly as a user would from the unzipped folder. This runner
+          # has no NVIDIA driver, so this proves the CUDA 13 zip's driverless
+          # CPU fallback rather than crashing on a missing nvcuda.dll.
+          $out = (& .\crispasr.exe -m ggml-tiny.en.bin jfk.wav 2>&1) -join "`n"
+          $code = $LASTEXITCODE
+          Pop-Location
+          Write-Host $out
+          if ($code -ne 0) { throw "crispasr.exe exited with $code" }
+          if ($out -notmatch '(?i)your country') { throw "transcript does not contain the expected JFK content" }
+          Write-Host "WIN_CUDA13_VERIFY_OK — packaged exe transcribed jfk.wav via CPU fallback"
+
+      - name: Upload the verified package
+        uses: actions/upload-artifact@v4
+        with:
+          name: crispasr-windows-x86_64-cuda13-verify
+          path: release/crispasr-windows-x86_64-cuda13

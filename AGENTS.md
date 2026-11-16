@@ -14,12 +14,6 @@ shell spec checks in `tests/spec/` and performance benchmarks in
 
 ## Build, Test, and Development Commands
 
-Initialize fresh clones with:
-
-```bash
-git submodule update --init --recursive third_party/crispasr
-```
-
 Configure, build, and run the full test suite:
 
 ```bash

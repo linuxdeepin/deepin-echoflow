@@ -1,0 +1,24 @@
+# Reference-dump env for `--backend vibevoice`
+# Bootstrap: tools/bootstrap_ref_env.sh vibevoice
+#
+# Hand-curated. VibeVoice-ASR 7B = two σ-VAE encoders + connectors + Qwen2
+# decoder. Local upstream clone is at /Volumes/backups/ai/vibevoice-7b-tts-src.
+# The existing /Volumes/backups/ai/vibevoice-ref-jfk.gguf archive was dumped
+# from an env that matched these deps.
+
+numpy>=2.0
+gguf>=0.10
+
+# Hugging Face stack for the Qwen2 decoder + sigma-VAE loader
+safetensors>=0.4
+torch>=2.5
+transformers>=4.45
+
+# librosa drives the 16 kHz → 24 kHz resample in the shared dump loader
+librosa>=0.10
+
+# Upstream vibevoice: local clone at /Volumes/backups/ai/vibevoice-7b-tts-src.
+# Install in editable mode so the dumper picks up its modeling_vibevoice etc.
+#   pip install -e /Volumes/backups/ai/vibevoice-7b-tts-src
+# From-network alternative:
+#   vibevoice @ git+https://github.com/microsoft/VibeVoice.git@<sha>

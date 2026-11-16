@@ -1,0 +1,16 @@
+{
+  "id": "${KAGGLE_ACCOUNT}/crispasr-vibeasr-bitnet-lm-precision",
+  "title": "CrispASR VibeASR BitNet LM Precision",
+  "code_file": "vibeasr_bitnet_lm_precision.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_internet": "true",
+  "competition_sources": [],
+  "dataset_sources": [
+    "${KAGGLE_ACCOUNT}/crispasr-hf-token"
+  ],
+  "kernel_sources": [],
+  "model_sources": []
+}

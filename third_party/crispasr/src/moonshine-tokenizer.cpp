@@ -1,0 +1,167 @@
+#include "moonshine-tokenizer.h"
+
+#include <cstdio>
+#include <fstream>
+#include "../examples/json.hpp"
+
+// SentencePiece byte fallback is text in the vocabulary, but bytes in the
+// decoded output. Decode before special-token filtering (which skips <...>).
+static std::vector<uint8_t> token_bytes(const std::string& token) {
+    if (token.size() == 6 && token.compare(0, 3, "<0x") == 0 && token.back() == '>') {
+        auto hex = [](char c) -> int {
+            if (c >= '0' && c <= '9')
+                return c - '0';
+            if (c >= 'A' && c <= 'F')
+                return c - 'A' + 10;
+            if (c >= 'a' && c <= 'f')
+                return c - 'a' + 10;
+            return -1;
+        };
+        int a = hex(token[3]), b = hex(token[4]);
+        if (a >= 0 && b >= 0)
+            return {static_cast<uint8_t>(a * 16 + b)};
+    }
+    return {token.begin(), token.end()};
+}
+
+bool moonshine_tokenizer::load_json(const char* path) {
+    try {
+        std::ifstream file(path);
+        const auto data = nlohmann::json::parse(file);
+        const auto& entries = data.at("model").at("vocab");
+        if (!entries.is_object())
+            return false;
+        vocab.clear();
+        auto put = [&](int id, const std::string& text) {
+            if (id < 0 || id > 1000000)
+                throw std::runtime_error("invalid vocabulary id");
+            if (vocab.size() <= static_cast<size_t>(id))
+                vocab.resize(id + 1);
+            vocab[id] = token_bytes(text);
+        };
+        for (auto it = entries.begin(); it != entries.end(); ++it)
+            put(it.value().get<int>(), it.key());
+        for (const auto& t : data.value("added_tokens", nlohmann::json::array()))
+            put(t.at("id").get<int>(), t.at("content").get<std::string>());
+        return !vocab.empty();
+    } catch (const std::exception& e) {
+        fprintf(stderr, "moonshine tokenizer: %s: %s\n", path, e.what());
+        vocab.clear();
+        return false;
+    }
+}
+
+static std::string replace_all(std::string str, const std::string& from, const std::string& to) {
+    size_t pos = 0;
+    while ((pos = str.find(from, pos)) != std::string::npos) {
+        str.replace(pos, from.length(), to);
+        pos += to.length();
+    }
+    return str;
+}
+
+static std::string trim(const std::string& str) {
+    const char* ws = " \t";
+    size_t start = str.find_first_not_of(ws);
+    if (start == std::string::npos) {
+        return "";
+    }
+    size_t end = str.find_last_not_of(ws);
+    return str.substr(start, end - start + 1);
+}
+
+bool moonshine_tokenizer::load(const char* path) {
+    FILE* f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "%s: failed to open '%s'\n", __func__, path);
+        return false;
+    }
+
+    vocab.clear();
+
+    while (true) {
+        int first = fgetc(f);
+        if (first == EOF) {
+            break;
+        }
+
+        if (first == 0x00) {
+            // empty token
+            vocab.push_back({});
+            continue;
+        }
+
+        size_t length;
+        if (first < 128) {
+            length = (size_t)first;
+        } else {
+            int second = fgetc(f);
+            if (second == EOF) {
+                fprintf(stderr, "%s: unexpected EOF reading length\n", __func__);
+                fclose(f);
+                return false;
+            }
+            length = (size_t)(second * 128) + (size_t)first - 128;
+        }
+
+        std::vector<uint8_t> bytes(length);
+        if (fread(bytes.data(), 1, length, f) != length) {
+            fprintf(stderr, "%s: unexpected EOF reading token bytes\n", __func__);
+            fclose(f);
+            return false;
+        }
+
+        vocab.push_back(token_bytes(std::string(bytes.begin(), bytes.end())));
+    }
+
+    fclose(f);
+
+    if (vocab.empty()) {
+        fprintf(stderr, "%s: no tokens found in '%s'\n", __func__, path);
+        return false;
+    }
+
+    return true;
+}
+
+std::string moonshine_tokenizer::tokens_to_text(const std::vector<int32_t>& tokens) const {
+    std::vector<uint8_t> result_bytes;
+
+    for (int32_t token : tokens) {
+        if (token < 0 || (size_t)token >= vocab.size()) {
+            continue;
+        }
+
+        const auto& bytes = vocab[token];
+
+        // skip special tokens: <...>
+        if (bytes.size() > 2 && bytes.front() == '<' && bytes.back() == '>') {
+            continue;
+        }
+
+        result_bytes.insert(result_bytes.end(), bytes.begin(), bytes.end());
+    }
+
+    std::string text(result_bytes.begin(), result_bytes.end());
+
+    // replace U+2581 (Lower One Eighth Block "▁") with space
+    // UTF-8 encoding: 0xE2 0x96 0x81
+    text = replace_all(text, "\xE2\x96\x81", " ");
+
+    return trim(text);
+}
+
+std::string moonshine_tokenizer::token_to_piece(int32_t token) const {
+    if (token < 0 || (size_t)token >= vocab.size())
+        return "";
+    const auto& bytes = vocab[token];
+    if (bytes.size() > 2 && bytes.front() == '<' && bytes.back() == '>')
+        return "";
+    std::string s(bytes.begin(), bytes.end());
+    s = replace_all(s, "\xE2\x96\x81", " ");
+    return s;
+}
+
+size_t moonshine_tokenizer::vocab_size() const {
+    return vocab.size();
+}

@@ -1,0 +1,120 @@
+name: Pocket-TTS multilingual live proof (#411)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cpu-roundtrip:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      WORK: /tmp/pocket-tts-411-${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Build bounded CPU CLI and unit tests
+        run: |
+          set -euo pipefail
+          cmake -G Ninja -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCRISPASR_BUILD_TESTS=ON \
+            -DCRISPASR_BUILD_SERVER=OFF
+          cmake --build build --target crispasr-cli test-registry -j2
+          build/bin/test-registry --reporter compact
+          CRISPASR_BIN=build/bin/crispasr python tests/test_backend_caps.py
+          python tools/check-backend-wiring.py --crispasr build/bin/crispasr
+
+      - name: Download synthetic voice and multilingual ASR judge
+        run: |
+          set -euo pipefail
+          mkdir -p "$WORK/cache" "$WORK/proof"
+          curl --fail --location --retry 5 \
+            -o "$WORK/voice.wav" \
+            https://huggingface.co/cstr/crispasr-regression-fixtures/resolve/98ba026354b6c4e6aed93550208e9c6f95e83df7/pocket-tts/ref_voice_kokoro_af_heart.wav
+          # Public mirror of Kyutai embeddings_v3/alba.safetensors. The upstream
+          # repository is gated, while this byte-compatible published asset lets
+          # CI reproduce #411 without a secret token.
+          curl --fail --location --retry 5 \
+            -o "$WORK/alba.safetensors" \
+            https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/main/PocketTTS-GGUF/spanish/embeddings/alba.safetensors
+          curl --fail --location --retry 5 \
+            -o "$WORK/ggml-base.bin" \
+            https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
+
+      - name: Synthesize and ASR-roundtrip all five languages
+        run: |
+          set -euo pipefail
+          declare -A text=(
+            [de]='Guten Morgen. Heute scheint die Sonne.'
+            [es]='Buenos días. Hoy brilla el sol.'
+            [it]='Buongiorno. Oggi splende il sole.'
+            [pt]='Bom dia. Hoje o sol está brilhando.'
+            [fr]="Bonjour. Aujourd'hui le soleil brille."
+          )
+          for lang in de es it pt fr; do
+            wav="$WORK/proof/pocket-$lang.wav"
+            voice="$WORK/voice.wav"
+            rights=(--i-have-rights)
+            if [ "$lang" = es ]; then
+              voice="$WORK/alba.safetensors"
+              rights=()
+            fi
+            build/bin/crispasr --backend pocket-tts --gpu-backend cpu \
+              -m auto --auto-download --cache-dir "$WORK/cache" -l "$lang" \
+              --accept-license pocket-tts-terms \
+              --seed 1234 --voice "$voice" "${rights[@]}" \
+              --no-spoken-disclaimer --accept-marking-responsibility \
+              --tts "${text[$lang]}" --tts-output "$wav" \
+              2>&1 | tee "$WORK/proof/pocket-$lang-synthesis.log"
+            build/bin/crispasr --backend whisper --gpu-backend cpu \
+              -m "$WORK/ggml-base.bin" -l "$lang" -otxt \
+              -of "$WORK/proof/pocket-$lang-asr" "$wav" \
+              2>&1 | tee "$WORK/proof/pocket-$lang-asr.log"
+          done
+          grep -F "loaded prepared voice embedding '$WORK/alba.safetensors'" \
+            "$WORK/proof/pocket-es-synthesis.log"
+
+      - name: Validate audio and decoded words
+        run: |
+          python - <<'PY'
+          import os, pathlib, re, unicodedata, wave
+          root = pathlib.Path(os.environ["WORK"]) / "proof"
+          # Prefixes tolerate normal inflection and a close ASR ending while
+          # still requiring two independently decoded content words.
+          expected = {
+              "de": {"guten", "morgen", "heut", "sonne"},
+              "es": {"buen", "dia", "hoy", "sol"},
+              "it": {"giorn", "oggi", "splend", "sole"},
+              "pt": {"bom", "dia", "hoje", "sol", "brilh"},
+              "fr": {"bonjour", "aujourd", "soleil", "brill"},
+          }
+          for lang, wanted in expected.items():
+              wav_path = root / f"pocket-{lang}.wav"
+              with wave.open(str(wav_path), "rb") as wav:
+                  seconds = wav.getnframes() / wav.getframerate()
+                  assert wav.getnchannels() == 1
+                  assert wav.getframerate() == 24000
+                  assert 0.5 < seconds < 60, (lang, seconds)
+              transcript = (root / f"pocket-{lang}-asr.txt").read_text()
+              plain = unicodedata.normalize("NFKD", transcript).encode("ascii", "ignore").decode().lower()
+              words = set(re.findall(r"[a-z]+", plain))
+              hits = {stem for stem in wanted if any(word.startswith(stem) for word in words)}
+              assert len(hits) >= 2, (lang, transcript, sorted(hits))
+              print(f"{lang}: {seconds:.2f}s; decoded={transcript.strip()!r}; hits={sorted(hits)}")
+          PY
+
+      - name: Upload decoded-output proof
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pocket-tts-multilingual-live-${{ github.run_id }}
+          path: /tmp/pocket-tts-411-${{ github.run_id }}/proof
+
+      - name: Remove downloaded models
+        if: always()
+        run: rm -rf -- "$WORK"

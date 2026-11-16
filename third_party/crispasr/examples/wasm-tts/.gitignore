@@ -1,0 +1,12 @@
+# Built WASM (produced by build-wasm.sh --proxy-to-pthread)
+libwhisper.js
+libwhisper.wasm
+libwhisper.worker.js
+# Fetched models / dicts (see README)
+*.gguf
+cmudict.dict
+olaph_de.txt
+espeak_de.tsv
+*.wav
+node_modules/
+package-lock.json

@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # Native C ABI: build the lib + run the C smoke test (sign/verify round-trips
+  # for WAV/MP3/M4A/FLAC + the committed c2pa-rs reference vectors + tamper).
+  native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure + build
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
+      - name: C ABI tests
+        run: ctest --test-dir build --output-on-failure
+
+  # Pure-WebCrypto JS: hermetic unit tests (CBOR vectors, JUMBF, tamper) + the
+  # sign/verify round-trips and c2pa-rs reference vectors, for every container.
+  js:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - name: JS tests
+        working-directory: js
+        run: node --test *.test.mjs
+
+  # FFI bindings against the built shared library.
+  bindings:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build shared lib
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
+      - name: Set lib path
+        run: echo "C2PA_AUDIO_LIB=$GITHUB_WORKSPACE/build/libc2pa_audio.so" >> "$GITHUB_ENV"
+      - uses: dart-lang/setup-dart@v1
+      - name: Dart binding tests
+        working-directory: bindings/dart
+        run: dart pub get && dart test
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: Python binding test
+        run: python3 bindings/python/test_c2pa_audio.py
+      - uses: actions/setup-go@v5
+        with: { go-version: 'stable' }
+      - name: Go binding tests
+        working-directory: bindings/go
+        run: LD_LIBRARY_PATH="$GITHUB_WORKSPACE/build" go test ./...
+
+  # Live interoperability against the c2pa-rs reference reader (c2pa-python):
+  # our signer's output must validate there, and a tampered file must fail.
+  parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: Install c2pa reference reader
+        run: pip install c2pa-python
+      - name: Build shared lib
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
+      - name: Sign every container + validate in c2pa-rs
+        env:
+          C2PA_AUDIO_LIB: ${{ github.workspace }}/build/libc2pa_audio.so
+        run: python3 tools/parity_check.py

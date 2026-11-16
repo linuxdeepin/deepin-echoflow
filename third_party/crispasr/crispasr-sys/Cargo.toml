@@ -1,0 +1,66 @@
+[package]
+name = "crispasr-sys"
+version = "0.8.42"
+edition = "2021"
+description = "Raw FFI bindings to CrispASR — auto-builds libcrispasr from source via cmake, or links a pre-installed copy if CRISPASR_LIB_DIR is set."
+license = "MIT"
+repository = "https://github.com/CrispStrobe/CrispASR"
+homepage = "https://github.com/CrispStrobe/CrispASR"
+documentation = "https://docs.rs/crispasr-sys"
+readme = "README.md"
+keywords = ["asr", "speech-recognition", "whisper", "ggml", "ffi"]
+categories = ["external-ffi-bindings", "multimedia::audio"]
+links = "crispasr"
+
+# The crate is a pure FFI shim — only the .rs sources, build.rs, README,
+# LICENSE, and Cargo.toml ship to crates.io. The native library is not
+# vendored; build.rs locates an existing build, runs cmake on the parent
+# repo, or (legacy) links a system-installed `libcrispasr.{so,dylib,dll}`
+# when `CRISPASR_LIB_DIR` is set. The crates.io publish is a no-op for
+# the cmake path: it requires the parent CrispASR sources, which only
+# exist in a git checkout — that's the same trade-off CrispEmbed makes.
+include = ["src/**/*.rs", "build.rs", "Cargo.toml", "README.md", "LICENSE"]
+
+[features]
+default = []
+# When build.rs runs cmake itself (decision tree in build.rs), these
+# features map to `-DGGML_{CUDA,METAL,VULKAN}=ON`. For the legacy
+# CRISPASR_LIB_DIR path they're inert — the system-installed
+# `libcrispasr` already encodes whichever backends it was built with.
+cuda = []
+metal = []
+vulkan = []
+
+# Debug artifacts dominate `target/debug` and are almost all DWARF, most of
+# which the profile controls. Measured 2026-09-03 with `readelf -S` on a real
+# 187.9 MB dev-profile test binary on this machine (no rebuild needed — an
+# existing artifact answers it):
+#
+#     ALL .debug_*   155.1 MB   = 82.5% of the binary
+#     std's floor      ~3.9 MB  (precompiled rlibs; [profile.dev] cannot touch)
+#     profile-governed ~151 MB
+#
+#     dev default (debug=2)   187.9 MB  MEASURED (readelf -S, one artifact)
+#     line-tables-only         ~60 MB   -68%  PROJECTED from the section sizes
+#     debug = 0                ~36.7 MB -80%  PROJECTED
+#
+# THE PROJECTIONS OVERSHOOT, and by a knowable amount. bw-fixes-1 measured the
+# real thing on kerotakis afterwards: deps 13.7 GB -> 6.1 GB and the binary
+# -61%, against the -68% projected here. The gap is not noise — std's
+# precompiled floor is a FIXED cost the profile cannot touch, so the percentage
+# saving degrades as binaries get smaller. That single fact also explains the
+# hello-world measurement that said 0.1% and was off by ~700x: on a toy binary
+# the untouchable floor IS the whole binary. Expect -55% to -65% in practice,
+# and readelf an artifact from the class you actually care about before
+# quoting a number for a different one.
+#
+# line-tables-only, alone: the extra ~1.5 GB/repo that debug=0 would save is not
+# worth losing per-frame `at ./src/...` lines in backtraces. Do NOT add
+# `strip = "debuginfo"` alongside it — strip removes DWARF sections, and
+# .debug_line IS one, so the pair silently cancels and lands within 200 bytes of
+# debug=0 (verified: zero .debug_line sections, no per-frame lines).
+#
+# `panicked at file:line` survives either setting — it is panic location
+# metadata, not DWARF — so debug=0 is not blind, it just loses the frames below.
+[profile.dev]
+debug = "line-tables-only"

@@ -1,0 +1,23 @@
+# Reference env for `--backend qwen3-tts` (tools/reference_backends/qwen3_tts.py).
+#
+# ⚠ The transformers pin is the whole point of isolating this one. Upstream
+# Qwen3-TTS pins transformers==4.57.3, and the decorator it relies on changed
+# signature in 5.x — importing qwen_tts against transformers 5 dies with
+#   TypeError: check_model_inputs() missing 1 required positional argument
+# from qwen_tts/core/tokenizer_12hz/modeling_qwen3_tts_tokenizer_v2.py.
+# The shared conda base carries transformers 5.x for other work, so do NOT
+# downgrade it; that is what this venv is for.
+#
+# qwen_tts itself is NOT pip-installed here — point PYTHONPATH at a clone:
+#   PYTHONPATH=~/code/Qwen3-TTS tools/bootstrap_ref_env.sh qwen3-tts
+#   PYTHONPATH=~/code/Qwen3-TTS <env>/bin/python tools/dump_reference.py \
+#       --backend qwen3-tts --model-dir Qwen/Qwen3-TTS-12Hz-0.6B-Base \
+#       --audio samples/jfk.wav --output ref.gguf
+#
+# Creating the venv with --system-site-packages lets it inherit torch from the
+# base env (~2.5 GB not re-downloaded) while shadowing transformers.
+transformers==4.57.3
+torch
+torchaudio
+numpy
+soundfile

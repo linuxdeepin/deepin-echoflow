@@ -1,0 +1,25 @@
+**Title:** `ggml-cuda : handle OW > 65535 in im2col`
+
+**Status (2026-09-07):** Upstreamed by `e79014c1` via llama.cpp#22944. Retain this document as historical verification; do not replay the patch.
+
+
+---
+
+`im2col_cuda` dispatches with `block_nums.y = OW`. CUDA caps grid Y at
+65535. Conv1d encoders on raw 16 kHz audio with T > 65535 (≈ 4 s) trip
+the limit — e.g. SEANet at 11 s lands at OW = 176000 — and the launch
+returns `invalid configuration argument`.
+
+Fix: clamp `block_nums.y` to `MIN(OW, MAX_GRIDDIM_Y)` and loop inside
+the kernel with stride `MAX_GRIDDIM_Y`. Same in-kernel stride pattern
+already used for the z axis in this kernel. Bit-identical for OW ≤
+65535 (single iteration of the new outer loop).
+
+Patch: `02-cuda-im2col.patch` (1 file, +32/-29). Covers both the
+existing 2D `im2col_kernel` and the 3D `im2col_3d_kernel` added
+upstream since v0.10.0 — both have the same `OW`-as-grid-Y bug.
+
+**Verification.** Tested on T4 / Jetson Orin with a SEANet encoder
+running on 11 s / 16 kHz audio (im2col reaching OW ≈ 176000); pre-fix
+launch returns `invalid configuration argument`, post-fix runs to
+completion. Existing `test-backend-ops` im2col cases unchanged.

@@ -1,0 +1,1806 @@
+// omniasr.cpp — Facebook OmniASR runtime (CTC + LLM variants).
+//
+// CTC:  CNN frontend → Transformer encoder → CTC head.
+// LLM:  CNN frontend → Transformer encoder → enc_proj → LLaMA decoder.
+// Input: raw 16kHz PCM (no mel features needed).
+
+#include "omniasr.h"
+#include "core/attention.h"
+#include "core/cpu_ops.h" // core_cpu::to_f32 (quantized-safe weight read)
+#include "core/beam_decode.h"
+#include "core/ffn.h"
+#include "core/gguf_loader.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
+#include "core/crispasr_env.h"
+
+#include "ggml-backend.h"
+#include "ggml-cpu.h"
+#include "ggml.h"
+#include "gguf.h"
+
+#include <algorithm>
+#include <cassert>
+#include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <map>
+#include <string>
+#include <vector>
+#include "core/ggml_cpu_backend.h"
+
+// ===========================================================================
+// Bench instrumentation — `OMNIASR_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool omniasr_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = crispasr_env::get("CRISPASR_OMNIASR_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct omniasr_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit omniasr_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~omniasr_bench_stage() {
+        if (!omniasr_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  omniasr_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
+
+// ===========================================================================
+// Model
+// ===========================================================================
+
+struct omniasr_hparams {
+    // Encoder
+    int d_model = 1024;
+    int d_ffn = 4096;
+    int n_heads = 16;
+    int n_enc = 24;
+    int n_cnn = 7;
+    int vocab_size = 9812;
+    int bos_id = 0;
+    int eos_id = 2;
+    int pad_id = 1;
+    int unk_id = 3;
+    int head_dim = 64;
+    // Decoder (LLM only)
+    int model_type = 0; // 0=CTC, 1=LLM
+    int d_dec = 4096;
+    int d_ffn_dec = 2816;
+    int n_heads_dec = 8;
+    int n_dec = 12;
+    int head_dim_dec = 512;
+    int n_langs = 0;
+    // Streaming/Unlimited variant: 3 special tokens above vocab_size in tok_emb
+    //   streaming_lang = vocab_size     (lid marker)
+    //   last_segment   = vocab_size + 1 (signals final audio segment)
+    //   regular_segment= vocab_size + 2 (signals more segments follow)
+    int n_special_tokens = 0;   // 0=standard, 3=streaming/unlimited
+    float segment_secs = 15.0f; // audio chunk size for streaming
+};
+
+struct omniasr_model {
+    omniasr_hparams hp;
+    std::map<std::string, ggml_tensor*> tensors;
+    std::vector<std::string> vocab;
+    std::vector<int> cnn_strides;
+    std::vector<std::string> lang_codes; // FLORES-200 lang codes for LLM lang conditioning
+};
+
+// Decoder layer weight pointers for ggml graph building
+struct omniasr_dec_block {
+    ggml_tensor* attn_ln_w = nullptr;
+    ggml_tensor* q_w = nullptr;
+    ggml_tensor* k_w = nullptr;
+    ggml_tensor* v_w = nullptr;
+    ggml_tensor* o_w = nullptr;
+    ggml_tensor* ffn_ln_w = nullptr;
+    ggml_tensor* gate_w = nullptr;
+    ggml_tensor* up_w = nullptr;
+    ggml_tensor* down_w = nullptr;
+};
+
+struct omniasr_context {
+    omniasr_model model;
+    omniasr_context_params params;
+    ggml_backend_t backend = nullptr;
+    ggml_backend_t backend_cpu = nullptr;
+    ggml_backend_buffer_t buf = nullptr;
+    // PLAN #69a: optional second buffer for layers spilled to CPU.
+    ggml_backend_buffer_t buf_cpu = nullptr;
+    ggml_backend_sched_t sched = nullptr;
+    ggml_context* weight_ctx = nullptr;
+    // LLM decoder
+    std::vector<omniasr_dec_block> dec_blocks;
+    ggml_tensor* dec_ln_w = nullptr;
+    ggml_tensor* lm_head_w = nullptr;
+    ggml_tensor* enc_proj_w = nullptr;
+    ggml_tensor* enc_proj_b = nullptr;
+    ggml_tensor* tok_emb_w = nullptr;
+    ggml_tensor* lang_emb_w = nullptr;
+    // KV cache for LLM decoder
+    ggml_context* kv_ctx = nullptr;
+    ggml_backend_buffer_t kv_buf = nullptr;
+    ggml_tensor* kv_k = nullptr; // [head_dim, max_ctx, n_heads, n_layers]
+    ggml_tensor* kv_v = nullptr;
+    int kv_max_ctx = 0;
+    int kv_n_used = 0;
+    // Compute buffer for ggml graph building
+    std::vector<uint8_t> compute_meta;
+
+    // Per-call capture buffers used by omniasr_transcribe_with_probs.
+    // Non-null pointers are filled by the LLM transcribe path. Reset to
+    // nullptr by the public greedy entry.
+    std::vector<int32_t>* capture_token_ids = nullptr;
+    std::vector<float>* capture_token_probs = nullptr;
+
+    // Per-call capture for the raw CTC logits (model_type 0). When
+    // capture_ctc_logits is non-null the greedy CTC path copies its
+    // [n_vocab * n_frames] logit grid (frame-major: logits[t*V + v]) here and
+    // records the shape. Used by omniasr_transcribe_with_logits for downstream
+    // forced alignment; nullptr on the normal greedy path.
+    std::vector<float>* capture_ctc_logits = nullptr;
+    int* capture_ctc_n_vocab = nullptr;
+    int* capture_ctc_n_frames = nullptr;
+
+    // Sticky per-call seed override for best-of-N sampling. 0 = derive
+    // deterministically from the encoder output (repeated calls with the
+    // same audio give identical samples). Non-zero lets the caller inject
+    // run-index salt to draw N independent samples.
+    uint64_t seed_override = 0;
+};
+
+struct omniasr_perf {
+    int64_t t_total_us = 0;
+    int64_t t_norm_us = 0;
+    int64_t t_enc_alloc_us = 0;
+    int64_t t_enc_compute_us = 0;
+    int64_t t_enc_read_us = 0;
+    int64_t t_prefill_alloc_us = 0;
+    int64_t t_prefill_compute_us = 0;
+    int64_t t_decode_alloc_us = 0;
+    int64_t t_decode_compute_us = 0;
+    int64_t t_decode_logits_us = 0;
+    int n_dec_steps = 0;
+    int enc_nodes = 0;
+    int prefill_nodes = 0;
+    int decode_nodes = 0;
+};
+
+static void omniasr_perf_print(const omniasr_perf& p, int n_samples, int verbosity) {
+    const char* bench = crispasr_env::get("CRISPASR_OMNIASR_BENCH");
+    if (verbosity < 2 && (!bench || !bench[0]))
+        return;
+    const double audio_s = n_samples / 16000.0;
+    fprintf(stderr, "omniasr: =========== performance report ===========\n");
+    fprintf(stderr, "omniasr:  audio          %7.2f s\n", audio_s);
+    fprintf(stderr, "omniasr:  normalize      %7.1f ms\n", p.t_norm_us / 1e3);
+    fprintf(stderr, "omniasr:  enc alloc      %7.1f ms  nodes=%d\n", p.t_enc_alloc_us / 1e3, p.enc_nodes);
+    fprintf(stderr, "omniasr:  enc compute    %7.1f ms\n", p.t_enc_compute_us / 1e3);
+    fprintf(stderr, "omniasr:  enc read       %7.1f ms\n", p.t_enc_read_us / 1e3);
+    fprintf(stderr, "omniasr:  prefill alloc  %7.1f ms  nodes=%d\n", p.t_prefill_alloc_us / 1e3, p.prefill_nodes);
+    fprintf(stderr, "omniasr:  prefill compute%7.1f ms\n", p.t_prefill_compute_us / 1e3);
+    fprintf(stderr, "omniasr:  decode alloc   %7.1f ms  steps=%d nodes=%d\n", p.t_decode_alloc_us / 1e3, p.n_dec_steps,
+            p.decode_nodes);
+    fprintf(stderr, "omniasr:  decode compute %7.1f ms\n", p.t_decode_compute_us / 1e3);
+    fprintf(stderr, "omniasr:  token readback %7.1f ms\n", p.t_decode_logits_us / 1e3);
+    fprintf(stderr, "omniasr:  total measured %7.1f ms\n", p.t_total_us / 1e3);
+    if (p.t_total_us > 0)
+        fprintf(stderr, "omniasr:  realtime       %7.2fx\n", audio_s / (p.t_total_us / 1e6));
+}
+
+// ===========================================================================
+// Defaults
+// ===========================================================================
+
+extern "C" struct omniasr_context_params omniasr_context_default_params(void) {
+    omniasr_context_params p;
+    p.n_threads = 4;
+    p.max_new_tokens = 512;
+    p.verbosity = 1;
+    p.language = nullptr;
+    p.use_gpu = true;
+    p.temperature = 0.0f;
+    p.beam_size = 1;
+    return p;
+}
+
+// ===========================================================================
+// Debug: dump ggml tensor to binary file for comparison with Python reference
+// ===========================================================================
+
+static void dump_tensor(ggml_tensor* t, const char* name, const char* dir) {
+    if (!dir || !dir[0] || !t)
+        return;
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s.bin", dir, name);
+    int n = (int)ggml_nelements(t);
+    std::vector<float> data = core_cpu::to_f32(t); // F32/F16/quantized-safe
+    FILE* f = fopen(path, "wb");
+    if (f) {
+        fwrite(data.data(), sizeof(float), n, f);
+        fclose(f);
+        fprintf(stderr, "  DUMP: %s [%lld,%lld] → %s\n", name, (long long)t->ne[0], (long long)t->ne[1], path);
+    }
+}
+
+static void dump_cpu(const float* data, int n, const char* name, const char* dir) {
+    if (!dir || !dir[0])
+        return;
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s.bin", dir, name);
+    FILE* f = fopen(path, "wb");
+    if (f) {
+        fwrite(data, sizeof(float), n, f);
+        fclose(f);
+        fprintf(stderr, "  DUMP: %s [%d] → %s\n", name, n, path);
+    }
+}
+
+// ===========================================================================
+// ggml graph helpers
+// ===========================================================================
+
+// LayerNorm: (x - mean) / sqrt(var + eps) * w + b
+// x: [C, T] col-major (ne[0]=C). w,b: [C].
+static ggml_tensor* build_ln(ggml_context* ctx, ggml_tensor* x, ggml_tensor* w, ggml_tensor* b) {
+    x = ggml_norm(ctx, x, 1e-5f);
+    x = ggml_mul(ctx, x, w);
+    if (b)
+        x = ggml_add(ctx, x, b);
+    return x;
+}
+
+// OmniASR/Wav2Vec2 positional convolution: grouped Conv1d + GELU + residual.
+// ggml has no grouped conv op, so build it as one conv branch per group.
+// h: [C, T], w: [K, C_per_group, C], b: [C].
+// Greedy CTC decode of a frame-major [T, V] logit grid (logits[t * V + v]):
+// argmax per frame, collapse repeats, drop blanks, SentencePiece detokenize
+// (U+2581 -> space), trim. Blank is always index 0: fairseq2 uses <s>=0, HF
+// uses <pad>=0, both trained with PyTorch CTC loss (blank=0 default).
+static std::string ctc_greedy_text(const omniasr_context* ctx, const float* logits, int V, int T) {
+    const auto& hp = ctx->model.hp;
+    const auto& m = ctx->model;
+    const int blank_id = 0;
+    std::vector<int> tokens;
+    int prev_id = -1;
+    for (int t = 0; t < T; t++) {
+        int best = 0;
+        float best_val = logits[(size_t)t * V];
+        for (int v = 1; v < V; v++) {
+            if (logits[(size_t)t * V + v] > best_val) {
+                best_val = logits[(size_t)t * V + v];
+                best = v;
+            }
+        }
+        if (best != blank_id && best != prev_id)
+            tokens.push_back(best);
+        prev_id = best;
+    }
+
+    std::string result;
+    for (int tid : tokens) {
+        if (tid == hp.bos_id || tid == hp.eos_id || tid == hp.pad_id || tid == hp.unk_id)
+            continue;
+        if (tid < (int)m.vocab.size()) {
+            const std::string& piece = m.vocab[tid];
+            for (size_t i = 0; i < piece.size(); i++) {
+                if ((unsigned char)piece[i] == 0xE2 && i + 2 < piece.size() && (unsigned char)piece[i + 1] == 0x96 &&
+                    (unsigned char)piece[i + 2] == 0x81) {
+                    result += ' ';
+                    i += 2;
+                } else {
+                    result += piece[i];
+                }
+            }
+        }
+    }
+    if (ctx->params.verbosity >= 1)
+        fprintf(stderr, "omniasr: decoded %d tokens → %zu chars\n", (int)tokens.size(), result.size());
+
+    while (!result.empty() && result.front() == ' ')
+        result.erase(result.begin());
+    while (!result.empty() && result.back() == ' ')
+        result.pop_back();
+    return result;
+}
+
+static ggml_tensor* build_grouped_pos_conv(ggml_context* ctx, ggml_tensor* h, ggml_tensor* w, ggml_tensor* b) {
+    const int64_t K = w->ne[0];
+    const int64_t C_per_group = w->ne[1];
+    const int64_t C = w->ne[2];
+    const int64_t T = h->ne[1];
+    const int64_t groups = C / C_per_group;
+
+    GGML_ASSERT(h->ne[0] == C);
+    GGML_ASSERT(groups > 0 && groups * C_per_group == C);
+
+    ggml_tensor* pos = nullptr;
+    for (int64_t g = 0; g < groups; ++g) {
+        const int64_t c0 = g * C_per_group;
+
+        ggml_tensor* h_g = ggml_view_2d(ctx, h, C_per_group, T, h->nb[1], (size_t)c0 * h->nb[0]);
+        h_g = ggml_cont(ctx, ggml_transpose(ctx, h_g)); // [T, C_per_group]
+
+        ggml_tensor* w_g = ggml_view_3d(ctx, w, K, C_per_group, C_per_group, w->nb[1], w->nb[2], (size_t)c0 * w->nb[2]);
+        w_g = ggml_cont(ctx, w_g);
+
+        ggml_tensor* y = ggml_conv_1d(ctx, w_g, h_g, 1, (int)(K / 2), 1); // [T + 1, C_per_group] for even K
+        y = ggml_view_2d(ctx, y, T, C_per_group, y->nb[1], 0);            // fairseq trims the final frame
+        y = ggml_cont(ctx, ggml_transpose(ctx, y));                       // [C_per_group, T]
+
+        ggml_tensor* b_g = ggml_view_1d(ctx, b, C_per_group, (size_t)c0 * b->nb[0]);
+        y = ggml_add(ctx, y, b_g);
+        pos = pos ? ggml_concat(ctx, pos, y, 0) : y;
+    }
+
+    pos = ggml_gelu(ctx, pos);
+    return ggml_add(ctx, h, pos);
+}
+
+// Transformer encoder layer (pre-norm)
+// x: [d_model, T] col-major
+static ggml_tensor* build_enc_layer(ggml_context* ctx, ggml_tensor* x, ggml_tensor* attn_ln_w, ggml_tensor* attn_ln_b,
+                                    ggml_tensor* q_w, ggml_tensor* q_b, ggml_tensor* k_w, ggml_tensor* k_b,
+                                    ggml_tensor* v_w, ggml_tensor* v_b, ggml_tensor* o_w, ggml_tensor* o_b,
+                                    ggml_tensor* ffn_ln_w, ggml_tensor* ffn_ln_b, ggml_tensor* up_w, ggml_tensor* up_b,
+                                    ggml_tensor* down_w, ggml_tensor* down_b, int n_heads, int head_dim) {
+    int d = (int)x->ne[0];
+    int T = (int)x->ne[1];
+
+    // Self-attention with pre-norm
+    ggml_tensor* residual = x;
+    ggml_tensor* h = build_ln(ctx, x, attn_ln_w, attn_ln_b);
+
+    // Q, K, V projections
+    ggml_tensor* Q = ggml_mul_mat(ctx, q_w, h);
+    if (q_b)
+        Q = ggml_add(ctx, Q, q_b);
+    ggml_tensor* K = ggml_mul_mat(ctx, k_w, h);
+    if (k_b)
+        K = ggml_add(ctx, K, k_b);
+    ggml_tensor* V = ggml_mul_mat(ctx, v_w, h);
+    if (v_b)
+        V = ggml_add(ctx, V, v_b);
+
+    // Reshape for multi-head: [d, T] → [head_dim, n_heads, T]
+    Q = ggml_reshape_3d(ctx, Q, head_dim, n_heads, T);
+    K = ggml_reshape_3d(ctx, K, head_dim, n_heads, T);
+    V = ggml_reshape_3d(ctx, V, head_dim, n_heads, T);
+
+    // Permute for flash_attn: [head_dim, T, n_heads]
+    Q = ggml_cont(ctx, ggml_permute(ctx, Q, 0, 2, 1, 3));
+    K = ggml_cont(ctx, ggml_permute(ctx, K, 0, 2, 1, 3));
+    V = ggml_cont(ctx, ggml_permute(ctx, V, 0, 2, 1, 3));
+
+    float scale = 1.0f / sqrtf((float)head_dim);
+    ggml_tensor* attn = ggml_flash_attn_ext(ctx, Q, K, V, nullptr, scale, 0.0f, 0.0f);
+
+    // Reshape back: [head_dim, T, n_heads] → [d, T]
+    attn = ggml_reshape_2d(ctx, attn, d, T);
+
+    // Output projection
+    attn = ggml_mul_mat(ctx, o_w, attn);
+    if (o_b)
+        attn = ggml_add(ctx, attn, o_b);
+
+    // Residual
+    x = ggml_add(ctx, residual, attn);
+
+    // FFN with pre-norm
+    residual = x;
+    h = build_ln(ctx, x, ffn_ln_w, ffn_ln_b);
+    h = ggml_mul_mat(ctx, up_w, h);
+    if (up_b)
+        h = ggml_add(ctx, h, up_b);
+    h = ggml_gelu(ctx, h);
+    h = ggml_mul_mat(ctx, down_w, h);
+    if (down_b)
+        h = ggml_add(ctx, h, down_b);
+
+    return ggml_add(ctx, residual, h);
+}
+
+// ===========================================================================
+// Init
+// ===========================================================================
+
+extern "C" struct omniasr_context* omniasr_init_from_file(const char* path_model,
+                                                          struct omniasr_context_params params) {
+    auto* ctx = new omniasr_context();
+    ctx->params = params;
+    auto& m = ctx->model;
+    auto& hp = m.hp;
+
+    // Read metadata
+    gguf_context* gctx = core_gguf::open_metadata(path_model);
+    if (!gctx) {
+        delete ctx;
+        return nullptr;
+    }
+
+    hp.d_model = core_gguf::kv_u32(gctx, "omniasr.d_model", 1024);
+    hp.d_ffn = core_gguf::kv_u32(gctx, "omniasr.d_ffn", 4096);
+    hp.n_heads = core_gguf::kv_u32(gctx, "omniasr.n_heads", 16);
+    hp.n_enc = core_gguf::kv_u32(gctx, "omniasr.n_enc_layers", 24);
+    hp.n_cnn = core_gguf::kv_u32(gctx, "omniasr.n_cnn_layers", 7);
+    hp.vocab_size = core_gguf::kv_u32(gctx, "omniasr.vocab_size", 9812);
+    hp.bos_id = core_gguf::kv_u32(gctx, "omniasr.bos_id", 0);
+    hp.eos_id = core_gguf::kv_u32(gctx, "omniasr.eos_id", 2);
+    hp.pad_id = core_gguf::kv_u32(gctx, "omniasr.pad_id", 1);
+    hp.unk_id = core_gguf::kv_u32(gctx, "omniasr.unk_id", 3);
+    hp.head_dim = core_gguf::kv_u32(gctx, "omniasr.head_dim", hp.d_model / hp.n_heads);
+    hp.model_type = core_gguf::kv_u32(gctx, "omniasr.model_type", 0);
+    hp.d_dec = core_gguf::kv_u32(gctx, "omniasr.d_dec", 4096);
+    hp.d_ffn_dec = core_gguf::kv_u32(gctx, "omniasr.d_ffn_dec", 2816);
+    hp.n_heads_dec = core_gguf::kv_u32(gctx, "omniasr.n_heads_dec", 8);
+    hp.n_dec = core_gguf::kv_u32(gctx, "omniasr.n_dec_layers", 12);
+    hp.head_dim_dec = core_gguf::kv_u32(gctx, "omniasr.head_dim_dec", 512);
+    hp.n_langs = core_gguf::kv_u32(gctx, "omniasr.n_langs", 0);
+    hp.n_special_tokens = core_gguf::kv_u32(gctx, "omniasr.n_special_tokens", 0);
+
+    // Auto-detect streaming variant: tok_emb has vocab_size + 3 entries
+    // (streaming_lang, last_segment, regular_segment) even if metadata is absent.
+    // Defer detection to after tensor loading — see below.
+
+    // CNN strides
+    int stride_key = gguf_find_key(gctx, "omniasr.cnn_strides");
+    if (stride_key >= 0) {
+        int n = gguf_get_arr_n(gctx, stride_key);
+        m.cnn_strides.resize(n);
+        for (int i = 0; i < n; i++)
+            m.cnn_strides[i] = ((const int32_t*)gguf_get_arr_data(gctx, stride_key))[i];
+    } else {
+        m.cnn_strides = {5, 2, 2, 2, 2, 2, 2};
+    }
+
+    // Vocab
+    const int tok_key = gguf_find_key(gctx, "tokenizer.ggml.tokens");
+    if (tok_key >= 0) {
+        int n = gguf_get_arr_n(gctx, tok_key);
+        m.vocab.resize(n);
+        for (int i = 0; i < n; i++) {
+            const char* s = gguf_get_arr_str(gctx, tok_key, i);
+            if (s)
+                m.vocab[i] = s;
+        }
+    }
+    // Load language codes for LLM lang conditioning
+    const int lang_key = gguf_find_key(gctx, "omniasr.lang_codes");
+    if (lang_key >= 0) {
+        int n = gguf_get_arr_n(gctx, lang_key);
+        m.lang_codes.resize(n);
+        for (int i = 0; i < n; i++) {
+            const char* s = gguf_get_arr_str(gctx, lang_key, i);
+            if (s)
+                m.lang_codes[i] = s;
+        }
+    }
+    gguf_free(gctx);
+
+    if (params.verbosity >= 1) {
+        const char* type_str = hp.model_type == 1 ? "LLM" : "CTC";
+        fprintf(stderr, "omniasr-%s: enc=%dL d=%d, ", type_str, hp.n_enc, hp.d_model);
+        if (hp.model_type == 1)
+            fprintf(stderr, "dec=%dL d=%d ffn=%d heads=%d, ", hp.n_dec, hp.d_dec, hp.d_ffn_dec, hp.n_heads_dec);
+        fprintf(stderr, "cnn=%d, vocab=%d%s\n", hp.n_cnn, hp.vocab_size,
+                hp.n_special_tokens == 3 ? " [streaming]" : "");
+    }
+
+    // Load weights
+    if (params.use_gpu) {
+        ctx->backend = crispasr_init_gpu_backend();
+    }
+    if (!ctx->backend) {
+        ctx->backend = core_cpu_backend::init();
+    }
+    ctx->backend_cpu = core_cpu_backend::init();
+    if (!ctx->backend_cpu) {
+        if (ctx->backend) {
+            ggml_backend_free(ctx->backend);
+        }
+        delete ctx;
+        return nullptr;
+    }
+    core_cpu_backend::set_n_threads(ctx->backend_cpu, params.n_threads > 0 ? params.n_threads : 4);
+    if (core_cpu_backend::is_cpu(ctx->backend)) {
+        core_cpu_backend::set_n_threads(ctx->backend, params.n_threads > 0 ? params.n_threads : 4);
+    }
+
+    // PLAN #69a: when CRISPASR_N_GPU_LAYERS is set and < total decoder
+    // layers, route dec.<il>.* with il >= N onto the CPU backend.
+    // Only meaningful for omniasr-llm; the CTC variant's "dec." tensors
+    // are a fixed-depth post-encoder head, not transformer blocks.
+    core_gguf::WeightLoad wl;
+    const char* arch = hp.model_type == 1 ? "omniasr-llm" : "omniasr-ctc";
+    int n_gpu_layers_env = -1;
+    if (const char* s = std::getenv("CRISPASR_N_GPU_LAYERS")) {
+        n_gpu_layers_env = std::atoi(s);
+    }
+    const int total_layers = (int)hp.n_dec;
+    const bool do_split = hp.model_type == 1 && ctx->backend_cpu && ctx->backend_cpu != ctx->backend &&
+                          n_gpu_layers_env >= 0 && n_gpu_layers_env < total_layers;
+    bool ok;
+    if (do_split) {
+        core_gguf::LayerSplitConfig cfg{"dec.", n_gpu_layers_env};
+        ok = core_gguf::load_weights_split(path_model, ctx->backend, ctx->backend_cpu,
+                                           core_gguf::is_gpu_tensor_with_prefix, &cfg, arch, wl);
+        if (ok) {
+            fprintf(stderr, "%s: layer offload: gpu=[0,%d), cpu=[%d,%d) (CRISPASR_N_GPU_LAYERS=%d)\n", arch,
+                    n_gpu_layers_env, n_gpu_layers_env, total_layers, n_gpu_layers_env);
+        }
+    } else {
+        ok = core_gguf::load_weights(path_model, ctx->backend, arch, wl);
+    }
+    if (!ok) {
+        if (ctx->backend_cpu && ctx->backend_cpu != ctx->backend)
+            ggml_backend_free(ctx->backend_cpu);
+        ggml_backend_free(ctx->backend);
+        delete ctx;
+        return nullptr;
+    }
+    ctx->weight_ctx = wl.ctx;
+    ctx->buf = wl.buf;
+    ctx->buf_cpu = wl.buf_cpu;
+    m.tensors = wl.tensors;
+
+    // Backend scheduler: ggml requires the last backend to be CPU when a GPU
+    // backend is present so host-side fallbacks have somewhere to land.
+    ggml_backend_t backends[2] = {ctx->backend, nullptr};
+    int n_backends = 1;
+    if (ctx->backend_cpu && ctx->backend_cpu != ctx->backend) {
+        backends[n_backends++] = ctx->backend_cpu;
+    }
+    ctx->sched = ggml_backend_sched_new(backends, nullptr, n_backends, 65536, false, false);
+
+    // LLM decoder: populate block pointers + allocate compute buffer
+    if (hp.model_type == 1) {
+        auto G = [&](const std::string& name) -> ggml_tensor* {
+            auto it = m.tensors.find(name);
+            return it != m.tensors.end() ? it->second : nullptr;
+        };
+        ctx->dec_blocks.resize(hp.n_dec);
+        for (int i = 0; i < hp.n_dec; i++) {
+            std::string p = "dec." + std::to_string(i);
+            auto& b = ctx->dec_blocks[i];
+            b.attn_ln_w = G(p + ".attn_ln.weight");
+            b.q_w = G(p + ".attn.q_proj.weight");
+            b.k_w = G(p + ".attn.k_proj.weight");
+            b.v_w = G(p + ".attn.v_proj.weight");
+            b.o_w = G(p + ".attn.out.weight");
+            b.ffn_ln_w = G(p + ".ffn_ln.weight");
+            b.gate_w = G(p + ".ffn.gate.weight");
+            b.up_w = G(p + ".ffn.up.weight");
+            b.down_w = G(p + ".ffn.down.weight");
+        }
+        ctx->dec_ln_w = G("dec_ln.weight");
+        ctx->lm_head_w = G("lm_head.weight");
+        ctx->enc_proj_w = G("enc_proj.weight");
+        ctx->enc_proj_b = G("enc_proj.bias");
+        ctx->tok_emb_w = G("tok_emb.weight");
+        ctx->lang_emb_w = G("lang_emb.weight");
+        // Compute meta for graph building (generous size for 12-layer decoder)
+        ctx->compute_meta.resize(ggml_tensor_overhead() * 4096 + ggml_graph_overhead_custom(32768, false));
+
+        // Auto-detect streaming/unlimited variant from tok_emb size.
+        // Standard: tok_emb has vocab_size+1 rows (extra lid_marker).
+        // Streaming: tok_emb has vocab_size+3 rows (streaming_lang, last_segment, regular_segment).
+        if (hp.n_special_tokens == 0 && ctx->tok_emb_w) {
+            int tok_emb_rows = (int)ctx->tok_emb_w->ne[1];
+            if (tok_emb_rows == hp.vocab_size + 3) {
+                hp.n_special_tokens = 3;
+                if (params.verbosity >= 1)
+                    fprintf(stderr, "omniasr: auto-detected streaming variant (tok_emb=%d = vocab+3)\n", tok_emb_rows);
+            }
+        }
+    }
+
+    if (params.verbosity >= 1) {
+        fprintf(stderr, "omniasr: loaded %zu tensors, %zu vocab\n", m.tensors.size(), m.vocab.size());
+        if (hp.n_special_tokens == 3)
+            fprintf(stderr, "omniasr: streaming mode (segment_secs=%.1f)\n", hp.segment_secs);
+    }
+
+    return ctx;
+}
+
+extern "C" void omniasr_free(struct omniasr_context* ctx) {
+    if (!ctx)
+        return;
+    if (ctx->kv_ctx)
+        ggml_free(ctx->kv_ctx);
+    if (ctx->kv_buf)
+        ggml_backend_buffer_free(ctx->kv_buf);
+    if (ctx->sched)
+        ggml_backend_sched_free(ctx->sched);
+    if (ctx->weight_ctx)
+        ggml_free(ctx->weight_ctx);
+    // Weight buffers come from core_gguf::load_weights, so on a zero-copy
+    // backend they carry a host mmap the backend does not own. Release them
+    // through the loader rather than ggml_backend_buffer_free().
+    core_gguf::release_weight_buffer(ctx->buf);
+    core_gguf::release_weight_buffer(ctx->buf_cpu);
+    if (ctx->backend_cpu && ctx->backend_cpu != ctx->backend)
+        ggml_backend_free(ctx->backend_cpu);
+    if (ctx->backend)
+        ggml_backend_free(ctx->backend);
+    delete ctx;
+}
+
+// ===========================================================================
+// LLM KV cache
+// ===========================================================================
+
+static bool omniasr_alloc_kv_cache(omniasr_context* ctx, int max_ctx) {
+    auto& hp = ctx->model.hp;
+    int hd = hp.head_dim_dec;
+    int nh = hp.n_heads_dec;
+    int nl = hp.n_dec;
+
+    // Create context for KV tensors
+    size_t mem = 2 * ggml_tensor_overhead() + 64;
+    struct ggml_init_params kv_params = {mem, nullptr, true};
+    ctx->kv_ctx = ggml_init(kv_params);
+
+    // PLAN #60e + #69e: per-half KV dtype. CRISPASR_KV_QUANT sets both,
+    // CRISPASR_KV_QUANT_{K,V} override per half. Default f16/f16.
+    const auto kv_pair = core_attn::kv_dtype_pair_from_env("omniasr");
+    ctx->kv_k = ggml_new_tensor_4d(ctx->kv_ctx, kv_pair.k, hd, max_ctx, nh, nl);
+    ctx->kv_v = ggml_new_tensor_4d(ctx->kv_ctx, kv_pair.v, hd, max_ctx, nh, nl);
+    ggml_set_name(ctx->kv_k, "kv_k");
+    ggml_set_name(ctx->kv_v, "kv_v");
+
+    size_t kbytes = ggml_nbytes(ctx->kv_k);
+    size_t vbytes = ggml_nbytes(ctx->kv_v);
+    // PLAN #69b: optional KV-on-CPU spill for long-context / tight-VRAM users.
+    ggml_backend_t kv_backend = core_attn::kv_backend_from_env(ctx->backend, ctx->backend_cpu, "omniasr");
+    ctx->kv_buf = ggml_backend_alloc_buffer(kv_backend, kbytes + vbytes + 64);
+    if (!ctx->kv_buf) {
+        fprintf(stderr, "omniasr-llm: failed to allocate KV cache (%zu MB)\n", (kbytes + vbytes) / (1024 * 1024));
+        return false;
+    }
+
+    uint8_t* base = (uint8_t*)ggml_backend_buffer_get_base(ctx->kv_buf);
+    ggml_backend_tensor_alloc(ctx->kv_buf, ctx->kv_k, base);
+    ggml_backend_tensor_alloc(ctx->kv_buf, ctx->kv_v, base + kbytes);
+
+    ctx->kv_max_ctx = max_ctx;
+    ctx->kv_n_used = 0;
+
+    if (ctx->params.verbosity >= 1)
+        fprintf(stderr, "omniasr-llm: KV cache: %d ctx, %zu MB\n", max_ctx, (kbytes + vbytes) / (1024 * 1024));
+    return true;
+}
+
+// (ggml decoder graph builder — TODO: optimize with ggml after CPU version verified)
+
+// ===========================================================================
+// LLM transcribe
+// ===========================================================================
+
+static char* omniasr_transcribe_llm(omniasr_context* ctx, const std::vector<float>& encoder_out, int d_enc, int T_enc,
+                                    omniasr_perf* perf, std::vector<int32_t>* out_token_ids = nullptr,
+                                    std::vector<float>* out_token_probs = nullptr);
+
+// ===========================================================================
+// Transcribe
+// ===========================================================================
+
+extern "C" char* omniasr_transcribe(struct omniasr_context* ctx, const float* samples, int n_samples) {
+    if (!ctx || !samples || n_samples <= 0)
+        return nullptr;
+
+    omniasr_perf perf;
+    const int64_t t_total0 = ggml_time_us();
+
+    auto& m = ctx->model;
+    auto& hp = m.hp;
+    auto& ts = m.tensors;
+
+    auto G = [&](const std::string& name) -> ggml_tensor* {
+        auto it = ts.find(name);
+        return it != ts.end() ? it->second : nullptr;
+    };
+
+    // Build ggml graph for full forward pass
+    size_t mem = ggml_tensor_overhead() * 8192 + ggml_graph_overhead_custom(65536, false);
+    std::vector<uint8_t> meta(mem);
+    struct ggml_init_params gp = {mem, meta.data(), true};
+    ggml_context* ctx0 = ggml_init(gp);
+    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 65536, false);
+
+    const char* dump_dir = crispasr_env::get("CRISPASR_OMNIASR_DUMP_DIR");
+
+    // Input normalization: layer_norm(waveform) — zero mean, unit variance
+    // This is a wav2vec2 convention, required for OmniASR.
+    std::vector<float> pcm_norm(n_samples);
+    {
+        omniasr_bench_stage _b("pcm_normalize");
+        const int64_t t0 = ggml_time_us();
+        double mean = 0;
+        for (int i = 0; i < n_samples; i++)
+            mean += samples[i];
+        mean /= n_samples;
+        double var = 0;
+        for (int i = 0; i < n_samples; i++)
+            var += (samples[i] - mean) * (samples[i] - mean);
+        var /= n_samples;
+        float inv_std = 1.0f / (sqrtf((float)var + 1e-5f));
+        for (int i = 0; i < n_samples; i++)
+            pcm_norm[i] = (samples[i] - (float)mean) * inv_std;
+        perf.t_norm_us += ggml_time_us() - t0;
+    }
+    dump_cpu(pcm_norm.data(), n_samples, "pcm_norm", dump_dir);
+
+    // Input: normalized PCM [n_samples, 1]
+    ggml_tensor* inp = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_samples, 1);
+    ggml_set_name(inp, "pcm");
+    ggml_set_input(inp);
+
+    // CNN Feature Extractor: 7 layers of Conv1d + LayerNorm + GELU
+    ggml_tensor* h = inp;
+    for (int i = 0; i < hp.n_cnn; i++) {
+        std::string prefix = "cnn." + std::to_string(i);
+        ggml_tensor* conv_w = G(prefix + ".conv.weight");
+        ggml_tensor* conv_b = G(prefix + ".conv.bias");
+        ggml_tensor* ln_w = G(prefix + ".ln.weight");
+        ggml_tensor* ln_b = G(prefix + ".ln.bias");
+
+        int stride = (i < (int)m.cnn_strides.size()) ? m.cnn_strides[i] : 2;
+
+        // Conv1d: no padding (wav2vec2 convention)
+        h = ggml_conv_1d(ctx0, conv_w, h, stride, 0, 1);
+        if (conv_b) {
+            // Bias: output is [T, C]. Transpose to [C, T], add bias [C], transpose back.
+            ggml_tensor* ht = ggml_cont(ctx0, ggml_transpose(ctx0, h));
+            ht = ggml_add(ctx0, ht, conv_b);
+            h = ggml_cont(ctx0, ggml_transpose(ctx0, ht));
+        }
+
+        // LayerNorm: output [T, C]. ggml_norm operates on ne[0].
+        // After conv1d: ne[0]=T, ne[1]=C. ggml_norm normalizes over ne[0]=T.
+        // But we need to normalize over C (channels).
+        // Transpose to [C, T], norm, transpose back.
+        h = ggml_cont(ctx0, ggml_transpose(ctx0, h)); // [C, T]
+        h = build_ln(ctx0, h, ln_w, ln_b);
+        // Keep in [C, T] format — the GELU and next conv need [T, C] though
+        // Actually, ggml_norm normalizes over ne[0]. For [C, T]: normalizes over C. That's correct!
+        // So h is [C, T] with LN over C ✓
+
+        h = ggml_gelu(ctx0, h);
+
+        // Next conv expects [T, C] input. Transpose back.
+        h = ggml_cont(ctx0, ggml_transpose(ctx0, h)); // [T, C]
+
+        // Debug: mark last CNN layer output
+        if (i == hp.n_cnn - 1) {
+            ggml_set_name(h, "cnn_out");
+            ggml_set_output(h);
+        }
+    }
+
+    // h is [T_cnn, 512] after CNN. Transpose to [512, T] for LN + projection.
+    h = ggml_cont(ctx0, ggml_transpose(ctx0, h)); // [512, T]
+
+    // Post-extract LayerNorm (on 512-dim CNN output)
+    // Try both shortened and long names (LLM converter shortens, CTC keeps long)
+    ggml_tensor* pe_ln_w = G("post_extract_ln.weight");
+    ggml_tensor* pe_ln_b = G("post_extract_ln.bias");
+    if (!pe_ln_w) {
+        pe_ln_w = G("encoder_frontend.post_extract_ln.weight");
+        pe_ln_b = G("encoder_frontend.post_extract_ln.bias");
+    }
+    if (pe_ln_w)
+        h = build_ln(ctx0, h, pe_ln_w, pe_ln_b);
+
+    // Pre-lookup CTC tensors (needed in both single-graph and two-graph paths)
+    ggml_tensor* ctc_w = G("ctc.weight");
+    ggml_tensor* ctc_b = G("ctc.bias");
+
+    // Linear projection: 512 → d_model
+    ggml_tensor* proj_w = G("proj.weight");
+    ggml_tensor* proj_b = G("proj.bias");
+    h = ggml_mul_mat(ctx0, proj_w, h); // [d_model, T]
+    if (proj_b)
+        h = ggml_add(ctx0, h, proj_b);
+
+    ggml_set_name(h, "proj_out");
+    ggml_set_output(h);
+
+    // Convolutional positional encoding: grouped Conv1d + GELU + residual.
+    // Weight normalization pre-computed in converter → stored as pos_conv.weight.
+    // Groups=16, kernel=128, channels=1024.
+    {
+        ggml_tensor* wv_t = G("pos_conv.weight");
+        ggml_tensor* pb_t = G("pos_conv.bias");
+        if (wv_t && pb_t)
+            h = build_grouped_pos_conv(ctx0, h, wv_t, pb_t);
+    }
+
+    // h is now [d_model, T] — correct format for transformer layers
+    if (dump_dir) {
+        ggml_set_name(h, "pos_conv_out");
+        ggml_set_output(h);
+    }
+
+    // Transformer encoder layers
+    for (int i = 0; i < hp.n_enc; i++) {
+        std::string p = "enc." + std::to_string(i);
+        h = build_enc_layer(ctx0, h, G(p + ".attn_ln.weight"), G(p + ".attn_ln.bias"), G(p + ".attn.q_proj.weight"),
+                            G(p + ".attn.q_proj.bias"), G(p + ".attn.k_proj.weight"), G(p + ".attn.k_proj.bias"),
+                            G(p + ".attn.v_proj.weight"), G(p + ".attn.v_proj.bias"), G(p + ".attn.out.weight"),
+                            G(p + ".attn.out.bias"), G(p + ".ffn_ln.weight"), G(p + ".ffn_ln.bias"),
+                            G(p + ".ffn.up.weight"), G(p + ".ffn.up.bias"), G(p + ".ffn.down.weight"),
+                            G(p + ".ffn.down.bias"), hp.n_heads, hp.head_dim);
+        // Dump encoder layers for debugging (every 4th + first 2 + last)
+        if (dump_dir && (i < 2 || i % 4 == 0 || i == hp.n_enc - 1)) {
+            char lname[64];
+            snprintf(lname, sizeof(lname), "enc_layer_%d", i);
+            ggml_set_name(h, lname);
+            ggml_set_output(h);
+        }
+    }
+
+    // Final LayerNorm
+    h = build_ln(ctx0, h, G("enc_ln.weight"), G("enc_ln.bias"));
+
+    if (hp.model_type == 1) {
+        ggml_set_name(h, "enc_out");
+    } else {
+        // CTC head: linear projection to vocab
+        h = ggml_mul_mat(ctx0, ctc_w, h); // [vocab_size, T]
+        if (ctc_b)
+            h = ggml_add(ctx0, h, ctc_b);
+        ggml_set_name(h, "logits");
+    }
+    ggml_set_output(h);
+    ggml_build_forward_expand(gf, h);
+    perf.enc_nodes = ggml_graph_n_nodes(gf);
+
+    // Allocate and compute
+    omniasr_bench_stage _b_enc("encoder");
+    ggml_backend_sched_reset(ctx->sched);
+    int64_t t0 = ggml_time_us();
+    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
+        fprintf(stderr, "omniasr: graph alloc failed\n");
+        ggml_free(ctx0);
+        return nullptr;
+    }
+    perf.t_enc_alloc_us += ggml_time_us() - t0;
+
+    // Set input
+    ggml_backend_tensor_set(inp, pcm_norm.data(), 0, n_samples * sizeof(float));
+
+    if (ctx->params.verbosity >= 1)
+        fprintf(stderr, "omniasr: %d samples, computing graph...\n", n_samples);
+
+    t0 = ggml_time_us();
+    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
+        fprintf(stderr, "omniasr: graph compute failed\n");
+        ggml_free(ctx0);
+        return nullptr;
+    }
+    perf.t_enc_compute_us += ggml_time_us() - t0;
+
+    // Dump intermediates for crispasr-diff comparison
+    if (dump_dir && dump_dir[0]) {
+        auto dump_tensor = [&](const char* name) {
+            ggml_tensor* t = ggml_graph_get_tensor(gf, name);
+            if (!t)
+                return;
+            size_t n = ggml_nelements(t);
+            std::vector<float> buf(n);
+            ggml_backend_tensor_get(t, buf.data(), 0, n * sizeof(float));
+            char path[512];
+            snprintf(path, sizeof(path), "%s/%s.bin", dump_dir, name);
+            FILE* f = fopen(path, "wb");
+            if (f) {
+                fwrite(buf.data(), sizeof(float), n, f);
+                fclose(f);
+            }
+            fprintf(stderr, "  DUMP %s [%lld, %lld] first8: [%.4f, %.4f, %.4f, %.4f, %.4f, %.4f, %.4f, %.4f]\n", name,
+                    (long long)t->ne[0], (long long)t->ne[1], buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6],
+                    buf[7]);
+        };
+        dump_tensor("cnn_out");
+        dump_tensor("proj_out");
+        dump_tensor("pos_conv_out");
+        for (int i = 0; i < hp.n_enc; i++) {
+            if (i < 2 || i % 4 == 0 || i == hp.n_enc - 1) {
+                char lname[64];
+                snprintf(lname, sizeof(lname), "enc_layer_%d", i);
+                dump_tensor(lname);
+            }
+        }
+        dump_tensor("logits");
+    }
+
+    if (hp.model_type == 1) {
+        ggml_tensor* enc_out_t = ggml_graph_get_tensor(gf, "enc_out");
+        int d_e = (int)enc_out_t->ne[0];
+        int T_e = (int)enc_out_t->ne[1];
+        std::vector<float> enc_out_data((size_t)d_e * T_e);
+        t0 = ggml_time_us();
+        ggml_backend_tensor_get(enc_out_t, enc_out_data.data(), 0, (size_t)d_e * T_e * sizeof(float));
+        perf.t_enc_read_us += ggml_time_us() - t0;
+        dump_cpu(enc_out_data.data(), d_e * T_e, "encoder_output", dump_dir);
+        ggml_free(ctx0);
+
+        if (ctx->params.verbosity >= 1)
+            fprintf(stderr, "omniasr-llm: encoder done [%d, %d], running decoder...\n", d_e, T_e);
+
+        char* out = omniasr_transcribe_llm(ctx, enc_out_data, d_e, T_e, &perf, ctx->capture_token_ids,
+                                           ctx->capture_token_probs);
+        perf.t_total_us = ggml_time_us() - t_total0;
+        omniasr_perf_print(perf, n_samples, ctx->params.verbosity);
+        return out;
+    }
+
+    // Debug: read intermediate outputs
+    if (ctx->params.verbosity >= 2) {
+        auto dump = [&](const char* name) {
+            ggml_tensor* t = ggml_graph_get_tensor(gf, name);
+            if (!t) {
+                fprintf(stderr, "  %s: NOT FOUND\n", name);
+                return;
+            }
+            float buf[10];
+            int n = std::min(10, (int)ggml_nelements(t));
+            ggml_backend_tensor_get(t, buf, 0, n * sizeof(float));
+            fprintf(stderr, "  %s: ne=[%lld,%lld], data[:5]=[%.4f,%.4f,%.4f,%.4f,%.4f]\n", name, (long long)t->ne[0],
+                    (long long)t->ne[1], buf[0], n > 1 ? buf[1] : 0, n > 2 ? buf[2] : 0, n > 3 ? buf[3] : 0,
+                    n > 4 ? buf[4] : 0);
+        };
+        dump("cnn_out");
+        dump("proj_out");
+        dump("logits");
+        // Also show logit stats at first frame
+        ggml_tensor* lt = ggml_graph_get_tensor(gf, "logits");
+        if (lt) {
+            int V_dbg = (int)lt->ne[0];
+            std::vector<float> frame0(V_dbg);
+            ggml_backend_tensor_get(lt, frame0.data(), 0, V_dbg * sizeof(float));
+            int best = 0;
+            for (int i = 1; i < V_dbg; i++)
+                if (frame0[i] > frame0[best])
+                    best = i;
+            fprintf(stderr, "  logits frame 0: argmax=%d (%.4f), blank(0)=%.4f\n", best, frame0[best], frame0[0]);
+        }
+    }
+
+    // Read logits
+    ggml_tensor* logits_t = ggml_graph_get_tensor(gf, "logits");
+    int V = (int)logits_t->ne[0]; // vocab_size
+    int T = (int)logits_t->ne[1]; // time steps
+    std::vector<float> logits(V * T);
+    ggml_backend_tensor_get(logits_t, logits.data(), 0, V * T * sizeof(float));
+    ggml_free(ctx0);
+
+    // Optional raw-logits capture for forced alignment (opt-in via
+    // omniasr_transcribe_with_logits). Copy, not move: the greedy decode
+    // below still consumes `logits`.
+    if (ctx->capture_ctc_logits) {
+        *ctx->capture_ctc_logits = logits;
+        if (ctx->capture_ctc_n_vocab)
+            *ctx->capture_ctc_n_vocab = V;
+        if (ctx->capture_ctc_n_frames)
+            *ctx->capture_ctc_n_frames = T;
+    }
+
+    if (ctx->params.verbosity >= 1)
+        fprintf(stderr, "omniasr: logits [%d, %d], CTC decoding...\n", V, T);
+
+    std::string result = ctc_greedy_text(ctx, logits.data(), V, T);
+
+    if (result.empty())
+        return nullptr;
+
+    char* out = (char*)malloc(result.size() + 1);
+    if (!out)
+        return nullptr;
+    memcpy(out, result.c_str(), result.size());
+    out[result.size()] = '\0';
+    perf.t_total_us = ggml_time_us() - t_total0;
+    omniasr_perf_print(perf, n_samples, ctx->params.verbosity);
+    return out;
+}
+
+extern "C" char* omniasr_transcribe_with_logits(struct omniasr_context* ctx, const float* samples, int n_samples,
+                                                float** out_logits, int* out_n_vocab, int* out_n_frames) {
+    if (out_logits)
+        *out_logits = nullptr;
+    if (out_n_vocab)
+        *out_n_vocab = 0;
+    if (out_n_frames)
+        *out_n_frames = 0;
+    if (!ctx || !samples || n_samples <= 0)
+        return nullptr;
+
+    // Only the non-autoregressive CTC head exposes a dense per-frame logit
+    // grid. The LLM variant decodes token-by-token — there is no [V, T] grid to
+    // hand back — so fall through to plain transcribe with empty logits.
+    if (ctx->model.hp.model_type != 0)
+        return omniasr_transcribe(ctx, samples, n_samples);
+
+    std::vector<float> logits;
+    int V = 0, T = 0;
+    ctx->capture_ctc_logits = &logits;
+    ctx->capture_ctc_n_vocab = &V;
+    ctx->capture_ctc_n_frames = &T;
+    char* text = omniasr_transcribe(ctx, samples, n_samples);
+    ctx->capture_ctc_logits = nullptr;
+    ctx->capture_ctc_n_vocab = nullptr;
+    ctx->capture_ctc_n_frames = nullptr;
+
+    if (out_logits && !logits.empty()) {
+        float* buf = (float*)malloc(logits.size() * sizeof(float));
+        if (buf) {
+            memcpy(buf, logits.data(), logits.size() * sizeof(float));
+            *out_logits = buf;
+            if (out_n_vocab)
+                *out_n_vocab = V;
+            if (out_n_frames)
+                *out_n_frames = T;
+        }
+    }
+    return text;
+}
+
+// ===========================================================================
+// LLM decoder — ggml graph with KV cache (like voxtral4b)
+// ===========================================================================
+
+static ggml_tensor* omniasr_build_dec_body(omniasr_context* ctx, ggml_context* ctx0, ggml_cgraph* gf, ggml_tensor* cur,
+                                           ggml_tensor* positions, ggml_tensor* causal_mask, int n_past, int n_tokens) {
+    auto& hp = ctx->model.hp;
+    int dd = hp.d_dec;
+    int nh = hp.n_heads_dec;
+    int hd = hp.head_dim_dec;
+    int n_layers = hp.n_dec;
+
+    const core_attn::KvSelfAttnParams kvp = {
+        /*n_heads*/ nh,
+        /*n_kv_heads*/ nh, // MHA (same as query heads)
+        /*head_dim*/ hd,
+        /*n_kv_grp*/ 1, // no GQA
+        /*n_ctx_orig*/ 0,
+        /*rope_theta*/ 10000.0f,
+        /*rope_beta_fast*/ 0.0f,
+        /*rope_beta_slow*/ 0.0f,
+        /*attn_scale*/ 1.0f / sqrtf((float)hd),
+        /*qk_norm_eps*/ 0.0f,
+        /*gqa_mode*/ core_attn::GQA_NATIVE,
+        /*rope_type*/ GGML_ROPE_TYPE_NORMAL, // fairseq2 interleaved
+    };
+
+    for (int il = 0; il < n_layers; il++) {
+        auto& b = ctx->dec_blocks[il];
+        ggml_tensor* residual = cur;
+
+        cur = ggml_rms_norm(ctx0, cur, 1e-5f);
+        cur = ggml_mul(ctx0, cur, b.attn_ln_w);
+
+        ggml_tensor* attn = core_attn::kv_self_attn(ctx0, gf, cur, b.q_w, b.k_w, b.v_w, b.o_w, nullptr, nullptr,
+                                                    positions, causal_mask, ctx->kv_k, ctx->kv_v, il, n_past, kvp);
+        cur = ggml_add(ctx0, residual, attn);
+
+        residual = cur;
+        cur = ggml_rms_norm(ctx0, cur, 1e-5f);
+        cur = ggml_mul(ctx0, cur, b.ffn_ln_w);
+        ggml_tensor* ffn = core_ffn::swiglu(ctx0, cur, b.gate_w, b.up_w, b.down_w);
+        cur = ggml_add(ctx0, residual, ffn);
+    }
+
+    cur = ggml_rms_norm(ctx0, cur, 1e-5f);
+    cur = ggml_mul(ctx0, cur, ctx->dec_ln_w);
+
+    if (n_tokens > 1) {
+        cur = ggml_view_1d(ctx0, cur, dd, (size_t)(n_tokens - 1) * dd * sizeof(float));
+        cur = ggml_reshape_2d(ctx0, cur, dd, 1);
+    }
+
+    return ggml_mul_mat(ctx0, ctx->lm_head_w, cur);
+}
+
+// Build decoder graph for n_tokens at position n_past. Prefill uses F32 embeddings;
+// single-token decode can use token IDs and backend get_rows to avoid CPU embedding copies.
+static ggml_cgraph* omniasr_build_dec_graph(omniasr_context* ctx, int n_past, int n_tokens, bool input_ids_mode,
+                                            bool output_token_id) {
+    auto& hp = ctx->model.hp;
+    int dd = hp.d_dec;
+
+    ggml_init_params ip = {ctx->compute_meta.size(), ctx->compute_meta.data(), true};
+    ggml_context* ctx0 = ggml_init(ip);
+    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 32768, false);
+
+    ggml_tensor* cur = nullptr;
+    if (input_ids_mode) {
+        ggml_tensor* input_ids = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_tokens);
+        ggml_set_name(input_ids, "input_ids");
+        ggml_set_input(input_ids);
+        cur = ggml_get_rows(ctx0, ctx->tok_emb_w, input_ids);
+    } else {
+        ggml_tensor* embeds = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, dd, n_tokens);
+        ggml_set_name(embeds, "dec_input");
+        ggml_set_input(embeds);
+        cur = embeds;
+    }
+
+    ggml_tensor* positions = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_tokens);
+    ggml_set_name(positions, "positions");
+    ggml_set_input(positions);
+
+    ggml_tensor* causal_mask = nullptr;
+    if (n_tokens > 1) {
+        causal_mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F16, n_past + n_tokens, n_tokens);
+        ggml_set_name(causal_mask, "causal_mask");
+        ggml_set_input(causal_mask);
+    }
+
+    cur = omniasr_build_dec_body(ctx, ctx0, gf, cur, positions, causal_mask, n_past, n_tokens);
+
+    if (output_token_id) {
+        cur = ggml_argmax(ctx0, cur);
+        ggml_set_name(cur, "next_token");
+        ggml_set_output(cur);
+        ggml_build_forward_expand(gf, cur);
+        return gf;
+    }
+
+    ggml_set_name(cur, "logits");
+    ggml_set_output(cur);
+    ggml_build_forward_expand(gf, cur);
+    return gf;
+}
+
+static bool omniasr_run_dec_token(omniasr_context* ctx, int token_id, int n_past, int& next_token, omniasr_perf* perf,
+                                  std::vector<float>* out_logits = nullptr) {
+    int32_t input_id = token_id;
+    int32_t position = n_past;
+
+    // When the caller wants raw logits we must build the logits-mode graph
+    // (output_token_id=false) so the final ggml_argmax doesn't strip them.
+    const bool need_logits = (out_logits != nullptr);
+    ggml_cgraph* gf = omniasr_build_dec_graph(ctx, n_past, 1, true, !need_logits);
+    if (perf && perf->decode_nodes == 0)
+        perf->decode_nodes = ggml_graph_n_nodes(gf);
+    ggml_backend_sched_reset(ctx->sched);
+    int64_t t0 = ggml_time_us();
+    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
+        fprintf(stderr, "omniasr-llm: token decoder graph alloc failed\n");
+        return false;
+    }
+    if (perf)
+        perf->t_decode_alloc_us += ggml_time_us() - t0;
+
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "input_ids"), &input_id, 0, sizeof(input_id));
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "positions"), &position, 0, sizeof(position));
+
+    t0 = ggml_time_us();
+    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
+        fprintf(stderr, "omniasr-llm: token decoder graph compute failed\n");
+        return false;
+    }
+    if (perf) {
+        perf->t_decode_compute_us += ggml_time_us() - t0;
+        perf->n_dec_steps++;
+    }
+
+    t0 = ggml_time_us();
+    if (need_logits) {
+        ggml_tensor* lg = ggml_graph_get_tensor(gf, "logits");
+        const int V = (int)lg->ne[0];
+        out_logits->resize((size_t)V);
+        ggml_backend_tensor_get(lg, out_logits->data(), 0, (size_t)V * sizeof(float));
+        int best = 0;
+        float best_v = (*out_logits)[0];
+        for (int i = 1; i < V; i++)
+            if ((*out_logits)[i] > best_v) {
+                best_v = (*out_logits)[i];
+                best = i;
+            }
+        next_token = best;
+    } else {
+        ggml_tensor* nt = ggml_graph_get_tensor(gf, "next_token");
+        int32_t id = 0;
+        ggml_backend_tensor_get(nt, &id, 0, sizeof(id));
+        next_token = id;
+    }
+    if (perf)
+        perf->t_decode_logits_us += ggml_time_us() - t0;
+    return true;
+}
+
+static ggml_cgraph* omniasr_build_prefill_graph(omniasr_context* ctx, int d_enc, int T_enc, bool use_lang,
+                                                bool use_seg_marker, int prefix_len, bool output_token_id) {
+    auto& hp = ctx->model.hp;
+    int dd = hp.d_dec;
+
+    ggml_init_params ip = {ctx->compute_meta.size(), ctx->compute_meta.data(), true};
+    ggml_context* ctx0 = ggml_init(ip);
+    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 32768, false);
+
+    ggml_tensor* enc = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, d_enc, T_enc);
+    ggml_set_name(enc, "encoder_out");
+    ggml_set_input(enc);
+
+    ggml_tensor* cur = ggml_mul_mat(ctx0, ctx->enc_proj_w, enc);
+    if (ctx->enc_proj_b)
+        cur = ggml_add(ctx0, cur, ctx->enc_proj_b);
+
+    if (use_lang) {
+        ggml_tensor* lid_id = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, 1);
+        ggml_set_name(lid_id, "lid_id");
+        ggml_set_input(lid_id);
+        cur = ggml_concat(ctx0, cur, ggml_get_rows(ctx0, ctx->tok_emb_w, lid_id), 1);
+
+        ggml_tensor* lang_id = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, 1);
+        ggml_set_name(lang_id, "lang_id");
+        ggml_set_input(lang_id);
+        cur = ggml_concat(ctx0, cur, ggml_get_rows(ctx0, ctx->lang_emb_w, lang_id), 1);
+    }
+
+    // Streaming segment marker: inserted between lang_emb and BOS
+    if (use_seg_marker) {
+        ggml_tensor* seg_id = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, 1);
+        ggml_set_name(seg_id, "seg_marker_id");
+        ggml_set_input(seg_id);
+        cur = ggml_concat(ctx0, cur, ggml_get_rows(ctx0, ctx->tok_emb_w, seg_id), 1);
+    }
+
+    ggml_tensor* bos_id = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, 1);
+    ggml_set_name(bos_id, "bos_id");
+    ggml_set_input(bos_id);
+    cur = ggml_concat(ctx0, cur, ggml_get_rows(ctx0, ctx->tok_emb_w, bos_id), 1);
+    GGML_ASSERT(cur->ne[0] == dd && cur->ne[1] == prefix_len);
+
+    ggml_tensor* positions = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, prefix_len);
+    ggml_set_name(positions, "positions");
+    ggml_set_input(positions);
+
+    ggml_tensor* causal_mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F16, prefix_len, prefix_len);
+    ggml_set_name(causal_mask, "causal_mask");
+    ggml_set_input(causal_mask);
+
+    cur = omniasr_build_dec_body(ctx, ctx0, gf, cur, positions, causal_mask, 0, prefix_len);
+    if (output_token_id) {
+        cur = ggml_argmax(ctx0, cur);
+        ggml_set_name(cur, "next_token");
+        ggml_set_output(cur);
+        ggml_build_forward_expand(gf, cur);
+        return gf;
+    }
+
+    ggml_set_name(cur, "logits");
+    ggml_set_output(cur);
+    ggml_build_forward_expand(gf, cur);
+    return gf;
+}
+
+static bool omniasr_run_prefill(omniasr_context* ctx, const std::vector<float>& encoder_out, int d_enc, int T_enc,
+                                bool use_lang, int lang_id, int lid_marker_id, int seg_marker_id, int prefix_len,
+                                int& next_token, omniasr_perf* perf, std::vector<float>* out_logits = nullptr) {
+    std::vector<int32_t> positions(prefix_len);
+    for (int i = 0; i < prefix_len; i++)
+        positions[i] = i;
+
+    std::vector<ggml_fp16_t> mask((size_t)prefix_len * prefix_len, ggml_fp32_to_fp16(0.0f));
+    ggml_fp16_t neg_inf = ggml_fp32_to_fp16(-INFINITY);
+    for (int q = 0; q < prefix_len; q++)
+        for (int k = 0; k < prefix_len; k++)
+            if (k > q)
+                mask[(size_t)q * prefix_len + k] = neg_inf;
+
+    int32_t lid = lid_marker_id;
+    int32_t lang = lang_id;
+    int32_t bos = ctx->model.hp.bos_id;
+    int32_t seg = seg_marker_id;
+    const bool use_seg_marker = (seg_marker_id >= 0);
+
+    const bool need_logits = (out_logits != nullptr);
+    ggml_cgraph* gf =
+        omniasr_build_prefill_graph(ctx, d_enc, T_enc, use_lang, use_seg_marker, prefix_len, !need_logits);
+    if (perf)
+        perf->prefill_nodes = ggml_graph_n_nodes(gf);
+    ggml_backend_sched_reset(ctx->sched);
+    int64_t t0 = ggml_time_us();
+    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
+        fprintf(stderr, "omniasr-llm: prefill graph alloc failed\n");
+        return false;
+    }
+    if (perf)
+        perf->t_prefill_alloc_us += ggml_time_us() - t0;
+
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "encoder_out"), encoder_out.data(), 0,
+                            (size_t)d_enc * T_enc * sizeof(float));
+    if (use_lang) {
+        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "lid_id"), &lid, 0, sizeof(lid));
+        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "lang_id"), &lang, 0, sizeof(lang));
+    }
+    if (use_seg_marker)
+        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "seg_marker_id"), &seg, 0, sizeof(seg));
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "bos_id"), &bos, 0, sizeof(bos));
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "positions"), positions.data(), 0,
+                            positions.size() * sizeof(int32_t));
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "causal_mask"), mask.data(), 0,
+                            mask.size() * sizeof(ggml_fp16_t));
+
+    t0 = ggml_time_us();
+    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
+        fprintf(stderr, "omniasr-llm: prefill graph compute failed\n");
+        return false;
+    }
+    if (perf)
+        perf->t_prefill_compute_us += ggml_time_us() - t0;
+
+    t0 = ggml_time_us();
+    if (need_logits) {
+        ggml_tensor* lg = ggml_graph_get_tensor(gf, "logits");
+        const int V = (int)lg->ne[0];
+        out_logits->resize((size_t)V);
+        ggml_backend_tensor_get(lg, out_logits->data(), 0, (size_t)V * sizeof(float));
+        int best = 0;
+        float best_v = (*out_logits)[0];
+        for (int i = 1; i < V; i++)
+            if ((*out_logits)[i] > best_v) {
+                best_v = (*out_logits)[i];
+                best = i;
+            }
+        next_token = best;
+    } else {
+        ggml_tensor* nt = ggml_graph_get_tensor(gf, "next_token");
+        int32_t id = 0;
+        ggml_backend_tensor_get(nt, &id, 0, sizeof(id));
+        next_token = id;
+    }
+    if (perf)
+        perf->t_decode_logits_us += ggml_time_us() - t0;
+    return true;
+}
+
+static char* omniasr_transcribe_llm(omniasr_context* ctx, const std::vector<float>& encoder_out, int d_enc, int T_enc,
+                                    omniasr_perf* perf, std::vector<int32_t>* out_token_ids,
+                                    std::vector<float>* out_token_probs) {
+    auto& m = ctx->model;
+    auto& hp = m.hp;
+
+    int dd = hp.d_dec; // 4096
+
+    const int tok_emb_size = ctx->tok_emb_w ? (int)ctx->tok_emb_w->ne[1] : 0;
+    // Look up language ID from embedded mapping or params
+    int lang_id = 417; // eng_Latn default
+    if (ctx->params.language && ctx->params.language[0]) {
+        std::string lang_str(ctx->params.language);
+        // Try direct FLORES-200 match first (e.g. "eng_Latn")
+        for (int i = 0; i < (int)m.lang_codes.size(); i++) {
+            if (m.lang_codes[i] == lang_str) {
+                lang_id = i + 1; // +1 per factory.py convention
+                break;
+            }
+        }
+        // Try ISO 639-1 → FLORES-200 mapping for common codes
+        static const std::pair<const char*, const char*> iso_to_flores[] = {
+            {"en", "eng_Latn"}, {"de", "deu_Latn"}, {"fr", "fra_Latn"}, {"es", "spa_Latn"},
+            {"it", "ita_Latn"}, {"pt", "por_Latn"}, {"nl", "nld_Latn"}, {"ru", "rus_Cyrl"},
+            {"zh", "zho_Hans"}, {"ja", "jpn_Jpan"}, {"ko", "kor_Hang"}, {"ar", "arb_Arab"},
+            {"hi", "hin_Deva"}, {"tr", "tur_Latn"}, {"pl", "pol_Latn"}, {"sv", "swe_Latn"},
+        };
+        for (auto& [iso, flores] : iso_to_flores) {
+            if (lang_str == iso) {
+                for (int i = 0; i < (int)m.lang_codes.size(); i++) {
+                    if (m.lang_codes[i] == flores) {
+                        lang_id = i + 1;
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    bool use_lang = (hp.n_langs > 0 && ctx->lang_emb_w);
+    // Standard sequence: [audio_embs] [lid_marker] [lang_emb] [BOS] [generated...]
+    // Streaming sequence: [audio_embs] [lid_marker] [lang_emb] [seg_marker] [BOS] [generated...]
+    // lid_marker = vocab_size (streaming_lang token in unlimited variant)
+    int lid_marker_id = hp.vocab_size;
+    if (lang_id < 0 || lang_id >= hp.n_langs || lid_marker_id >= tok_emb_size)
+        use_lang = false;
+
+    // Streaming/unlimited: insert segment marker between lang_emb and BOS.
+    // For single-segment audio, use last_segment (vocab_size+1).
+    // For multi-segment, the outer loop sets this per chunk.
+    const bool is_streaming = (hp.n_special_tokens == 3);
+    int seg_marker_id = -1; // -1 = not used (standard model)
+    if (is_streaming) {
+        seg_marker_id = hp.vocab_size + 1; // last_segment (single-segment default)
+        if (seg_marker_id >= tok_emb_size) {
+            fprintf(stderr, "omniasr-llm: streaming tok_emb too small for segment marker %d (size=%d)\n", seg_marker_id,
+                    tok_emb_size);
+            seg_marker_id = -1;
+        }
+    }
+
+    int n_lang_tokens = use_lang ? 2 : 0;                      // lid_marker + lang_emb
+    int n_seg_tokens = (seg_marker_id >= 0) ? 1 : 0;           // segment marker
+    int prefix_len = T_enc + n_lang_tokens + n_seg_tokens + 1; // audio + [lid + lang] + [seg] + BOS
+
+    if (ctx->params.verbosity >= 1)
+        fprintf(stderr, "omniasr-llm: prefix len=%d (%d audio%s%s + BOS), lang_id=%d, d=%d%s\n", prefix_len, T_enc,
+                use_lang ? " + lid + lang" : "", (seg_marker_id >= 0) ? " + seg" : "", lang_id, dd,
+                is_streaming ? " [streaming]" : "");
+
+    // 3. Segment splitting for audio longer than the training window.
+    // The model was trained on 15-second audio segments. For audio longer
+    // than segment_secs, split into chunks and decode each segment
+    // independently. Streaming-mode GGUFs additionally inject a segment
+    // marker between chunks (gated on is_streaming above); non-streaming
+    // variants chunk without the marker (each chunk goes through the
+    // encoder + decoder as if it were a complete utterance).
+    // CNN total stride = product of cnn_strides (typically 5*2^6 = 320).
+    // Frames per segment = (segment_secs * 16000) / total_stride.
+    int frames_per_seg = T_enc; // default: single segment (entire audio)
+    int n_segments = 1;
+    if (T_enc > 1) {
+        int total_stride = 1;
+        for (int s : m.cnn_strides)
+            total_stride *= s;
+        const int seg_frames = (int)(hp.segment_secs * 16000.0f) / total_stride;
+        const bool force_seg = (seg_frames > 0 && T_enc > seg_frames);
+        if (is_streaming || force_seg) {
+            frames_per_seg = seg_frames > 0 ? seg_frames : T_enc;
+            n_segments = (T_enc + frames_per_seg - 1) / frames_per_seg;
+            if (ctx->params.verbosity >= 1 && n_segments > 1)
+                fprintf(stderr, "omniasr-llm: splitting into %d segments (%d frames each, %s)\n", n_segments,
+                        frames_per_seg, is_streaming ? "streaming" : "non-streaming, length-forced");
+        }
+    }
+
+    // 4. Shared decode state
+    int max_gen = ctx->params.max_new_tokens > 0 ? ctx->params.max_new_tokens : 512;
+    const bool want_probs = (out_token_ids && out_token_probs);
+    const bool sampling = (ctx->params.temperature > 0.0f);
+    const bool beam = (ctx->params.beam_size > 1);
+    const bool capture_logits = (want_probs || sampling || beam);
+
+    // Per-call seed
+    uint64_t rng_state = 0x9E3779B97F4A7C15ull ^ (uint64_t)(uintptr_t)encoder_out.data() ^
+                         (uint64_t)(encoder_out.size() ^ 0xDEADBEEFCAFEBABEull) ^
+                         (ctx->seed_override * 0xBF58476D1CE4E5B9ull);
+    if (rng_state == 0)
+        rng_state = 0x9E3779B97F4A7C15ull;
+    auto rand_uniform = [&]() -> float {
+        rng_state ^= rng_state << 13;
+        rng_state ^= rng_state >> 7;
+        rng_state ^= rng_state << 17;
+        return (float)((rng_state >> 11) & 0x1FFFFF) / (float)(1 << 21);
+    };
+
+    auto pick_from_logits = [&](const std::vector<float>& logits, int& picked, float& picked_prob) {
+        const int V = (int)logits.size();
+        if (V == 0) {
+            picked = 0;
+            picked_prob = 0.0f;
+            return;
+        }
+        int argmax_idx = 0;
+        float mx = logits[0];
+        for (int i = 1; i < V; i++)
+            if (logits[i] > mx) {
+                mx = logits[i];
+                argmax_idx = i;
+            }
+        if (!sampling) {
+            picked = argmax_idx;
+            float s = 0.f;
+            for (int i = 0; i < V; i++)
+                s += expf(logits[i] - mx);
+            picked_prob = 1.0f / s;
+            return;
+        }
+        const float inv_T = 1.0f / ctx->params.temperature;
+        std::vector<float> probs((size_t)V);
+        float s = 0.f;
+        for (int i = 0; i < V; i++) {
+            probs[i] = expf((logits[i] - mx) * inv_T);
+            s += probs[i];
+        }
+        const float inv_s = 1.0f / s;
+        for (int i = 0; i < V; i++)
+            probs[i] *= inv_s;
+        float u = rand_uniform();
+        float c = 0.f;
+        picked = V - 1;
+        for (int i = 0; i < V; i++) {
+            c += probs[i];
+            if (u <= c) {
+                picked = i;
+                break;
+            }
+        }
+        picked_prob = probs[picked];
+    };
+
+    // 5. Segment loop: decode each audio segment independently.
+    std::vector<int> output_tokens;
+
+    for (int seg_idx = 0; seg_idx < n_segments; seg_idx++) {
+        // Compute encoder frame range for this segment
+        int seg_start = seg_idx * frames_per_seg;
+        int seg_end = std::min(seg_start + frames_per_seg, T_enc);
+        int seg_T = seg_end - seg_start;
+
+        // Extract encoder output slice for this segment
+        std::vector<float> seg_enc((size_t)d_enc * seg_T);
+        memcpy(seg_enc.data(), encoder_out.data() + (size_t)seg_start * d_enc, (size_t)d_enc * seg_T * sizeof(float));
+
+        // For streaming: set segment marker (last_segment vs regular_segment)
+        int cur_seg_marker = seg_marker_id; // default: last_segment (vocab_size+1)
+        if (is_streaming) {
+            bool is_last = (seg_idx == n_segments - 1);
+            cur_seg_marker = is_last ? (hp.vocab_size + 1) : (hp.vocab_size + 2);
+        }
+
+        // Compute prefix_len for this segment
+        int seg_prefix_len = seg_T + n_lang_tokens + n_seg_tokens + 1;
+
+        // Allocate/reallocate KV cache
+        int seg_max_ctx = seg_prefix_len + max_gen;
+        if (!ctx->kv_k) {
+            omniasr_alloc_kv_cache(ctx, seg_max_ctx);
+        } else if (ctx->kv_max_ctx < seg_max_ctx) {
+            if (ctx->kv_ctx)
+                ggml_free(ctx->kv_ctx);
+            if (ctx->kv_buf)
+                ggml_backend_buffer_free(ctx->kv_buf);
+            ctx->kv_k = ctx->kv_v = nullptr;
+            omniasr_alloc_kv_cache(ctx, seg_max_ctx);
+        }
+        // Clear KV cache for each segment
+        if (ctx->kv_buf)
+            ggml_backend_buffer_clear(ctx->kv_buf, 0);
+        ctx->kv_n_used = 0;
+
+        // Prefill this segment
+        int cur_token = 0;
+        float cur_prob = 0.0f;
+        std::vector<float> step_logits;
+
+        if (!omniasr_run_prefill(ctx, seg_enc, d_enc, seg_T, use_lang, lang_id, lid_marker_id, cur_seg_marker,
+                                 seg_prefix_len, cur_token, perf, capture_logits ? &step_logits : nullptr)) {
+            fprintf(stderr, "omniasr-llm: prefill failed (segment %d/%d)\n", seg_idx + 1, n_segments);
+            break;
+        }
+        ctx->kv_n_used = seg_prefix_len;
+        if (capture_logits && !step_logits.empty())
+            pick_from_logits(step_logits, cur_token, cur_prob);
+
+        if (ctx->params.verbosity >= 2)
+            fprintf(stderr, "  seg %d/%d prefill → token=%d (%s)\n", seg_idx + 1, n_segments, cur_token,
+                    cur_token < (int)m.vocab.size() ? m.vocab[cur_token].c_str() : "?");
+
+        // Decode this segment
+        std::vector<int> seg_tokens;
+
+        if (beam) {
+            // GH #161: snapshot/restore KV on-device via a recycled buffer
+            // pool (no PCIe round-trip + sync per beam per step).
+            core_attn::kv_snapshot_pool kv_pool(ctx->kv_k, ctx->kv_v);
+            auto save = [&kv_pool](omniasr_context*) -> core_attn::kv_snapshot* { return kv_pool.save(); };
+            auto restore = [&kv_pool](omniasr_context*, core_attn::kv_snapshot* s) { kv_pool.restore(s); };
+            auto snap_free = [&kv_pool](core_attn::kv_snapshot* s) { kv_pool.release(s); };
+            std::vector<float> step_buf;
+            auto step_fn = [&step_buf, perf](omniasr_context* c, int32_t tok, int n_past) -> float* {
+                int dummy = 0;
+                if (!omniasr_run_dec_token(c, tok, n_past, dummy, perf, &step_buf))
+                    return nullptr;
+                const int V = (int)step_buf.size();
+                float* out = (float*)std::malloc((size_t)V * sizeof(float));
+                std::memcpy(out, step_buf.data(), (size_t)V * sizeof(float));
+                return out;
+            };
+
+            core_beam_decode::Config cfg;
+            cfg.semantics =
+                core_beam_decode::Semantics::Legacy; // upstream = fairseq2 beam search, not transformers generate()
+            cfg.max_new_tokens = max_gen;
+            cfg.eos_id = hp.eos_id;
+            cfg.vocab_size = (int)step_logits.size();
+            cfg.beam_size = ctx->params.beam_size;
+            cfg.prompt_len = seg_prefix_len;
+
+            if (cfg.vocab_size > 0) {
+                auto r = core_beam_decode::run_with_probs_branched(ctx, step_logits.data(), save, restore, snap_free,
+                                                                   step_fn, cfg);
+                for (size_t i = 0; i < r.tokens.size(); i++) {
+                    if (r.tokens[i] == hp.eos_id)
+                        break;
+                    seg_tokens.push_back(r.tokens[i]);
+                    if (want_probs) {
+                        out_token_ids->push_back(r.tokens[i]);
+                        out_token_probs->push_back(r.probs[i]);
+                    }
+                }
+            }
+        } else {
+            if (cur_token != hp.eos_id) {
+                seg_tokens.push_back(cur_token);
+                if (want_probs) {
+                    out_token_ids->push_back(cur_token);
+                    out_token_probs->push_back(cur_prob);
+                }
+            }
+
+            for (int step = 0; (int)seg_tokens.size() < max_gen && cur_token != hp.eos_id; step++) {
+                if (cur_token < 0 || cur_token >= tok_emb_size)
+                    break;
+
+                int n_past = seg_prefix_len + step;
+                if (!omniasr_run_dec_token(ctx, cur_token, n_past, cur_token, perf,
+                                           capture_logits ? &step_logits : nullptr)) {
+                    fprintf(stderr, "omniasr-llm: decode step %d failed (segment %d)\n", step, seg_idx + 1);
+                    break;
+                }
+                if (capture_logits && !step_logits.empty())
+                    pick_from_logits(step_logits, cur_token, cur_prob);
+
+                if (cur_token == hp.eos_id)
+                    break;
+                seg_tokens.push_back(cur_token);
+                if (want_probs) {
+                    out_token_ids->push_back(cur_token);
+                    out_token_probs->push_back(cur_prob);
+                }
+
+                if (ctx->params.verbosity >= 2 && step < 5)
+                    fprintf(stderr, "  gen %d: token=%d (%s)\n", step, cur_token,
+                            cur_token < (int)m.vocab.size() ? m.vocab[cur_token].c_str() : "?");
+            }
+        }
+
+        if (ctx->params.verbosity >= 1 && n_segments > 1)
+            fprintf(stderr, "omniasr-llm: segment %d/%d → %d tokens\n", seg_idx + 1, n_segments,
+                    (int)seg_tokens.size());
+
+        output_tokens.insert(output_tokens.end(), seg_tokens.begin(), seg_tokens.end());
+    }
+
+    if (ctx->params.verbosity >= 1)
+        fprintf(stderr, "omniasr-llm: generated %d tokens total\n", (int)output_tokens.size());
+
+    // Detokenize (same as CTC)
+    std::string result;
+    for (int tid : output_tokens) {
+        if (tid == hp.bos_id || tid == hp.eos_id || tid == hp.pad_id || tid == hp.unk_id)
+            continue;
+        if (tid < (int)m.vocab.size()) {
+            std::string piece = m.vocab[tid];
+            for (size_t i = 0; i < piece.size(); i++) {
+                if ((unsigned char)piece[i] == 0xE2 && i + 2 < piece.size() && (unsigned char)piece[i + 1] == 0x96 &&
+                    (unsigned char)piece[i + 2] == 0x81) {
+                    result += ' ';
+                    i += 2;
+                } else {
+                    result += piece[i];
+                }
+            }
+        }
+    }
+
+    // Trim
+    while (!result.empty() && result.front() == ' ')
+        result.erase(result.begin());
+    while (!result.empty() && result.back() == ' ')
+        result.pop_back();
+
+    if (result.empty())
+        return nullptr;
+
+    char* out = (char*)malloc(result.size() + 1);
+    if (!out)
+        return nullptr;
+    memcpy(out, result.c_str(), result.size());
+    out[result.size()] = '\0';
+    return out;
+}
+
+extern "C" struct omniasr_result* omniasr_transcribe_with_probs(struct omniasr_context* ctx, const float* samples,
+                                                                int n_samples) {
+    if (!ctx || !samples || n_samples <= 0)
+        return nullptr;
+    // Only the LLM variant produces per-token logits. The CTC variant emits
+    // characters via argmax over the encoder head; not currently surfaced.
+    if (ctx->model.hp.model_type != 1)
+        return nullptr;
+
+    std::vector<int32_t> ids;
+    std::vector<float> probs;
+    ctx->capture_token_ids = &ids;
+    ctx->capture_token_probs = &probs;
+    char* text = omniasr_transcribe(ctx, samples, n_samples);
+    ctx->capture_token_ids = nullptr;
+    ctx->capture_token_probs = nullptr;
+    if (!text)
+        return nullptr;
+
+    // Filter to non-special ids (mirrors the detokenisation filter so the
+    // emitted text/tokens stay aligned).
+    auto& hp = ctx->model.hp;
+    auto* r = (omniasr_result*)calloc(1, sizeof(omniasr_result));
+    r->text = text;
+    std::vector<int> kept_ids;
+    std::vector<float> kept_probs;
+    kept_ids.reserve(ids.size());
+    kept_probs.reserve(ids.size());
+    for (size_t i = 0; i < ids.size(); i++) {
+        int tid = ids[i];
+        if (tid == hp.bos_id || tid == hp.eos_id || tid == hp.pad_id || tid == hp.unk_id)
+            continue;
+        kept_ids.push_back(tid);
+        kept_probs.push_back(i < probs.size() ? probs[i] : 0.0f);
+    }
+    r->n_tokens = (int)kept_ids.size();
+    if (r->n_tokens > 0) {
+        r->token_ids = (int*)malloc(sizeof(int) * (size_t)r->n_tokens);
+        r->token_probs = (float*)malloc(sizeof(float) * (size_t)r->n_tokens);
+        memcpy(r->token_ids, kept_ids.data(), sizeof(int) * (size_t)r->n_tokens);
+        memcpy(r->token_probs, kept_probs.data(), sizeof(float) * (size_t)r->n_tokens);
+    }
+    return r;
+}
+
+extern "C" void omniasr_result_free(struct omniasr_result* r) {
+    if (!r)
+        return;
+    free(r->text);
+    free(r->token_ids);
+    free(r->token_probs);
+    free(r);
+}
+
+extern "C" char* omniasr_ctc_decode_logits(struct omniasr_context* ctx, const float* logits, int n_vocab,
+                                           int n_frames) {
+    if (!ctx || !logits || n_vocab <= 0 || n_frames <= 0 || ctx->model.hp.model_type != 0)
+        return nullptr;
+    std::string text = ctc_greedy_text(ctx, logits, n_vocab, n_frames);
+    if (text.empty())
+        return nullptr;
+    char* out = (char*)malloc(text.size() + 1);
+    if (!out)
+        return nullptr;
+    memcpy(out, text.c_str(), text.size() + 1);
+    return out;
+}
+
+extern "C" const char* omniasr_token_text(struct omniasr_context* ctx, int id) {
+    if (!ctx || id < 0 || id >= (int)ctx->model.vocab.size())
+        return "";
+    return ctx->model.vocab[id].c_str();
+}
+
+extern "C" int omniasr_n_vocab(struct omniasr_context* ctx) {
+    return ctx ? (int)ctx->model.vocab.size() : 0;
+}
+
+extern "C" void omniasr_set_seed(struct omniasr_context* ctx, uint64_t seed) {
+    if (ctx)
+        ctx->seed_override = seed;
+}
+
+extern "C" void omniasr_set_beam_size(struct omniasr_context* ctx, int beam_size) {
+    if (ctx)
+        ctx->params.beam_size = (beam_size > 0) ? beam_size : 1;
+}
+
+extern "C" bool omniasr_is_ctc(struct omniasr_context* ctx) {
+    return ctx && ctx->model.hp.model_type == 0;
+}

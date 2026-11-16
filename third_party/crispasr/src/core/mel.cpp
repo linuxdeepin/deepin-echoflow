@@ -1,0 +1,537 @@
+// src/core/mel.cpp — implementation of compute_log_mel().
+// See src/core/mel.h for the interface contract.
+
+#include "mel.h"
+
+#include "parallel_for.h"
+#include "crispasr_env.h"
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <thread>
+#include <vector>
+
+#if defined(HAVE_BLAS)
+#if defined(__APPLE__)
+#include <Accelerate/Accelerate.h>
+#else
+#include <cblas.h>
+#endif
+#endif
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
+namespace core_mel {
+
+std::vector<float> compute(const float* samples, int n_samples, const float* window_in, int win_length,
+                           const float* mel_fb, int n_freqs, FftR2C fft, const Params& p, int& T_out) {
+    const int n_fft = p.n_fft;
+    const int hop = p.hop_length;
+    const int nmels = p.n_mels;
+
+    // -----------------------------------------------------------------
+    // 1a. Optional pre-emphasis: y[0] = x[0]; y[i] = x[i] - α*x[i-1].
+    //     NeMo applies this to the raw input before center-padding,
+    //     so the high-pass filter sees the true first sample (not the
+    //     zero pad) — see NeMo FilterbankFeatures.forward.
+    // -----------------------------------------------------------------
+    std::vector<float> preemph_in;
+    const float* base_ptr = samples;
+    if (p.preemph != 0.0f && n_samples > 0) {
+        preemph_in.resize((size_t)n_samples);
+        preemph_in[0] = samples[0];
+        const float a = p.preemph;
+        for (int i = 1; i < n_samples; i++)
+            preemph_in[i] = samples[i] - a * samples[i - 1];
+        base_ptr = preemph_in.data();
+    }
+
+    // -----------------------------------------------------------------
+    // 1b. Optional center-pad of the input by n_fft/2 on each side.
+    // -----------------------------------------------------------------
+    std::vector<float> padded_in;
+    const float* in_ptr;
+    int in_len;
+    if (p.center_pad) {
+        const int pad = n_fft / 2;
+        padded_in.assign((size_t)(pad + n_samples + pad), 0.0f);
+        std::memcpy(padded_in.data() + pad, base_ptr, (size_t)n_samples * sizeof(float));
+        if (p.center_pad_reflect) {
+            // Reflect-pad matching PyTorch's torch.nn.functional.pad(x, (pad, pad), "reflect").
+            // Left: padded[pad-1-i] = base_ptr[i+1] for i in [0, pad)
+            for (int i = 0; i < pad; i++) {
+                int src = (i + 1) < n_samples ? (i + 1) : n_samples - 1;
+                padded_in[pad - 1 - i] = base_ptr[src];
+            }
+            // Right: padded[pad+n_samples+i] = base_ptr[n_samples-2-i] for i in [0, pad)
+            for (int i = 0; i < pad; i++) {
+                int src = (n_samples - 2 - i) >= 0 ? (n_samples - 2 - i) : 0;
+                padded_in[pad + n_samples + i] = base_ptr[src];
+            }
+        }
+        // else: zero-pad (padded_in already zero-initialized via resize)
+        in_ptr = padded_in.data();
+        in_len = (int)padded_in.size();
+    } else {
+        in_ptr = base_ptr;
+        in_len = n_samples;
+    }
+
+    // -----------------------------------------------------------------
+    // 2. Build the STFT window, center-padded to n_fft if win_length is
+    //    shorter. NeMo cluster stores a win_length-sized window; the
+    //    HF cluster stores it already padded to n_fft. Both work: the
+    //    center-pad is a no-op when win_length == n_fft.
+    // -----------------------------------------------------------------
+    std::vector<float> window(n_fft, 0.0f);
+    {
+        const int lpad = (n_fft - win_length) / 2;
+        const int wn = std::min(win_length, n_fft);
+        for (int i = 0; i < wn; i++)
+            window[lpad + i] = window_in[i];
+    }
+
+    // -----------------------------------------------------------------
+    // 3. STFT → power spectrum (stored [T, n_freqs] row-major).
+    // -----------------------------------------------------------------
+    int T = in_len >= n_fft ? (in_len - n_fft) / hop + 1 : 0;
+    if (p.drop_last_frame && T > 0)
+        T -= 1;
+    // Optional even-T guarantee: when the remaining frame count is odd,
+    // shift the window start by one hop to produce an even T. This is
+    // what voxtral4b needs (it feeds the mel into a stride-2 conv).
+    int t_start = 0;
+    if (p.drop_first_frame_if_odd && T > 0 && (T % 2 != 0)) {
+        T -= 1;
+        t_start = 1;
+    }
+    if (T <= 0) {
+        T_out = 0;
+        return {};
+    }
+
+    const bool mel_timing = (std::getenv("CRISPASR_MEL_TIMING") != nullptr);
+    // §176f: OpenMP-parallel STFT. Each frame's window-multiply + FFT + power
+    // write touches only its own [t] row of `power` and thread-private scratch,
+    // so the loop is data-race free and bit-identical to the serial path. It is
+    // OPT-IN (CRISPASR_MEL_PARALLEL=1, default serial) because the `fft` callable
+    // is supplied per backend (cohere_fft_r2c, glm_fft, voxtral_fft_wrapper, …)
+    // and the parallel path is only safe when that callable is re-entrant. Flip
+    // a backend to parallel-by-default once its fft is confirmed thread-safe
+    // (audit: see Params::allow_parallel_stft) AND benched faster on the arch.
+    // Measured (cohere, M1, 8 cores): warm STFT ~2.4× (43→18 ms / 800 frames).
+    // Enabled by the global env var OR the per-backend Params flag.
+    // #305: parallel STFT is now DEFAULT ON (opt out with CRISPASR_MEL_SERIAL=1).
+    // The §176f OpenMP path was `#ifdef _OPENMP` only and AppleClang ships no
+    // libomp → it was compiled out on macOS, so the win never reached this box;
+    // the portable std::thread path below fixes that. CRISPASR_MEL_PARALLEL and
+    // Params::allow_parallel_stft are kept for back-compat (now redundant).
+    const bool mel_parallel = (std::getenv("CRISPASR_MEL_SERIAL") == nullptr);
+    const auto t_stft0 = std::chrono::steady_clock::now();
+    bool ran_parallel = false;
+
+    std::vector<float> power((size_t)T * n_freqs, 0.0f);
+    {
+        const bool use_magnitude = (p.spec_kind == SpecKind::Magnitude);
+        auto compute_frame = [&](int t, float* fft_in, float* fft_out) {
+            const float* frame = in_ptr + (size_t)(t + t_start) * hop;
+            for (int n = 0; n < n_fft; n++)
+                fft_in[n] = frame[n] * window[n];
+            fft(fft_in, n_fft, fft_out);
+            for (int k = 0; k < n_freqs; k++) {
+                const float re = fft_out[2 * k];
+                const float im = fft_out[2 * k + 1];
+                const float pw = re * re + im * im;
+                power[(size_t)t * n_freqs + k] = use_magnitude ? std::sqrt(pw) : pw;
+            }
+        };
+        // Threshold: below ~256 frames (≈2.5 s at 100 fps) thread-spawn overhead
+        // dominates the handful of FFTs, so stay serial regardless of the flag.
+        if (mel_parallel && T >= 256) {
+            ran_parallel = true;
+#ifdef _OPENMP
+            // Scope the thread count to this region via num_threads() rather than
+            // omp_set_num_threads() so a caller-supplied budget (p.n_threads) can't
+            // race with concurrent callers of the global OpenMP state. p.n_threads=0
+            // keeps the previous omp_get_max_threads() default.
+            const int omp_nt = p.n_threads > 0 ? p.n_threads : omp_get_max_threads();
+#pragma omp parallel num_threads(omp_nt)
+            {
+                std::vector<float> fft_in((size_t)n_fft);
+                std::vector<float> fft_out((size_t)n_fft * 2);
+#pragma omp for schedule(static)
+                for (int t = 0; t < T; t++)
+                    compute_frame(t, fft_in.data(), fft_out.data());
+            }
+#else
+            // Portable std::thread path (§305): AppleClang ships no libomp, so the
+            // OpenMP path above is compiled out on macOS — without this the STFT
+            // stayed single-threaded there. Each chunk owns its FFT scratch and
+            // frames write disjoint `power` rows → data-race free, bit-identical.
+            // The 8-thread default cap is deliberate and predates the shared
+            // helper, so it is passed in rather than left to hardware_concurrency.
+            const unsigned hw = std::thread::hardware_concurrency();
+            const int cap = p.n_threads > 0 ? p.n_threads : (int)((hw == 0) ? 1u : std::min(hw, 8u));
+            core_parallel::for_each_chunk(T, cap, [&](int t0, int t1) {
+                std::vector<float> fft_in((size_t)n_fft), fft_out((size_t)n_fft * 2);
+                for (int t = t0; t < t1; t++)
+                    compute_frame(t, fft_in.data(), fft_out.data());
+            });
+#endif
+        } else {
+            std::vector<float> fft_in((size_t)n_fft);
+            std::vector<float> fft_out((size_t)n_fft * 2);
+            for (int t = 0; t < T; t++)
+                compute_frame(t, fft_in.data(), fft_out.data());
+        }
+    }
+
+    if (mel_timing) {
+        const double stft_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_stft0).count();
+        int nthreads = 1;
+        if (ran_parallel) {
+#ifdef _OPENMP
+            nthreads = p.n_threads > 0 ? p.n_threads : omp_get_max_threads();
+#else
+            const unsigned hw = std::thread::hardware_concurrency();
+            const int cap = p.n_threads > 0 ? p.n_threads : (int)((hw == 0) ? 1u : std::min(hw, 8u));
+            nthreads = std::min(cap, T);
+#endif
+        }
+        fprintf(stderr, "core_mel: STFT %d frames (n_fft=%d) %.2f ms [%d thread(s)%s]\n", T, n_fft, stft_ms, nthreads,
+                ran_parallel ? "" : ", serial");
+    }
+
+    // -----------------------------------------------------------------
+    // 4. Mel projection: mel[t, m] = sum_k power[t, k] * fb[m, k]
+    //    (or fb[k, m] if fb_layout == FreqsMels).
+    //    Two accumulator precisions.
+    // -----------------------------------------------------------------
+    std::vector<float> mel_tn((size_t)T * nmels, 0.0f);
+
+// Independent rows preserve the original reduction order. Keep the
+// author's OpenMP path opt-in until each platform wins the full A/B.
+#ifdef _OPENMP
+    const bool projection_parallel = crispasr_env::truthy("CRISPASR_MEL_PROJECTION_PARALLEL");
+#endif
+    const auto t_projection0 = std::chrono::steady_clock::now();
+    int projection_threads = 1;
+    auto do_matmul = [&](auto acc_zero) {
+        using Acc = decltype(acc_zero);
+#ifdef _OPENMP
+        if (projection_parallel && T >= 64) {
+            const int omp_nt = p.n_threads > 0 ? p.n_threads : omp_get_max_threads();
+            projection_threads = omp_nt;
+#pragma omp parallel for num_threads(omp_nt) schedule(static)
+            for (int t = 0; t < T; t++) {
+                const float* pp = power.data() + (size_t)t * n_freqs;
+                float* mp = mel_tn.data() + (size_t)t * nmels;
+                for (int m = 0; m < nmels; m++) {
+                    Acc s = 0;
+                    if (p.fb_layout == FbLayout::MelsFreqs) {
+                        const float* fb = mel_fb + (size_t)m * n_freqs;
+                        for (int k = 0; k < n_freqs; k++)
+                            s += static_cast<Acc>(pp[k]) * static_cast<Acc>(fb[k]);
+                    } else {
+                        for (int k = 0; k < n_freqs; k++)
+                            s += static_cast<Acc>(pp[k]) * static_cast<Acc>(mel_fb[(size_t)k * nmels + m]);
+                    }
+                    mp[m] = (float)s;
+                }
+            }
+            return;
+        }
+#endif
+        for (int t = 0; t < T; t++) {
+            const float* pp = power.data() + (size_t)t * n_freqs;
+            float* mp = mel_tn.data() + (size_t)t * nmels;
+            for (int m = 0; m < nmels; m++) {
+                Acc s = 0;
+                if (p.fb_layout == FbLayout::MelsFreqs) {
+                    const float* fb = mel_fb + (size_t)m * n_freqs;
+                    for (int k = 0; k < n_freqs; k++) {
+                        s += static_cast<Acc>(pp[k]) * static_cast<Acc>(fb[k]);
+                    }
+                } else {
+                    for (int k = 0; k < n_freqs; k++) {
+                        s += static_cast<Acc>(pp[k]) * static_cast<Acc>(mel_fb[(size_t)k * nmels + m]);
+                    }
+                }
+                mp[m] = (float)s;
+            }
+        }
+    };
+    if (p.matmul == MatmulPrecision::Double) {
+        do_matmul(double{0});
+    } else {
+#if defined(HAVE_BLAS)
+        if (p.fb_layout == FbLayout::MelsFreqs) {
+            // mel[T, nmels] = power[T, n_freqs] × mel_fb^T[n_freqs, nmels]
+            // mel_fb is row-major (nmels, n_freqs); CblasTrans transposes for the multiply.
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, T, nmels, n_freqs, 1.0f, power.data(), n_freqs, mel_fb,
+                        n_freqs, 0.0f, mel_tn.data(), nmels);
+        } else {
+            // FreqsMels: mel_fb is (n_freqs, nmels); mel = power × mel_fb (no transpose).
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, T, nmels, n_freqs, 1.0f, power.data(), n_freqs,
+                        mel_fb, nmels, 0.0f, mel_tn.data(), nmels);
+        }
+#else
+        do_matmul(float{0.0f});
+#endif
+    }
+
+    if (mel_timing) {
+        const double ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_projection0).count();
+        fprintf(stderr, "core_mel: projection %d frames %.3f ms [%d thread(s)]\n", T, ms, projection_threads);
+    }
+
+    // -----------------------------------------------------------------
+    // 5. log with guard (no-op when log_base == None)
+    // -----------------------------------------------------------------
+    auto apply_log = [&](float v) -> float {
+        if (p.log_base == LogBase::None) {
+            // Skip log entirely; let the rest of the pipeline see the raw
+            // mel-projected spectrum. Used by the Resemble VoiceEncoder
+            // (mel_type='amp').
+            return v;
+        }
+        if (p.log_guard == LogGuard::MaxClip) {
+            if (v < p.log_eps)
+                v = p.log_eps;
+            return (p.log_base == LogBase::Log10) ? std::log10(v) : std::log(v);
+        } else { // AddEpsilon
+            const float vv = v + p.log_eps;
+            return (p.log_base == LogBase::Log10) ? std::log10(vv) : std::log(vv);
+        }
+    };
+    if (p.log_base != LogBase::None) {
+        for (size_t i = 0; i < mel_tn.size(); i++) {
+            mel_tn[i] = apply_log(mel_tn[i]);
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // 6. Optional right-pad in LOG space with log_guard(0).
+    //    Padding here (before normalization) lets the padded frames
+    //    participate correctly in the GlobalClipMax mean/max step.
+    //    Voxtral relies on this.
+    // -----------------------------------------------------------------
+    const int T_final = (p.pad_to_T > 0 && p.pad_to_T > T) ? p.pad_to_T : T;
+
+    if (T_final > T) {
+        const float pad_val = apply_log(0.0f);
+        std::vector<float> ext((size_t)T_final * nmels, 0.0f);
+        // Copy existing [T, n_mels] into leading [T, n_mels] slot.
+        std::memcpy(ext.data(), mel_tn.data(), (size_t)T * nmels * sizeof(float));
+        // Fill trailing frames with pad_val.
+        for (int t = T; t < T_final; t++) {
+            for (int m = 0; m < nmels; m++)
+                ext[(size_t)t * nmels + m] = pad_val;
+        }
+        mel_tn = std::move(ext);
+    }
+    T_out = T_final;
+
+    // -----------------------------------------------------------------
+    // 7. Normalization
+    // -----------------------------------------------------------------
+    switch (p.norm) {
+    case Normalization::PerFeatureZ: {
+        // Per-mel band z-score across time. Matches NeMo
+        // FilterbankFeatures.normalize_batch("per_feature"):
+        //   var = sum_sq / (T - 1)            # Bessel-corrected sample variance
+        //   std = sqrt(var); std = 0 if NaN   # NaN guard for T == 1
+        //   std += 1e-5                       # eps on std, OUTSIDE the sqrt
+        //   y = (x - mean) / std
+        // The placement of eps matters on low-variance mel bands
+        // (silence / high-freq during quiet speech). Adding it inside the
+        // sqrt under-amplifies those bands relative to NeMo, which can
+        // shift downstream encoder activations enough to cause TDT token
+        // deletions on conversational JA audio (issue #37).
+        const int denom = (T_final > 1) ? (T_final - 1) : 1;
+        for (int m = 0; m < nmels; m++) {
+            double sum = 0.0, sq = 0.0;
+            for (int t = 0; t < T_final; t++)
+                sum += mel_tn[(size_t)t * nmels + m];
+            const double mean = sum / T_final;
+            for (int t = 0; t < T_final; t++) {
+                const double d = mel_tn[(size_t)t * nmels + m] - mean;
+                sq += d * d;
+            }
+            float std_val = std::sqrt((float)(sq / denom));
+            if (!(std_val == std_val))
+                std_val = 0.0f;
+            std_val += 1e-5f;
+            const float inv_std = 1.0f / std_val;
+            for (int t = 0; t < T_final; t++) {
+                mel_tn[(size_t)t * nmels + m] = (float)(mel_tn[(size_t)t * nmels + m] - mean) * inv_std;
+            }
+        }
+        break;
+    }
+    case Normalization::GlobalClipMax: {
+        float mx = -1e30f;
+        for (size_t i = 0; i < mel_tn.size(); i++)
+            if (mel_tn[i] > mx)
+                mx = mel_tn[i];
+        const float floor_v = mx - 8.0f;
+        for (size_t i = 0; i < mel_tn.size(); i++) {
+            float v = mel_tn[i];
+            if (v < floor_v)
+                v = floor_v;
+            mel_tn[i] = (v + 4.0f) / 4.0f;
+        }
+        break;
+    }
+    case Normalization::GlobalClipFixed: {
+        const float floor_v = p.fixed_max - 8.0f;
+        for (size_t i = 0; i < mel_tn.size(); i++) {
+            float v = mel_tn[i];
+            if (v < floor_v)
+                v = floor_v;
+            mel_tn[i] = (v + 4.0f) / 4.0f;
+        }
+        break;
+    }
+    case Normalization::None:
+        // Raw log-mel — no post-log normalization. Gemma4 uses this.
+        break;
+    }
+
+    // -----------------------------------------------------------------
+    // 8. Optional frame stacking (TimeMels only).
+    //    Collapses `stacked_frames` consecutive rows into one wider row.
+    //    Because mel_tn is already row-major [T_final, n_mels] and the
+    //    output layout keeps rows contiguous, stacking is a pure memory
+    //    reinterpret: drop any trailing frames that don't fill a full
+    //    group, then pretend the buffer is [T_final / s, n_mels * s].
+    // -----------------------------------------------------------------
+    if (p.stacked_frames > 1 && p.layout == Layout::TimeMels) {
+        const int s = p.stacked_frames;
+        const int T_stacked = T_final / s;
+        if (T_stacked > 0) {
+            mel_tn.resize((size_t)T_stacked * s * nmels);
+        } else {
+            mel_tn.clear();
+        }
+        T_out = T_stacked;
+    }
+
+    // -----------------------------------------------------------------
+    // 9. Output layout
+    // -----------------------------------------------------------------
+    if (p.layout == Layout::TimeMels) {
+        return mel_tn;
+    }
+
+    // Transpose to (n_mels, T_final) row-major.
+    std::vector<float> out((size_t)nmels * T_final, 0.0f);
+    for (int t = 0; t < T_final; t++) {
+        for (int m = 0; m < nmels; m++) {
+            out[(size_t)m * T_final + t] = mel_tn[(size_t)t * nmels + m];
+        }
+    }
+    return out;
+}
+
+std::vector<float> build_htk_fb(int sr, int n_fft, int n_mels, float fmin, float fmax, FbLayout layout) {
+    const int n_freqs = n_fft / 2 + 1;
+    if (fmax <= 0.0f)
+        fmax = (float)sr * 0.5f;
+    auto hz2mel = [](float hz) { return 2595.0f * std::log10(1.0f + hz / 700.0f); };
+    auto mel2hz = [](float m) { return 700.0f * (std::pow(10.0f, m / 2595.0f) - 1.0f); };
+    const float ml = hz2mel(fmin);
+    const float mh = hz2mel(fmax);
+    std::vector<float> centers((size_t)n_mels + 2);
+    for (int i = 0; i < n_mels + 2; i++)
+        centers[i] = mel2hz(ml + (mh - ml) * (float)i / (float)(n_mels + 1));
+
+    std::vector<float> fb((size_t)n_mels * n_freqs, 0.0f);
+    for (int m = 0; m < n_mels; m++) {
+        const float lo = centers[m];
+        const float md = centers[m + 1];
+        const float hi = centers[m + 2];
+        for (int k = 0; k < n_freqs; k++) {
+            const float f = (float)k * (float)sr / (float)n_fft;
+            float w = 0.0f;
+            if (f >= lo && f <= md && md > lo)
+                w = (f - lo) / (md - lo);
+            else if (f >= md && f <= hi && hi > md)
+                w = (hi - f) / (hi - md);
+            if (w < 0.0f)
+                w = 0.0f;
+            if (layout == FbLayout::MelsFreqs)
+                fb[(size_t)m * n_freqs + k] = w;
+            else
+                fb[(size_t)k * n_mels + m] = w;
+        }
+    }
+    return fb;
+}
+
+std::vector<float> build_slaney_fb(int sr, int n_fft, int n_mels, float fmin, float fmax, FbLayout layout) {
+    const int n_freqs = n_fft / 2 + 1;
+    if (fmax <= 0.0f)
+        fmax = (float)sr * 0.5f;
+
+    // Slaney mel scale: linear below 1 kHz at f_sp = 200/3 Hz/mel, log
+    // above 1 kHz with logstep = ln(6.4)/27. Matches librosa's
+    // `mel_to_hz(..., htk=False)` exactly.
+    const float f_sp = 200.0f / 3.0f;
+    const float min_log_hz = 1000.0f;
+    const float min_log_mel = min_log_hz / f_sp; // = 15
+    const float logstep = std::log(6.4f) / 27.0f;
+    auto hz2mel = [&](float hz) -> float {
+        if (hz >= min_log_hz)
+            return min_log_mel + std::log(hz / min_log_hz) / logstep;
+        return hz / f_sp;
+    };
+    auto mel2hz = [&](float m) -> float {
+        if (m >= min_log_mel)
+            return min_log_hz * std::exp(logstep * (m - min_log_mel));
+        return f_sp * m;
+    };
+
+    const float ml = hz2mel(fmin);
+    const float mh = hz2mel(fmax);
+    std::vector<float> centers((size_t)n_mels + 2);
+    for (int i = 0; i < n_mels + 2; i++)
+        centers[i] = mel2hz(ml + (mh - ml) * (float)i / (float)(n_mels + 1));
+
+    std::vector<float> fb((size_t)n_mels * n_freqs, 0.0f);
+    for (int m = 0; m < n_mels; m++) {
+        const float lo = centers[m];
+        const float md = centers[m + 1];
+        const float hi = centers[m + 2];
+        // Slaney area normalization: 2 / (f_hi - f_lo). Each triangle's
+        // weights get scaled so its integral is approximately constant.
+        // librosa applies this when norm='slaney' (its default).
+        const float enorm = (hi > lo) ? (2.0f / (hi - lo)) : 0.0f;
+        for (int k = 0; k < n_freqs; k++) {
+            const float f = (float)k * (float)sr / (float)n_fft;
+            float w = 0.0f;
+            if (f >= lo && f <= md && md > lo)
+                w = (f - lo) / (md - lo);
+            else if (f >= md && f <= hi && hi > md)
+                w = (hi - f) / (hi - md);
+            if (w < 0.0f)
+                w = 0.0f;
+            w *= enorm;
+            if (layout == FbLayout::MelsFreqs)
+                fb[(size_t)m * n_freqs + k] = w;
+            else
+                fb[(size_t)k * n_mels + m] = w;
+        }
+    }
+    return fb;
+}
+
+} // namespace core_mel

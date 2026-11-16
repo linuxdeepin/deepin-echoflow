@@ -1,0 +1,358 @@
+# Per-backend regression suite. See tests/regression/README.md for the
+# full design rationale. Highlights:
+#
+#   - Nightly cron (04:00 UTC) + workflow_dispatch.
+#   - Matrix per backend with fail-fast: false so one regression
+#     surfaces all the others on the same run.
+#   - Downloads pinned-revision GGUFs + pinned-revision reference dumps
+#     from HuggingFace; never relies on `main` HEAD. This protects us
+#     from upstream re-quantise / re-dump drift (the ggml-assertion-
+#     hardening lesson).
+#   - Per-job disk: 14 GB on ubuntu-latest, plenty for one ASR backend
+#     at a time. Cleanup at the end is a belt-and-braces — the runner
+#     is discarded anyway.
+#   - HF cache lives under $RUNNER_TEMP so it's automatically gone at
+#     the end of the job; no GitHub cache eviction concerns.
+#
+# Three tiers of tests (all run on GH free tier):
+#
+#   Tier 0 — smoke (no network, no model, <2 s):
+#     manifest schema validation + driver unit tests
+#     also: fast Python unit tests (backend_config, driver_smoke)
+#
+#   Tier 0.5 — unit-tests (no network, no model, <10 s):
+#     all no-model Python tests in tests/ (test_backend_config.py, etc.)
+#
+#   Tier 1 — preflight dry-run (HF API, no download, ~5 s):
+#     HEAD-check every pinned HF artifact referenced by manifest.json
+#
+#   Tier 2 — per-backend regression (nightly only):
+#     full build + download + crispasr + crispasr-diff against pinned refs
+#     entries with skip_diff=true run transcript check only (no ref dump
+#     needed); useful while the Kaggle rebake for a new backend is pending
+
+name: Regression (nightly)
+
+on:
+  schedule:
+    - cron: '0 4 * * *'  # 04:00 UTC daily
+  workflow_dispatch:
+  # PR / push: smoke + unit + preflight, plus the per-backend regression for
+  # only the backends the change can affect (tools/regression_select.py; shared
+  # code selects a small core set). Docs-only changes do not trigger it.
+  pull_request:
+    paths:
+      - 'tests/regression/**'
+      - 'tests/test_python_diarize_turns.py'
+      - 'tests/test_python_audio_resample.py'
+      - 'tests/test_python_helpers.py'
+      - 'python/crispasr/**'
+      - '.github/workflows/regression.yml'
+      - 'src/**'
+      - 'examples/cli/**'
+      - 'models/**'
+      - 'tests/test_phonon2_container.py'
+      - 'CMakeLists.txt'
+      - 'ggml'
+      - 'tools/regression_select.py'
+      - 'tools/reference_backends/phonon2/**'
+      - 'tools/reference_backends/parakeet_hf.py'
+      - 'tools/reference_backends/index_echo.py'
+      - 'tools/index_echo_acceptance.py'
+      - 'tests/test_index_echo_acceptance.py'
+      - 'tools/index_echo_9b_acceptance.py'
+      - 'tests/test_index_echo_9b_acceptance.py'
+  # Push to main: the backends the change can touch run right away instead of
+  # waiting for the nightly - e.g. #470's legacy canary load break would have
+  # shown on the push, not the next morning.
+  push:
+    branches: [main]
+    paths:
+      - 'python/crispasr/**'
+      - 'tests/test_python_audio_resample.py'
+      - 'tests/test_python_helpers.py'
+      - 'src/**'
+      - 'examples/cli/**'
+      - 'models/**'
+      - 'tests/test_phonon2_container.py'
+      - 'CMakeLists.txt'
+      - 'ggml'
+      - 'tests/regression/**'
+      - 'tools/regression_select.py'
+      - 'tools/reference_backends/phonon2/**'
+      - 'tools/reference_backends/parakeet_hf.py'
+      - 'tools/reference_backends/index_echo.py'
+      - 'tools/index_echo_acceptance.py'
+      - 'tests/test_index_echo_acceptance.py'
+      - 'tools/index_echo_9b_acceptance.py'
+      - 'tests/test_index_echo_9b_acceptance.py'
+      - '.github/workflows/regression.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  # event_name in the key: a push to main must never cancel the nightly run
+  # (same ref), and vice versa. Consecutive pushes still supersede each other.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Tier 0: schema + parser smoke test. Runs in <2 seconds with no
+  # binary, no model, no network — so the per-backend matrix below
+  # never even spawns if the manifest is malformed.
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - name: Run driver smoke test
+        run: python tests/regression/test_driver_smoke.py
+
+  # Tier 0.5: no-model Python unit tests. Validates backend config
+  # invariants and other source-level assertions that don't require a
+  # built binary or a model download. Runs in <10 s.
+  unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      # tests/test_python_chat.py imports python/crispasr/_binding.py, which
+      # imports numpy at module scope — without it those cases ERROR rather than
+      # skip, and unittest's non-zero exit fails the step. The job never got
+      # this far before (the step above was red), so the gap was invisible. The
+      # perf job below already does exactly this on line ~275.
+      - name: Install no-model test deps
+        run: pip install -q numpy || true
+      - name: Run no-model Python unit tests
+        run: |
+          python -m pytest tests/test_backend_config.py -v || \
+          python -m unittest tests/test_backend_config.py -v
+      - name: Phonon-2 container format tests
+        run: python -m unittest discover -s tests -p test_phonon2_container.py -v
+      - name: Index-Echo numerical acceptance bounds
+        run: python -m unittest discover -s tests -p 'test_index_echo*acceptance.py' -v
+      # Chat binding (#362). 891 lines of tests that nothing invoked: this file
+      # is not named by any workflow and regression.yml pytests two files by
+      # name rather than a directory, so it could only ever run by hand. With
+      # neither a library nor a model it still exercises the ctypes ABI struct
+      # definitions, the param defaults and the UTF-8 chunk assembly — 5 cases
+      # — and skips the rest, so it is safe in a job that builds nothing.
+      - name: Run no-model Python chat-binding tests
+        run: |
+          python -m pytest tests/test_python_chat.py -v || \
+          python -m unittest tests/test_python_chat.py -v
+      - name: Run Python constructor helper discovery tests
+        run: python -m unittest discover -s tests -p test_python_helpers.py -v
+      - name: Run Python array resampling and native ABI tests
+        run: python -m unittest discover -s tests -p test_python_audio_resample.py -v
+      - name: Run Python diarization ABI tests
+        run: |
+          python -m pytest tests/test_python_diarize_turns.py -v || \
+          python tests/test_python_diarize_turns.py -v
+      # Perf-regression compare logic (docs/perf-sweep/PLAN.md TODO-4). Model-free —
+      # guards the hard/soft-gate logic used by the nightly perf snapshot step below.
+      # Regression matrix picker: nightly list vs manifest, per-file selection.
+      - name: Run regression-select unit tests
+        run: |
+          python -m pytest tests/test_regression_select.py -v || \
+          python tests/test_regression_select.py -v
+      - name: Run perf-baseline compare unit tests
+        run: |
+          python tools/perf_baseline_compare.py --selftest
+          python -m pytest tests/test_perf_baseline_compare.py -v || \
+          python tests/test_perf_baseline_compare.py -v
+
+  # Which backends this run tests: nightly/dispatch = the full list in
+  # tests/regression/nightly_matrix.json; push/PR = the subset the changed
+  # files can affect (empty -> the regression job is skipped).
+  select:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: pick
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Push: diff against the head of the newest SUCCESSFUL Regression run
+          # on main that is an ancestor of this commit, not just the previous
+          # push. Consecutive pushes cancel each other (concurrency), and a
+          # cancelled run's changes were otherwise never selected again: on
+          # 2026-09-28 the parakeet + wav2vec2 fixes landed in cancelled runs and
+          # the surviving run selected only the diff-tool change.
+          if [ "$EVENT" = push ]; then
+            for sha in $(gh run list -R "$GITHUB_REPOSITORY" --workflow regression.yml --branch main \
+                           --status success --limit 30 --json headSha --jq '.[].headSha' 2>/dev/null); do
+              if git merge-base --is-ancestor "$sha" HEAD 2>/dev/null; then BASE="$sha"; break; fi
+            done
+          fi
+          echo "base: $BASE"
+          m=$(python3 tools/regression_select.py --event "$EVENT" --base "$BASE" --head HEAD)
+          echo "matrix=$m" >> "$GITHUB_OUTPUT"
+          echo "selected: $m"
+
+  # Dry-run preflight: confirm every pinned HF artifact in the
+  # manifest actually exists (GGUF + fixture ref.gguf + fixture
+  # audio.wav). Entries with skip_diff=true skip the ref.gguf check.
+  # Catches the "added a backend, forgot to upload" case in PR CI
+  # without the 1+ GB pull. ~1 s for the seed manifest; O(N+1) HF
+  # API calls for N backends.
+  preflight:
+    needs: [smoke, unit-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - run: pip install huggingface_hub
+      - run: python tests/regression/run_one.py --dry-run
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
+  # Tier 2: per-backend regression. Each entry of the matrix downloads
+  # its pinned-revision GGUF + pinned-revision reference dump from HF,
+  # runs crispasr + crispasr-diff against the manifest's expected
+  # transcript and per-stage cos_min thresholds. `fail-fast: false`
+  # so one bad backend doesn't mask the rest.
+  #
+  # Backends with skip_diff=true in manifest.json run only the
+  # transcript check (no ref.gguf download, no crispasr-diff). Add
+  # new backends with skip_diff=true to get transcript regression
+  # on GH immediately; graduate them to full diff entries once the
+  # Kaggle rebake lands in cstr/crispasr-regression-fixtures.
+  #
+  # Nightly / dispatch run every backend in tests/regression/nightly_matrix.json;
+  # push / PR run only the affected subset chosen by the `select` job.
+  # (Previously skipped on `pull_request` — PRs only got smoke + unit-tests +
+  # preflight, which run in <5 minutes total. Full matrix runs
+  # nightly + on manual workflow_dispatch.
+  #
+  # The matrix is intentionally small; expand as backends get their
+  # fixtures uploaded to HF (see `tests/regression/README.md`
+  # "Adding a new backend"). Heavy backends (vibevoice 7 GB,
+  # voxtral4b 4 GB) that don't fit reliably on the GitHub free-tier
+  # 14 GB ubuntu-latest scratch should go through the weekly Kaggle
+  # full-sweep job (`tools/test-all-backends.py` on a Kaggle kernel) instead.
+  regression:
+    # NOT `needs: preflight`: one transient HF/GitHub-storage error in the
+    # preflight used to skip every backend (Sep 13, 15, 16, 17 tested nothing).
+    # Preflight still runs and reports on its own; each backend job fails on
+    # its own download if an artifact is really gone.
+    needs: [smoke, unit-tests, select]
+    if: needs.select.outputs.matrix != '[]' && needs.select.outputs.matrix != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        # Full list: tests/regression/nightly_matrix.json (heavy backends go
+        # through the Kaggle full sweep instead). Push/PR get the affected subset.
+        backend: ${{ fromJSON(needs.select.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install build + runtime deps
+        run: |
+          bash tools/ci-apt.sh update
+          # libespeak-ng-dev: provides espeak-ng/speak_lib.h + libespeak-ng.so
+          # + espeak-ng-data, so CMake's `CRISPASR_WITH_ESPEAK_NG=AUTO` detects
+          # the library and compiles kokoro with `CRISPASR_HAVE_ESPEAK_NG=1`.
+          # The kokoro backend then calls `espeak_TextToPhonemes()` in-process
+          # instead of shelling out to `popen("espeak-ng …")` — saves ~30–50 ms
+          # per call and avoids the shell-quoting surface. The popen path
+          # remains as a safety fallback if libespeak init fails at runtime,
+          # so we also keep the `espeak-ng` binary installed for belt-and-
+          # braces coverage. See src/kokoro.cpp `phonemize_espeak_lib` /
+          # `phonemize_popen` and src/CMakeLists.txt `CRISPASR_WITH_ESPEAK_NG`.
+          bash tools/ci-apt.sh install -y cmake g++ ninja-build libopenblas-dev jq \
+              libespeak-ng-dev espeak-ng pkg-config
+          # huggingface_hub for hf_hub_download; no transformers / nemo
+          # needed on the CI side because reference dumps are pre-baked
+          # and stored in HF, not regenerated.
+          python -m pip install --upgrade pip
+          pip install huggingface_hub numpy gguf
+      - name: Authenticate HuggingFace (avoids 429 rate limit)
+        if: env.HF_TOKEN != ''
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: huggingface-cli login --token "$HF_TOKEN" --add-to-git-credential 2>/dev/null || true
+
+      - name: Configure + build crispasr-cli (+ crispasr-diff for full-diff backends)
+        run: |
+          cmake -S . -B build-regression -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCRISPASR_BUILD_TESTS=OFF \
+              -DCRISPASR_BUILD_EXAMPLES=ON \
+              -DCRISPASR_BUILD_SERVER=OFF
+          # CMake target `crispasr-cli` produces the `bin/crispasr`
+          # binary (target name vs output name diverge — see
+          # examples/cli/CMakeLists.txt). Asking for target `crispasr-lib`
+          # would build just the library, leaving bin/crispasr absent.
+          #
+          # Also build crispasr-diff unconditionally — the binary is
+          # tiny and building it costs <10 s, much less than adding
+          # conditional logic per matrix backend.
+          cmake --build build-regression --target crispasr-cli crispasr-diff -j"$(nproc)"
+
+      - name: Run regression for ${{ matrix.backend }}
+        env:
+          BUILD_DIR: build-regression
+          WORK_DIR: ${{ runner.temp }}/regression-${{ matrix.backend }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_HUB_ENABLE_HF_TRANSFER: "0"
+          HF_HUB_DOWNLOAD_TIMEOUT: "120"
+        run: |
+          mkdir -p "$WORK_DIR"
+          tests/regression/run_one.py "${{ matrix.backend }}"
+
+      # F2: cross-surface (CLI vs session C-ABI) parity — best-effort guard
+      # against the #257 dual-dispatch class. Parakeet only for now (the one
+      # backend that historically diverged). Builds the shared lib for the
+      # python session side and runs the harness against the model run_one.py
+      # just fetched. continue-on-error + skip-guards mean it can never break
+      # the regression job; it reports PASS/FAIL/SKIP for visibility.
+      - name: Cross-surface parity (parakeet, best-effort)
+        if: startsWith(matrix.backend, 'parakeet')
+        continue-on-error: true
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          cmake -S . -B build-shared -G Ninja -DCMAKE_BUILD_TYPE=Release \
+              -DBUILD_SHARED_LIBS=ON -DCRISPASR_BUILD_TESTS=OFF -DCRISPASR_BUILD_EXAMPLES=OFF || exit 0
+          cmake --build build-shared --target crispasr-lib -j"$(nproc)" || exit 0
+          pip install -q numpy || true
+          model=$(find "${{ runner.temp }}/regression-${{ matrix.backend }}" ~/.cache/huggingface \
+                   -name '*.gguf' 2>/dev/null | head -1)
+          lib=$(find build-shared -name 'libcrispasr.so' | head -1)
+          [ -n "$model" ] && [ -n "$lib" ] || { echo "SKIP: model/lib not found"; exit 0; }
+          CRISPASR_BIN=build-regression/bin/crispasr CRISPASR_LIB_PATH="$lib" \
+            CRISPASR_PARITY_BACKEND=parakeet CRISPASR_PARITY_MODEL="$model" \
+            bash tests/test-surface-parity.sh || true
+
+      - name: Free disk
+        if: always()
+        run: |
+          # Belt-and-braces; the runner gets nuked anyway, but keep the
+          # cleanup explicit so a `KEEP_WORK=1` local invocation doesn't
+          # accidentally leak after porting.
+          rm -rf "${{ runner.temp }}/regression-${{ matrix.backend }}" 2>/dev/null || true
+          df -h /

@@ -1,0 +1,490 @@
+package whisper
+
+import (
+	"errors"
+	"unsafe"
+)
+
+///////////////////////////////////////////////////////////////////////////////
+// CGO
+
+/*
+// Static linking of libcrispasr.a requires every conditionally-built sub-lib
+// the C-ABI shim references. The linux/darwin LDFLAGS library lists below are
+// auto-generated from the CMake dependency graph via:
+//
+//     python tools/sync_go_cgo_ldflags.py
+//
+// CI checks for drift (see .github/workflows/bindings-go.yml). If you add a
+// new target_link_libraries(crispasr PUBLIC <X>) in src/CMakeLists.txt, re-run
+// the sync script to update these lines automatically.
+#cgo CFLAGS: -I${SRCDIR}/../../include -I${SRCDIR}/../../ggml/include
+#cgo LDFLAGS: -L${SRCDIR}/../../build-ninja-compile/src -L${SRCDIR}/../../build-ninja-compile/glint -L${SRCDIR}/../../build-ninja-compile/crisp_audio -L${SRCDIR}/../../build-ninja-compile/crisp_lid -L${SRCDIR}/../../build-ninja-compile/crisp_punc -L${SRCDIR}/../../build-ninja-compile/crisp_truecase -L${SRCDIR}/../../build-ninja-compile/ggml/src -L${SRCDIR}/../../build-ninja-compile/_deps/crispasr_ogg-build -L${SRCDIR}/../../build-ninja-compile/_deps/crispasr_opus-build -L${SRCDIR}/../../build-ninja-compile/_deps/crispasr_opencore_amr-build
+#cgo LDFLAGS: -L${SRCDIR}/../../build/src -L${SRCDIR}/../../build/glint -L${SRCDIR}/../../build/crisp_audio -L${SRCDIR}/../../build/crisp_lid -L${SRCDIR}/../../build/crisp_punc -L${SRCDIR}/../../build/crisp_truecase -L${SRCDIR}/../../build/ggml/src -L${SRCDIR}/../../build/_deps/crispasr_ogg-build -L${SRCDIR}/../../build/_deps/crispasr_opus-build -L${SRCDIR}/../../build/_deps/crispasr_opencore_amr-build
+#cgo LDFLAGS: -L${SRCDIR}/../../build_go/src -L${SRCDIR}/../../build_go/glint -L${SRCDIR}/../../build_go/crisp_audio -L${SRCDIR}/../../build_go/crisp_lid -L${SRCDIR}/../../build_go/crisp_punc -L${SRCDIR}/../../build_go/crisp_truecase -L${SRCDIR}/../../build_go/ggml/src -L${SRCDIR}/../../build_go/_deps/crispasr_ogg-build -L${SRCDIR}/../../build_go/_deps/crispasr_opus-build -L${SRCDIR}/../../build_go/_deps/crispasr_opencore_amr-build
+#cgo darwin LDFLAGS: -L${SRCDIR}/../../build-ninja-compile/ggml/src/ggml-blas -L${SRCDIR}/../../build-ninja-compile/ggml/src/ggml-metal -L${SRCDIR}/../../build-ninja-compile/_deps/crispasr_ogg-build -L${SRCDIR}/../../build-ninja-compile/_deps/crispasr_opus-build -L${SRCDIR}/../../build-ninja-compile/_deps/crispasr_opencore_amr-build
+#cgo darwin LDFLAGS: -L${SRCDIR}/../../build/ggml/src/ggml-blas -L${SRCDIR}/../../build/ggml/src/ggml-metal -L${SRCDIR}/../../build/_deps/crispasr_ogg-build -L${SRCDIR}/../../build/_deps/crispasr_opus-build -L${SRCDIR}/../../build/_deps/crispasr_opencore_amr-build
+#cgo darwin LDFLAGS: -L${SRCDIR}/../../build_go/ggml/src/ggml-blas -L${SRCDIR}/../../build_go/ggml/src/ggml-metal -L${SRCDIR}/../../build_go/_deps/crispasr_ogg-build -L${SRCDIR}/../../build_go/_deps/crispasr_opus-build -L${SRCDIR}/../../build_go/_deps/crispasr_opencore_amr-build
+#cgo darwin LDFLAGS: -Wl,-rpath,${SRCDIR}/../../build-ninja-compile/src -Wl,-rpath,${SRCDIR}/../../build/src
+#cgo darwin LDFLAGS: -Wl,-rpath,${SRCDIR}/../../build-ninja-compile/ggml/src -Wl,-rpath,${SRCDIR}/../../build/ggml/src
+#cgo darwin LDFLAGS: -Wl,-rpath,${SRCDIR}/../../build-ninja-compile/ggml/src/ggml-blas -Wl,-rpath,${SRCDIR}/../../build-ninja-compile/ggml/src/ggml-metal
+#cgo darwin LDFLAGS: -Wl,-rpath,${SRCDIR}/../../build/ggml/src/ggml-blas -Wl,-rpath,${SRCDIR}/../../build/ggml/src/ggml-metal
+#cgo linux LDFLAGS: -Wl,--start-group -lggml-base -lggml-cpu -lggml -lwav2vec2-ggml -lcrispasr-core -ltada-encoder -ltada-codec -lcrisp_audio -lsnac -lmoonshine_tokenizer -lmimo_tokenizer -lbert-encoder -lcrispasr-llama-core -lchatterbox -lfirered-asr -lopus -logg -lsidon -lqwen3_tts -lzonos-tts -lxasr -lwespeaker -lwebrtc-vad -lvoxtral_tts -lvoxtral4b -lvoxtral -lvoxcpm2_tts -lvibevoice -ltitanet -ltada-tts -ltabcnn -lt5_translate -lsupertonic-tts -lspeecht5-tts -lsilero-lid -lsensevoice -lrvc-svc -lqwen3_asr -lpyannote-seg -lpocket-tts -lpiper-tts -lpiano-transcription -lparler-tts -lparakeet -lparaformer -loutetts -lorpheus -lopenvoice2 -lonsets-and-frames -lomnivoice -lomniasr -lnemotron3-diar -lnemotron -lmt3 -lmoss_tts_local -lmoss_tts -lmoss_transcribe_diarize -lmoss_transcribe -lmoss_audio -lmoonshine_streaming -lmoonshine -lmiotts -lmini-omni2 -lmimo_asr -lmelotts -lmel-band-roformer -lmarblenet-vad -lm2m100 -llfm2_audio -lkyutai-stt -lkugelaudio -lkokoro -lirodori-tts -lindextts -lindex_echo -lhtdemucs -lhojo_asr -lhikari -lhiggs_stt -lhft-transformer -lgranite_speech -lgranite_nle -lglm-asr -lglint -lgigaam -lgemma4_e2b -lfunasr -lfireredtts3 -lfirered-vad -lfirered-lid -lfastpitch-tts -lf5-tts -lecapa-lid -ldots-tts -ldolphin -ldia-tts -lctc-align -lcsm-tts -lcrispasr_opusfile -lcrispasr_c2pa_native -lcrispasr-vad-encdec -lcrisp_truecase -lcrisp_punc -lcrisp_lid -lcrepe -lcosyvoice3_tts -lconfucius4-tts -lcohere -lcanary_qwen -lcanary_ctc -lcanary -lbtc-chords -lbreeze_tts_2 -lbeatrice-pitch -lbeat-this -lbasic-pitch -lbark-tts -lbananamind-tts -laudioseal -lark_asr -lcrispasr -Wl,--end-group -lm -lstdc++ -fopenmp
+#cgo darwin LDFLAGS: -lggml-base -lggml-cpu -lggml -lwav2vec2-ggml -lcrispasr-core -ltada-encoder -ltada-codec -lcrisp_audio -lsnac -lmoonshine_tokenizer -lmimo_tokenizer -lbert-encoder -lcrispasr-llama-core -lchatterbox -lfirered-asr -lopus -logg -lsidon -lqwen3_tts -lzonos-tts -lxasr -lwespeaker -lwebrtc-vad -lvoxtral_tts -lvoxtral4b -lvoxtral -lvoxcpm2_tts -lvibevoice -ltitanet -ltada-tts -ltabcnn -lt5_translate -lsupertonic-tts -lspeecht5-tts -lsilero-lid -lsensevoice -lrvc-svc -lqwen3_asr -lpyannote-seg -lpocket-tts -lpiper-tts -lpiano-transcription -lparler-tts -lparakeet -lparaformer -loutetts -lorpheus -lopenvoice2 -lonsets-and-frames -lomnivoice -lomniasr -lnemotron3-diar -lnemotron -lmt3 -lmoss_tts_local -lmoss_tts -lmoss_transcribe_diarize -lmoss_transcribe -lmoss_audio -lmoonshine_streaming -lmoonshine -lmiotts -lmini-omni2 -lmimo_asr -lmelotts -lmel-band-roformer -lmarblenet-vad -lm2m100 -llfm2_audio -lkyutai-stt -lkugelaudio -lkokoro -lirodori-tts -lindextts -lindex_echo -lhtdemucs -lhojo_asr -lhikari -lhiggs_stt -lhft-transformer -lgranite_speech -lgranite_nle -lglm-asr -lglint -lgigaam -lgemma4_e2b -lfunasr -lfireredtts3 -lfirered-vad -lfirered-lid -lfastpitch-tts -lf5-tts -lecapa-lid -ldots-tts -ldolphin -ldia-tts -lctc-align -lcsm-tts -lcrispasr_opusfile -lcrispasr_c2pa_native -lcrispasr-vad-encdec -lcrisp_truecase -lcrisp_punc -lcrisp_lid -lcrepe -lcosyvoice3_tts -lconfucius4-tts -lcohere -lcanary_qwen -lcanary_ctc -lcanary -lbtc-chords -lbreeze_tts_2 -lbeatrice-pitch -lbeat-this -lbasic-pitch -lbark-tts -lbananamind-tts -laudioseal -lark_asr -lcrispasr -lm -lstdc++
+#cgo darwin LDFLAGS: -lggml-metal -lggml-blas
+#cgo darwin LDFLAGS: -framework Accelerate -framework Metal -framework Foundation -framework CoreGraphics
+#include <crispasr.h>
+#include <stdlib.h>
+
+extern void callNewSegment(void* user_data, int new);
+extern void callProgress(void* user_data, int progress);
+extern bool callEncoderBegin(void* user_data);
+
+// Text segment callback
+// Called on every newly generated text segment
+// Use the whisper_full_...() functions to obtain the text segments
+static void whisper_new_segment_cb(struct whisper_context* ctx, struct whisper_state* state, int n_new, void* user_data) {
+    if(user_data != NULL && ctx != NULL) {
+        callNewSegment(user_data, n_new);
+    }
+}
+
+// Progress callback
+// Called on every newly generated text segment
+// Use the whisper_full_...() functions to obtain the text segments
+static void whisper_progress_cb(struct whisper_context* ctx, struct whisper_state* state, int progress, void* user_data) {
+    if(user_data != NULL && ctx != NULL) {
+        callProgress(user_data, progress);
+    }
+}
+
+// Encoder begin callback
+// If not NULL, called before the encoder starts
+// If it returns false, the computation is aborted
+static bool whisper_encoder_begin_cb(struct whisper_context* ctx, struct whisper_state* state, void* user_data) {
+    if(user_data != NULL && ctx != NULL) {
+        return callEncoderBegin(user_data);
+    }
+    return false;
+}
+
+// Get default parameters and set callbacks
+static struct whisper_full_params whisper_full_default_params_cb(struct whisper_context* ctx, enum whisper_sampling_strategy strategy) {
+	struct whisper_full_params params = whisper_full_default_params(strategy);
+	params.new_segment_callback = whisper_new_segment_cb;
+	params.new_segment_callback_user_data = (void*)(ctx);
+	params.encoder_begin_callback = whisper_encoder_begin_cb;
+	params.encoder_begin_callback_user_data = (void*)(ctx);
+	params.progress_callback = whisper_progress_cb;
+	params.progress_callback_user_data = (void*)(ctx);
+	return params;
+}
+*/
+import "C"
+
+///////////////////////////////////////////////////////////////////////////////
+// TYPES
+
+type (
+	Context          C.struct_whisper_context
+	Token            C.whisper_token
+	TokenData        C.struct_whisper_token_data
+	SamplingStrategy C.enum_whisper_sampling_strategy
+	Params           C.struct_whisper_full_params
+)
+
+///////////////////////////////////////////////////////////////////////////////
+// GLOBALS
+
+const (
+	SAMPLING_GREEDY      SamplingStrategy = C.CRISPASR_SAMPLING_GREEDY
+	SAMPLING_BEAM_SEARCH SamplingStrategy = C.CRISPASR_SAMPLING_BEAM_SEARCH
+)
+
+const (
+	SampleRate = C.CRISPASR_SAMPLE_RATE                 // Expected sample rate, samples per second
+	SampleBits = uint16(unsafe.Sizeof(C.float(0))) * 8 // Sample size in bits
+	NumFFT     = C.CRISPASR_N_FFT
+	HopLength  = C.CRISPASR_HOP_LENGTH
+	ChunkSize  = C.CRISPASR_CHUNK_SIZE
+)
+
+var (
+	ErrTokenizerFailed  = errors.New("whisper_tokenize failed")
+	ErrAutoDetectFailed = errors.New("whisper_lang_auto_detect failed")
+	ErrConversionFailed = errors.New("whisper_convert failed")
+	ErrInvalidLanguage  = errors.New("invalid language")
+)
+
+///////////////////////////////////////////////////////////////////////////////
+// PUBLIC METHODS
+
+// Allocates all memory needed for the model and loads the model from the given file.
+// Returns NULL on failure.
+func Whisper_init(path string) *Context {
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
+	if ctx := C.whisper_init_from_file_with_params(cPath, C.whisper_context_default_params()); ctx != nil {
+		return (*Context)(ctx)
+	} else {
+		return nil
+	}
+}
+
+// Frees all memory allocated by the model.
+func (ctx *Context) Whisper_free() {
+	C.whisper_free((*C.struct_whisper_context)(ctx))
+}
+
+// Convert RAW PCM audio to log mel spectrogram.
+// The resulting spectrogram is stored inside the provided whisper context.
+func (ctx *Context) Whisper_pcm_to_mel(data []float32, threads int) error {
+	if C.whisper_pcm_to_mel((*C.struct_whisper_context)(ctx), (*C.float)(&data[0]), C.int(len(data)), C.int(threads)) == 0 {
+		return nil
+	} else {
+		return ErrConversionFailed
+	}
+}
+
+// This can be used to set a custom log mel spectrogram inside the provided whisper context.
+// Use this instead of whisper_pcm_to_mel() if you want to provide your own log mel spectrogram.
+// n_mel must be 80
+func (ctx *Context) Whisper_set_mel(data []float32, n_mel int) error {
+	if C.whisper_set_mel((*C.struct_whisper_context)(ctx), (*C.float)(&data[0]), C.int(len(data)), C.int(n_mel)) == 0 {
+		return nil
+	} else {
+		return ErrConversionFailed
+	}
+}
+
+// Run the Whisper encoder on the log mel spectrogram stored inside the provided whisper context.
+// Make sure to call whisper_pcm_to_mel() or whisper_set_mel() first.
+// offset can be used to specify the offset of the first frame in the spectrogram.
+func (ctx *Context) Whisper_encode(offset, threads int) error {
+	if C.whisper_encode((*C.struct_whisper_context)(ctx), C.int(offset), C.int(threads)) == 0 {
+		return nil
+	} else {
+		return ErrConversionFailed
+	}
+}
+
+// Run the Whisper decoder to obtain the logits and probabilities for the next token.
+// Make sure to call whisper_encode() first.
+// tokens + n_tokens is the provided context for the decoder.
+// n_past is the number of tokens to use from previous decoder calls.
+func (ctx *Context) Whisper_decode(tokens []Token, past, threads int) error {
+	if C.whisper_decode((*C.struct_whisper_context)(ctx), (*C.whisper_token)(&tokens[0]), C.int(len(tokens)), C.int(past), C.int(threads)) == 0 {
+		return nil
+	} else {
+		return ErrConversionFailed
+	}
+}
+
+// Convert the provided text into tokens. The tokens pointer must be large enough to hold the resulting tokens.
+// Returns the number of tokens on success
+func (ctx *Context) Whisper_tokenize(text string, tokens []Token) (int, error) {
+	cText := C.CString(text)
+	defer C.free(unsafe.Pointer(cText))
+	if n := C.whisper_tokenize((*C.struct_whisper_context)(ctx), cText, (*C.whisper_token)(&tokens[0]), C.int(len(tokens))); n >= 0 {
+		return int(n), nil
+	} else {
+		return 0, ErrTokenizerFailed
+	}
+}
+
+// Return the id of the specified language, returns -1 if not found
+// Examples:
+//
+//	"de" -> 2
+//	"german" -> 2
+func (ctx *Context) Whisper_lang_id(lang string) int {
+	return int(C.whisper_lang_id(C.CString(lang)))
+}
+
+// Largest language id (i.e. number of available languages - 1)
+func Whisper_lang_max_id() int {
+	return int(C.whisper_lang_max_id())
+}
+
+// Return the short string of the specified language id (e.g. 2 -> "de"),
+// returns empty string if not found
+func Whisper_lang_str(id int) string {
+	return C.GoString(C.whisper_lang_str(C.int(id)))
+}
+
+// Use mel data at offset_ms to try and auto-detect the spoken language
+// Make sure to call whisper_pcm_to_mel() or whisper_set_mel() first.
+// Returns the probabilities of all languages.
+// ref: https://github.com/openai/whisper/blob/main/whisper/decoding.py#L18-L69
+func (ctx *Context) Whisper_lang_auto_detect(offset_ms, n_threads int) ([]float32, error) {
+	probs := make([]float32, Whisper_lang_max_id()+1)
+	if n := int(C.whisper_lang_auto_detect((*C.struct_whisper_context)(ctx), C.int(offset_ms), C.int(n_threads), (*C.float)(&probs[0]))); n < 0 {
+		return nil, ErrAutoDetectFailed
+	} else {
+		return probs, nil
+	}
+}
+
+func (ctx *Context) Whisper_n_len() int {
+	return int(C.whisper_n_len((*C.struct_whisper_context)(ctx)))
+}
+
+func (ctx *Context) Whisper_n_vocab() int {
+	return int(C.whisper_n_vocab((*C.struct_whisper_context)(ctx)))
+}
+
+func (ctx *Context) Whisper_n_text_ctx() int {
+	return int(C.whisper_n_text_ctx((*C.struct_whisper_context)(ctx)))
+}
+
+func (ctx *Context) Whisper_n_audio_ctx() int {
+	return int(C.whisper_n_audio_ctx((*C.struct_whisper_context)(ctx)))
+}
+
+func (ctx *Context) Whisper_is_multilingual() int {
+	return int(C.whisper_is_multilingual((*C.struct_whisper_context)(ctx)))
+}
+
+// The probabilities for the next token
+//func (ctx *Whisper_context) Whisper_get_probs() []float32 {
+//	return (*[1 << 30]float32)(unsafe.Pointer(C.whisper_get_probs((*C.struct_whisper_context)(ctx))))[:ctx.Whisper_n_vocab()]
+//}
+
+// Token Id -> String. Uses the vocabulary in the provided context
+func (ctx *Context) Whisper_token_to_str(token Token) string {
+	return C.GoString(C.whisper_token_to_str((*C.struct_whisper_context)(ctx), C.whisper_token(token)))
+}
+
+// Special tokens
+func (ctx *Context) Whisper_token_eot() Token {
+	return Token(C.whisper_token_eot((*C.struct_whisper_context)(ctx)))
+}
+
+// Special tokens
+func (ctx *Context) Whisper_token_sot() Token {
+	return Token(C.whisper_token_sot((*C.struct_whisper_context)(ctx)))
+}
+
+// Special tokens
+func (ctx *Context) Whisper_token_prev() Token {
+	return Token(C.whisper_token_prev((*C.struct_whisper_context)(ctx)))
+}
+
+// Special tokens
+func (ctx *Context) Whisper_token_solm() Token {
+	return Token(C.whisper_token_solm((*C.struct_whisper_context)(ctx)))
+}
+
+// Special tokens
+func (ctx *Context) Whisper_token_not() Token {
+	return Token(C.whisper_token_not((*C.struct_whisper_context)(ctx)))
+}
+
+// Special tokens
+func (ctx *Context) Whisper_token_beg() Token {
+	return Token(C.whisper_token_beg((*C.struct_whisper_context)(ctx)))
+}
+
+// Special tokens
+func (ctx *Context) Whisper_token_lang(lang_id int) Token {
+	return Token(C.whisper_token_lang((*C.struct_whisper_context)(ctx), C.int(lang_id)))
+}
+
+// Task tokens
+func (ctx *Context) Whisper_token_translate() Token {
+	return Token(C.whisper_token_translate((*C.struct_whisper_context)(ctx)))
+}
+
+// Task tokens
+func (ctx *Context) Whisper_token_transcribe() Token {
+	return Token(C.whisper_token_transcribe((*C.struct_whisper_context)(ctx)))
+}
+
+// Performance information
+func (ctx *Context) Whisper_print_timings() {
+	C.whisper_print_timings((*C.struct_whisper_context)(ctx))
+}
+
+// Performance information
+func (ctx *Context) Whisper_reset_timings() {
+	C.whisper_reset_timings((*C.struct_whisper_context)(ctx))
+}
+
+// Print system information
+func Whisper_print_system_info() string {
+	return C.GoString(C.whisper_print_system_info())
+}
+
+// Return default parameters for a strategy
+func (ctx *Context) Whisper_full_default_params(strategy SamplingStrategy) Params {
+	// Get default parameters
+	return Params(C.whisper_full_default_params_cb((*C.struct_whisper_context)(ctx), C.enum_whisper_sampling_strategy(strategy)))
+}
+
+// Run the entire model: PCM -> log mel spectrogram -> encoder -> decoder -> text
+// Uses the specified decoding strategy to obtain the text.
+func (ctx *Context) Whisper_full(
+	params Params,
+	samples []float32,
+	encoderBeginCallback func() bool,
+	newSegmentCallback func(int),
+	progressCallback func(int),
+) error {
+	registerEncoderBeginCallback(ctx, encoderBeginCallback)
+	registerNewSegmentCallback(ctx, newSegmentCallback)
+	registerProgressCallback(ctx, progressCallback)
+	defer registerEncoderBeginCallback(ctx, nil)
+	defer registerNewSegmentCallback(ctx, nil)
+	defer registerProgressCallback(ctx, nil)
+	if C.whisper_full((*C.struct_whisper_context)(ctx), (C.struct_whisper_full_params)(params), (*C.float)(&samples[0]), C.int(len(samples))) == 0 {
+		return nil
+	} else {
+		return ErrConversionFailed
+	}
+}
+
+// Split the input audio in chunks and process each chunk separately using whisper_full()
+// It seems this approach can offer some speedup in some cases.
+// However, the transcription accuracy can be worse at the beginning and end of each chunk.
+func (ctx *Context) Whisper_full_parallel(params Params, samples []float32, processors int, encoderBeginCallback func() bool, newSegmentCallback func(int)) error {
+	registerEncoderBeginCallback(ctx, encoderBeginCallback)
+	registerNewSegmentCallback(ctx, newSegmentCallback)
+	defer registerEncoderBeginCallback(ctx, nil)
+	defer registerNewSegmentCallback(ctx, nil)
+
+	if C.whisper_full_parallel((*C.struct_whisper_context)(ctx), (C.struct_whisper_full_params)(params), (*C.float)(&samples[0]), C.int(len(samples)), C.int(processors)) == 0 {
+		return nil
+	} else {
+		return ErrConversionFailed
+	}
+}
+
+// Return the id of the autodetected language, returns -1 if not found
+// Added to crispasr in
+// https://github.com/CrispStrobe/CrispASR/commit/a1c1583cc7cd8b75222857afc936f0638c5683d6
+//
+// Examples:
+//
+//	"de" -> 2
+//	"german" -> 2
+func (ctx *Context) Whisper_full_lang_id() int {
+	return int(C.whisper_full_lang_id((*C.struct_whisper_context)(ctx)))
+}
+
+// Number of generated text segments.
+// A segment can be a few words, a sentence, or even a paragraph.
+func (ctx *Context) Whisper_full_n_segments() int {
+	return int(C.whisper_full_n_segments((*C.struct_whisper_context)(ctx)))
+}
+
+// Get the start and end time of the specified segment.
+func (ctx *Context) Whisper_full_get_segment_t0(segment int) int64 {
+	return int64(C.whisper_full_get_segment_t0((*C.struct_whisper_context)(ctx), C.int(segment)))
+}
+
+// Get the start and end time of the specified segment.
+func (ctx *Context) Whisper_full_get_segment_t1(segment int) int64 {
+	return int64(C.whisper_full_get_segment_t1((*C.struct_whisper_context)(ctx), C.int(segment)))
+}
+
+// Get the text of the specified segment.
+func (ctx *Context) Whisper_full_get_segment_text(segment int) string {
+	return C.GoString(C.whisper_full_get_segment_text((*C.struct_whisper_context)(ctx), C.int(segment)))
+}
+
+// Get number of tokens in the specified segment.
+func (ctx *Context) Whisper_full_n_tokens(segment int) int {
+	return int(C.whisper_full_n_tokens((*C.struct_whisper_context)(ctx), C.int(segment)))
+}
+
+// Get the token text of the specified token index in the specified segment.
+func (ctx *Context) Whisper_full_get_token_text(segment int, token int) string {
+	return C.GoString(C.whisper_full_get_token_text((*C.struct_whisper_context)(ctx), C.int(segment), C.int(token)))
+}
+
+// Get the token of the specified token index in the specified segment.
+func (ctx *Context) Whisper_full_get_token_id(segment int, token int) Token {
+	return Token(C.whisper_full_get_token_id((*C.struct_whisper_context)(ctx), C.int(segment), C.int(token)))
+}
+
+// Get token data for the specified token in the specified segment.
+// This contains probabilities, timestamps, etc.
+func (ctx *Context) Whisper_full_get_token_data(segment int, token int) TokenData {
+	return TokenData(C.whisper_full_get_token_data((*C.struct_whisper_context)(ctx), C.int(segment), C.int(token)))
+}
+
+// Get the probability of the specified token in the specified segment.
+func (ctx *Context) Whisper_full_get_token_p(segment int, token int) float32 {
+	return float32(C.whisper_full_get_token_p((*C.struct_whisper_context)(ctx), C.int(segment), C.int(token)))
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// CALLBACKS
+
+var (
+	cbNewSegment   = make(map[unsafe.Pointer]func(int))
+	cbProgress     = make(map[unsafe.Pointer]func(int))
+	cbEncoderBegin = make(map[unsafe.Pointer]func() bool)
+)
+
+func registerNewSegmentCallback(ctx *Context, fn func(int)) {
+	if fn == nil {
+		delete(cbNewSegment, unsafe.Pointer(ctx))
+	} else {
+		cbNewSegment[unsafe.Pointer(ctx)] = fn
+	}
+}
+
+func registerProgressCallback(ctx *Context, fn func(int)) {
+	if fn == nil {
+		delete(cbProgress, unsafe.Pointer(ctx))
+	} else {
+		cbProgress[unsafe.Pointer(ctx)] = fn
+	}
+}
+
+func registerEncoderBeginCallback(ctx *Context, fn func() bool) {
+	if fn == nil {
+		delete(cbEncoderBegin, unsafe.Pointer(ctx))
+	} else {
+		cbEncoderBegin[unsafe.Pointer(ctx)] = fn
+	}
+}
+
+//export callNewSegment
+func callNewSegment(user_data unsafe.Pointer, new C.int) {
+	if fn, ok := cbNewSegment[user_data]; ok {
+		fn(int(new))
+	}
+}
+
+//export callProgress
+func callProgress(user_data unsafe.Pointer, progress C.int) {
+	if fn, ok := cbProgress[user_data]; ok {
+		fn(int(progress))
+	}
+}
+
+//export callEncoderBegin
+func callEncoderBegin(user_data unsafe.Pointer) C.bool {
+	if fn, ok := cbEncoderBegin[user_data]; ok {
+		if fn() {
+			return C.bool(true)
+		} else {
+			return C.bool(false)
+		}
+	}
+	return true
+}
+
+func (t TokenData) T0() int64 {
+	return int64(t.t0)
+}
+
+func (t TokenData) T1() int64 {
+	return int64(t.t1)
+}
+
+func (t TokenData) Id() Token {
+	return Token(t.id)
+}

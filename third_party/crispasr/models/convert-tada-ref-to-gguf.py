@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""Create a tada-ref.gguf voice reference from a WAV file.
+
+Usage:
+    python models/convert-tada-ref-to-gguf.py \
+        --audio reference.wav \
+        --transcript "The text spoken in the audio." \
+        --output tada-ref-custom.gguf
+
+For non-English, pass the language code and provide the transcript
+(the encoder's built-in ASR is English-only):
+    python models/convert-tada-ref-to-gguf.py \
+        --audio ma_voix.wav \
+        --transcript "Bonjour, comment allez-vous?" \
+        --language fr \
+        --output tada-ref-fr.gguf
+
+Supported languages: ar, ch/zh, de, es, fr, it, ja, pl, pt  (omit or use en for English)
+
+The encoder weights are fetched from HumeAI/tada-codec on HuggingFace
+(requires a HF token if the repo is gated).
+
+The output .gguf file can be used with:
+    crispasr -m tada-tts-3b-ml-q4_k.gguf --voice tada-ref-custom.gguf --tts "your text"
+"""
+
+import argparse
+import sys
+from pathlib import Path
+
+import numpy as np
+
+try:
+    from gguf import GGUFWriter, GGMLQuantizationType
+except ImportError:
+    sys.exit("gguf not found: pip install gguf")
+
+try:
+    import torch
+except ImportError:
+    sys.exit("torch not found: pip install torch")
+
+SUPPORTED_LANGUAGES = {"ar", "ch", "de", "es", "fr", "it", "ja", "pl", "pt"}
+LANGUAGE_ALIASES = {"en": None, "eng": None, "zh": "ch", "zh-cn": "ch", "cn": "ch"}
+
+
+def normalize_language(lang: str | None) -> str | None:
+    if not lang:
+        return None
+    lang = lang.lower()
+    return LANGUAGE_ALIASES.get(lang, lang)
+
+def load_audio(path: str, target_sr: int = 24000):
+    """Load WAV, resample if needed, return (1, T) float32 tensor + actual sample rate."""
+    try:
+        import torchaudio
+        waveform, sr = torchaudio.load(path)
+    except Exception:
+        try:
+            import soundfile as sf
+            data, sr = sf.read(path, dtype="float32")
+            waveform = torch.from_numpy(data.T if data.ndim > 1 else data[None])
+        except Exception as e:
+            sys.exit(f"Cannot load audio '{path}': {e}")
+    if waveform.shape[0] > 1:
+        waveform = waveform.mean(0, keepdim=True)
+    return waveform, sr
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--audio",      required=True,  help="Reference WAV file (≤15 s recommended)")
+    ap.add_argument("--transcript", required=True,  help="Exact text spoken in the audio")
+    ap.add_argument("--output",     required=True,  help="Output .gguf path")
+    ap.add_argument("--language",   default=None,
+                    help=f"Language code for non-English audio. Supported: {', '.join(sorted(SUPPORTED_LANGUAGES))}")
+    ap.add_argument("--codec-repo", default="HumeAI/tada-codec",
+                    help="HuggingFace repo containing the encoder weights (default: HumeAI/tada-codec)")
+    ap.add_argument("--device", default="cpu", help="Torch device (default: cpu)")
+    ap.add_argument("--i-have-rights", dest="i_have_rights", action="store_true",
+                    help="attest that you have the consent of the speaker(s) in the reference "
+                         "audio, or that it is your own voice. Required: baking clones a real "
+                         "person's voice into a reusable pack.")
+    ap.add_argument("--consent-attestation", default="",
+                    help="free-text attestation recorded in the pack metadata (audit trail; "
+                         "does not replace --i-have-rights at synthesis time)")
+    args = ap.parse_args()
+
+    # Consent gate, mirroring the CLI's --i-have-rights and --make-ref. Baking a
+    # reference IS the cloning step: everything downstream just replays the pack.
+    # The stamp is what lets the runtime's consent + Art. 50(4) disclosure gates
+    # recognise the .gguf as a clone, since they no longer guess from the suffix.
+    if not args.i_have_rights:
+        raise SystemExit(
+            "building a voice reference requires --i-have-rights.\n"
+            "\n"
+            "  By passing --i-have-rights you attest:\n"
+            '  "I have the consent of the speaker whose voice this clones,\n'
+            '   or it is my own voice."\n'
+        )
+
+    language = normalize_language(args.language)
+    if language and language not in SUPPORTED_LANGUAGES:
+        sys.exit(f"Unknown language '{args.language}'. Supported: {', '.join(sorted(SUPPORTED_LANGUAGES))}")
+
+    print(f"Loading reference audio: {args.audio}")
+    waveform, sr = load_audio(args.audio)
+    print(f"  shape={tuple(waveform.shape)}  sr={sr}  duration={waveform.shape[-1]/sr:.2f}s")
+
+    print(f"Loading TADA encoder from {args.codec_repo} …")
+    try:
+        from tada.modules.encoder import Encoder
+    except ImportError:
+        sys.exit(
+            "tada package not found.\n"
+            "Install it from https://github.com/HumeAI/tada:\n"
+            "  pip install git+https://github.com/HumeAI/tada.git"
+        )
+
+    # Patch for transformers >= 5.x compatibility
+    import transformers
+    if not hasattr(transformers.PreTrainedModel, 'all_tied_weights_keys'):
+        def _get_tied(self):
+            return getattr(self, '_all_tied_weights_keys_store', None) or \
+                   getattr(self, '_tied_weights_keys', None) or {}
+        def _set_tied(self, val):
+            self._all_tied_weights_keys_store = val
+        transformers.PreTrainedModel.all_tied_weights_keys = property(_get_tied, _set_tied)
+
+    # Redirect gated Llama tokenizer to unsloth mirror
+    from transformers import AutoTokenizer
+    _orig_tok = AutoTokenizer.from_pretrained.__func__
+    @classmethod
+    def _patched_tok(cls, name, *a, **kw):
+        try:
+            return _orig_tok(cls, name, *a, **kw)
+        except Exception as e:
+            if "gated" in str(e).lower() or "401" in str(e):
+                return _orig_tok(cls, "unsloth/Llama-3.2-1B", *a, **kw)
+            raise
+    AutoTokenizer.from_pretrained = _patched_tok
+
+    encoder = Encoder.from_pretrained(args.codec_repo, subfolder="encoder",
+                                      language=language).float().to(args.device)
+    encoder.eval()
+
+    waveform = waveform.to(args.device)
+
+    print(f"Encoding audio (language={language or 'en'}) …")
+    with torch.no_grad():
+        enc_out = encoder(waveform, text=[args.transcript], sample_rate=sr)
+
+    vals = enc_out.token_values[0].cpu().float().numpy().astype(np.float32)    # (N, 512)
+    pos  = enc_out.token_positions[0].cpu().float().numpy().astype(np.float32) # (N,)
+    n = vals.shape[0]
+    print(f"  {n} acoustic tokens, {waveform.shape[-1]/sr:.2f}s audio")
+
+    out_path = args.output
+    w = GGUFWriter(out_path, arch="crispasr.reference", use_temp_file=False)
+    w.add_name(Path(out_path).stem)
+    w.add_string("crispasr.ref.tada_tts_prompt_text", args.transcript)
+    # Voice-clone provenance — see examples/cli/crispasr_voice_clone_policy.h.
+    w.add_bool("crispasr.voice.cloned_from_recording", True)
+    if args.consent_attestation:
+        w.add_string("crispasr.voice.consent_attestation", args.consent_attestation)
+    if language:
+        w.add_string("crispasr.ref.tada_tts_language", language)
+    w.add_tensor("prompt_token_values",    np.ascontiguousarray(vals), raw_dtype=GGMLQuantizationType.F32)
+    w.add_tensor("prompt_token_positions", np.ascontiguousarray(pos),  raw_dtype=GGMLQuantizationType.F32)
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    print(f"Saved: {out_path}  ({Path(out_path).stat().st_size // 1024} KB)")
+    print(f"\nUse with: crispasr -m tada-tts-3b-ml-q4_k.gguf --voice {out_path} --tts 'your text'")
+
+
+if __name__ == "__main__":
+    main()

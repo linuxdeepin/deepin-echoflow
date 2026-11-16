@@ -1,0 +1,38 @@
+name: Fuzz
+
+# Nightly ASan/UBSan mutation fuzzing of the verifier (the untrusted-input
+# parser). Runs on a schedule + on demand — not on every push (it's slower).
+on:
+  schedule:
+    - cron: '37 4 * * *'   # nightly ~04:37 UTC
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: 'Fuzz iterations'
+        default: '2000000'
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build fuzzer (ASan + UBSan)
+        run: cmake -B build-fuzz -DC2PA_AUDIO_FUZZ=ON && cmake --build build-fuzz -j
+      - name: Fuzz the verifier (time-budgeted)
+        env:
+          ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          set +e
+          # Run for up to 15 min (or the requested iteration count). A crash
+          # aborts non-zero (ASan -> 134); a clean finish is 0; hitting the time
+          # budget is 124 — both 0 and 124 mean "no memory bug found".
+          timeout 900 ./build-fuzz/c2pa_fuzz_verify "${{ github.event.inputs.iterations || '100000000' }}" \
+            test/assets/reference-c2pa-rs.wav \
+            test/assets/reference-c2pa-rs.mp3 \
+            test/assets/reference-c2pa-rs.m4a \
+            test/assets/reference-c2pa-rs.flac
+          rc=$?
+          if [ $rc -eq 0 ] || [ $rc -eq 124 ]; then echo "fuzz clean (rc=$rc)"; exit 0; fi
+          echo "fuzz found a fault (rc=$rc)"; exit 1

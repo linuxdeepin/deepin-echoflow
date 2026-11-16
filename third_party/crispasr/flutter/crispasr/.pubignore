@@ -1,0 +1,9 @@
+.dart_tool/
+build/
+coverage/
+pubspec.lock
+*.so
+*.dylib
+*.dll
+*.a
+*.gguf

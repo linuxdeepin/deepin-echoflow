@@ -1,0 +1,65 @@
+name: Bindings Tests (Dart)
+# The Flutter/Dart binding had no PR-time job. flutter/crispasr/test/chat_test.dart
+# is 600+ lines and its first layer — the symbol-resolution test — is exactly the
+# check that catches an ABI entry point disappearing from libcrispasr, which is
+# the drift tools/check-chat-binding-coverage.py can only see at the text level.
+#
+# Model-gated cases self-skip without CRISPASR_CHAT_TEST_MODEL, so this runs the
+# symbol and pure-Dart layers and nothing that needs a download.
+on:
+  push:
+    paths:
+      - flutter/crispasr/**
+      - include/crispasr_chat.h
+      - include/crispasr_session.h
+      - src/chat.cpp
+      - src/crispasr_c_api.cpp
+      - .github/workflows/bindings-dart.yml
+  pull_request:
+    paths:
+      - flutter/crispasr/**
+      - include/crispasr_chat.h
+      - include/crispasr_session.h
+      - src/chat.cpp
+      - src/crispasr_c_api.cpp
+      - .github/workflows/bindings-dart.yml
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ubuntu-22:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - uses: dart-lang/setup-dart@v1
+
+      # crispasr-lib, not crispasr: the latter is the CLI's OUTPUT_NAME and is
+      # only defined when the examples are built (the mistake that made the Rust
+      # job red on its first run).
+      - name: Build libcrispasr
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=ON \
+            -DCRISPASR_BUILD_TESTS=OFF \
+            -DCRISPASR_BUILD_EXAMPLES=OFF \
+            -DCRISPASR_BUILD_SERVER=OFF \
+            -DGGML_CUDA=OFF \
+            -DCRISPASR_OPUS_FETCH=ON
+          cmake --build build -j"$(nproc)" --target crispasr-lib
+
+      - name: dart analyze + format
+        working-directory: flutter/crispasr
+        run: |
+          dart pub get
+          dart format --output=none --set-exit-if-changed lib test
+
+      - name: dart test (symbol resolution + pure-Dart; model cases self-skip)
+        working-directory: flutter/crispasr
+        env:
+          CRISPASR_LIB: ${{ github.workspace }}/build/src/libcrispasr.so
+        run: dart test

@@ -1,0 +1,1673 @@
+// glm_asr.cpp — GLM-ASR-Nano runtime (zai-org/GLM-ASR-Nano-2512).
+//
+// Architecture: Whisper encoder (1280d, 32L, partial RoPE, LayerNorm+bias)
+//             + 4-frame-stack projector (5120→4096,GELU → 4096→2048)
+//             + Llama LLM (2048d, 28L, GQA 16/4, SwiGLU, RMSNorm)
+//
+// Closely follows voxtral.cpp — same building blocks, different sizes.
+
+#include "glm_asr.h"
+
+#define _USE_MATH_DEFINES
+#include <cmath>
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+#include "core/attention.h"
+#include "core/beam_decode.h"
+#include "core/ffn.h"
+#include "core/gguf_loader.h"
+#include "core/mel.h"
+#include "core/gpu_backend_pref.h" // crispasr_init_gpu_backend (#214)
+
+#include "ggml-backend.h"
+#include "crispasr_imatrix.h"
+#include "ggml-cpu.h"
+#include "ggml.h"
+#include "gguf.h"
+
+#include <algorithm>
+#include <cassert>
+#include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#include "core/bpe.h"
+#include "core/crispasr_env.h"
+#include "core/ggml_cpu_backend.h"
+
+// ===========================================================================
+// Bench instrumentation — `GLM_ASR_BENCH=1` for per-stage timings.
+// ===========================================================================
+
+static bool glm_asr_bench_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = crispasr_env::get("CRISPASR_GLM_ASR_BENCH");
+        v = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+struct glm_asr_bench_stage {
+    const char* name;
+    std::chrono::steady_clock::time_point t0;
+    explicit glm_asr_bench_stage(const char* n) : name(n), t0(std::chrono::steady_clock::now()) {}
+    ~glm_asr_bench_stage() {
+        if (!glm_asr_bench_enabled())
+            return;
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr, "  glm_asr_bench: %-22s %.2f ms\n", name, ms);
+    }
+};
+
+// ===========================================================================
+// Model structures
+// ===========================================================================
+
+struct glm_asr_hparams {
+    // Audio encoder
+    int enc_hidden = 1280;
+    int enc_n_layers = 32;
+    int enc_n_heads = 20;
+    int enc_n_kv_heads = 20;
+    int enc_ff = 5120;
+    int n_mels = 128;
+    int enc_max_pos = 1500;
+    float partial_rotary = 0.5f;
+    // LLM decoder
+    int llm_hidden = 2048;
+    int llm_n_layers = 28;
+    int llm_n_heads = 16;
+    int llm_n_kv_heads = 4;
+    int llm_ff = 6144;
+    int llm_vocab = 59264;
+    int llm_max_pos = 8192;
+    float rms_eps = 1e-5f;
+    // Special tokens
+    int audio_token_id = 59260;
+    int bos_token_id = 1;
+    int eos_token_ids[4] = {59246, 59253, 59255, -1};
+    int n_eos = 3;
+    // Derived
+    int enc_head_dim = 64;  // enc_hidden / enc_n_heads
+    int llm_head_dim = 128; // llm_hidden / llm_n_heads
+};
+
+struct glm_enc_block {
+    ggml_tensor* attn_norm_w = nullptr;
+    ggml_tensor* attn_norm_b = nullptr;
+    ggml_tensor* attn_q_w = nullptr;
+    ggml_tensor* attn_q_b = nullptr;
+    ggml_tensor* attn_k_w = nullptr;
+    ggml_tensor* attn_v_w = nullptr;
+    ggml_tensor* attn_v_b = nullptr;
+    ggml_tensor* attn_out_w = nullptr;
+    ggml_tensor* attn_out_b = nullptr;
+    ggml_tensor* ffn_norm_w = nullptr;
+    ggml_tensor* ffn_norm_b = nullptr;
+    ggml_tensor* ffn_up_w = nullptr;
+    ggml_tensor* ffn_up_b = nullptr;
+    ggml_tensor* ffn_down_w = nullptr;
+    ggml_tensor* ffn_down_b = nullptr;
+};
+
+struct glm_llm_block {
+    ggml_tensor* attn_norm_w = nullptr;
+    ggml_tensor* ffn_norm_w = nullptr;
+    ggml_tensor* attn_q_w = nullptr;
+    ggml_tensor* attn_k_w = nullptr;
+    ggml_tensor* attn_v_w = nullptr;
+    ggml_tensor* attn_out_w = nullptr;
+    ggml_tensor* ffn_gate_w = nullptr;
+    ggml_tensor* ffn_up_w = nullptr;
+    ggml_tensor* ffn_down_w = nullptr;
+};
+
+struct glm_asr_model {
+    glm_asr_hparams hp;
+
+    // Audio encoder
+    struct {
+        ggml_tensor* conv1_w = nullptr;
+        ggml_tensor* conv1_b = nullptr;
+        ggml_tensor* conv2_w = nullptr;
+        ggml_tensor* conv2_b = nullptr;
+        ggml_tensor* ln_post_w = nullptr;
+        ggml_tensor* ln_post_b = nullptr;
+        std::vector<glm_enc_block> blocks;
+    } audio;
+
+    // Projector (4-frame stack → 2 linears)
+    struct {
+        ggml_tensor* linear1_w = nullptr;
+        ggml_tensor* linear1_b = nullptr;
+        ggml_tensor* linear2_w = nullptr;
+        ggml_tensor* linear2_b = nullptr;
+    } proj;
+
+    // LLM
+    struct {
+        ggml_tensor* token_embd_w = nullptr;
+        ggml_tensor* output_norm_w = nullptr;
+        ggml_tensor* lm_head_w = nullptr;
+        std::vector<glm_llm_block> blocks;
+    } llm;
+
+    // Tokenizer. token_to_id/merge_rank power the byte-level BPE encoder
+    // (core_bpe); merge_rank is populated only when the GGUF carries
+    // `tokenizer.ggml.merges` — older GGUFs fall back to the specials-only
+    // encoder (and the callers' default-instruction fallback).
+    std::vector<std::string> vocab;
+    std::unordered_map<std::string, int32_t> token_to_id;
+    std::unordered_map<std::string, int32_t> merge_rank;
+
+    // GGUF context (owns the weight memory)
+    ggml_context* ctx = nullptr;
+    ggml_backend_buffer_t buf = nullptr;
+    // PLAN #69a: optional second buffer for layers spilled to CPU.
+    ggml_backend_buffer_t buf_cpu = nullptr;
+};
+
+struct glm_asr_context {
+    glm_asr_context_params params;
+    glm_asr_model model;
+
+    ggml_backend_t backend = nullptr;
+    ggml_backend_t backend_cpu = nullptr;
+    ggml_backend_sched_t sched = nullptr;
+    std::vector<uint8_t> compute_meta;
+
+    // KV cache
+    ggml_context* kv_ctx = nullptr;
+    ggml_backend_buffer_t kv_buf = nullptr;
+    ggml_tensor* kv_k = nullptr;
+    ggml_tensor* kv_v = nullptr;
+
+    int n_threads = 4;
+    // #292: decode cap; forwarded from --max-new-tokens when set, else this default.
+    int max_new_tokens = 512;
+    std::string ask; // custom instruction (empty = use default)
+
+    // §176s: cached encoder graph — reused when T_mel matches.
+    ggml_cgraph* cached_enc_gf = nullptr;
+    ggml_context* cached_enc_ctx = nullptr;
+    std::vector<uint8_t> cached_enc_meta;
+    int cached_enc_T_mel = 0;
+};
+
+// ===========================================================================
+// Temperature-aware token selection
+static int sample_token(const float* logits, int vocab, float temperature, float* out_prob = nullptr) {
+    if (temperature <= 0.0f) {
+        int best = 0;
+        for (int i = 1; i < vocab; i++)
+            if (logits[i] > logits[best])
+                best = i;
+        if (out_prob) {
+            // Numerically stable softmax of the picked logit.
+            float maxv = logits[best];
+            float s = 0.f;
+            for (int i = 0; i < vocab; i++)
+                s += expf(logits[i] - maxv);
+            *out_prob = 1.0f / s;
+        }
+        return best;
+    }
+    float maxv = logits[0];
+    for (int i = 1; i < vocab; i++)
+        if (logits[i] > maxv)
+            maxv = logits[i];
+    float sum = 0;
+    std::vector<float> probs(vocab);
+    for (int i = 0; i < vocab; i++) {
+        probs[i] = expf((logits[i] - maxv) / temperature);
+        sum += probs[i];
+    }
+    const float inv_sum = 1.0f / sum;
+    for (int i = 0; i < vocab; i++)
+        probs[i] *= inv_sum;
+    float r = ((float)rand() / (float)RAND_MAX);
+    float acc = 0;
+    int picked = vocab - 1;
+    for (int i = 0; i < vocab; i++) {
+        acc += probs[i];
+        if (acc >= r) {
+            picked = i;
+            break;
+        }
+    }
+    if (out_prob)
+        *out_prob = probs[picked];
+    return picked;
+}
+
+// Implementation
+// ===========================================================================
+
+extern "C" struct glm_asr_context_params glm_asr_context_default_params(void) {
+    return {/*n_threads=*/4,      /*verbosity=*/1,        /*use_gpu=*/true,
+            /*temperature=*/0.0f, /*beam_size=*/1,
+            /*translate=*/false,  /*target_lang=*/nullptr};
+}
+
+extern "C" int glm_asr_encoder_frames_from_mel_frames(int T_mel) {
+    return (T_mel + 1) / 2;
+}
+
+extern "C" struct glm_asr_context* glm_asr_init_from_file(const char* path_model,
+                                                          struct glm_asr_context_params params) {
+    auto* ctx = new glm_asr_context();
+    ctx->params = params;
+    ctx->n_threads = params.n_threads > 0 ? params.n_threads : 4;
+
+    ctx->backend = params.use_gpu ? crispasr_init_gpu_backend() : core_cpu_backend::init();
+    if (!ctx->backend)
+        ctx->backend = core_cpu_backend::init();
+    ctx->backend_cpu = core_cpu_backend::init();
+    core_cpu_backend::set_n_threads(ctx->backend_cpu, ctx->n_threads);
+    if (core_cpu_backend::is_cpu(ctx->backend))
+        core_cpu_backend::set_n_threads(ctx->backend, ctx->n_threads);
+
+    // Load GGUF
+    auto& m = ctx->model;
+    auto& hp = m.hp;
+
+    // ---- pass 1: read hparams + vocab via metadata-only context ----
+    {
+        gguf_context* gctx = core_gguf::open_metadata(path_model);
+        if (!gctx) {
+            fprintf(stderr, "glm_asr: failed to open '%s'\n", path_model);
+            glm_asr_free(ctx); // frees the backends this ctx already owns
+            return nullptr;
+        }
+        hp.enc_hidden = core_gguf::kv_u32(gctx, "glmasr.audio.hidden_size", hp.enc_hidden);
+        hp.enc_n_layers = core_gguf::kv_u32(gctx, "glmasr.audio.num_layers", hp.enc_n_layers);
+        hp.enc_n_heads = core_gguf::kv_u32(gctx, "glmasr.audio.num_heads", hp.enc_n_heads);
+        hp.enc_n_kv_heads = core_gguf::kv_u32(gctx, "glmasr.audio.num_kv_heads", hp.enc_n_kv_heads);
+        hp.enc_ff = core_gguf::kv_u32(gctx, "glmasr.audio.intermediate_size", hp.enc_ff);
+        hp.n_mels = core_gguf::kv_u32(gctx, "glmasr.audio.num_mel_bins", hp.n_mels);
+        hp.enc_max_pos = core_gguf::kv_u32(gctx, "glmasr.audio.max_position_embeddings", hp.enc_max_pos);
+        hp.partial_rotary = core_gguf::kv_f32(gctx, "glmasr.audio.partial_rotary_factor", hp.partial_rotary);
+
+        hp.llm_hidden = core_gguf::kv_u32(gctx, "glmasr.llm.hidden_size", hp.llm_hidden);
+        hp.llm_n_layers = core_gguf::kv_u32(gctx, "glmasr.llm.num_layers", hp.llm_n_layers);
+        hp.llm_n_heads = core_gguf::kv_u32(gctx, "glmasr.llm.num_heads", hp.llm_n_heads);
+        hp.llm_n_kv_heads = core_gguf::kv_u32(gctx, "glmasr.llm.num_kv_heads", hp.llm_n_kv_heads);
+        hp.llm_ff = core_gguf::kv_u32(gctx, "glmasr.llm.intermediate_size", hp.llm_ff);
+        hp.llm_vocab = core_gguf::kv_u32(gctx, "glmasr.llm.vocab_size", hp.llm_vocab);
+        hp.llm_max_pos = core_gguf::kv_u32(gctx, "glmasr.llm.max_position_embeddings", hp.llm_max_pos);
+        hp.rms_eps = core_gguf::kv_f32(gctx, "glmasr.llm.rms_norm_eps", hp.rms_eps);
+
+        hp.audio_token_id = core_gguf::kv_u32(gctx, "glmasr.audio_token_id", hp.audio_token_id);
+        hp.bos_token_id = core_gguf::kv_u32(gctx, "glmasr.bos_token_id", hp.bos_token_id);
+        hp.n_eos = core_gguf::kv_u32(gctx, "glmasr.num_eos_tokens", hp.n_eos);
+        for (int i = 0; i < hp.n_eos && i < 4; i++) {
+            char key[64];
+            snprintf(key, sizeof(key), "glmasr.eos_token_id_%d", i);
+            hp.eos_token_ids[i] = core_gguf::kv_u32(gctx, key, hp.eos_token_ids[i]);
+        }
+
+        hp.enc_head_dim = hp.enc_hidden / hp.enc_n_heads;
+        hp.llm_head_dim = hp.llm_hidden / hp.llm_n_heads;
+
+        // Tokenizer
+        m.vocab.resize(hp.llm_vocab);
+        const int tok_key = gguf_find_key(gctx, "tokenizer.ggml.tokens");
+        if (tok_key >= 0) {
+            const int n = gguf_get_arr_n(gctx, tok_key);
+            for (int i = 0; i < n && i < hp.llm_vocab; i++) {
+                const char* s = gguf_get_arr_str(gctx, tok_key, i);
+                if (s) {
+                    m.vocab[i] = s;
+                    m.token_to_id.emplace(m.vocab[i], i);
+                }
+            }
+        }
+        // BPE merges (present in GGUFs patched/converted after 2026-07-10;
+        // absent → glm_asr_tokenize stays specials-only).
+        {
+            auto merges = core_gguf::kv_str_array(gctx, "tokenizer.ggml.merges");
+            for (int i = 0; i < (int)merges.size(); i++)
+                m.merge_rank[merges[i]] = i;
+        }
+
+        gguf_free(gctx);
+    }
+
+    // ---- pass 2: load tensor data ----
+    // PLAN #69a: when CRISPASR_N_GPU_LAYERS is set and < total layers,
+    // route llm.blk.<il>.* with il >= N onto the CPU backend.
+    core_gguf::WeightLoad wl;
+    int n_gpu_layers_env = -1;
+    if (const char* s = std::getenv("CRISPASR_N_GPU_LAYERS")) {
+        n_gpu_layers_env = std::atoi(s);
+    }
+    const int total_layers = (int)hp.llm_n_layers;
+    const bool do_split = ctx->backend_cpu && ctx->backend_cpu != ctx->backend && n_gpu_layers_env >= 0 &&
+                          n_gpu_layers_env < total_layers;
+    if (do_split) {
+        core_gguf::LayerSplitConfig cfg{"llm.blk.", n_gpu_layers_env};
+        if (!core_gguf::load_weights_split(path_model, ctx->backend, ctx->backend_cpu,
+                                           core_gguf::is_gpu_tensor_with_prefix, &cfg, "glm_asr", wl)) {
+            fprintf(stderr, "glm_asr: split load failed from '%s'\n", path_model);
+            glm_asr_free(ctx); // frees the backends this ctx already owns
+            return nullptr;
+        }
+        fprintf(stderr, "glm_asr: layer offload: gpu=[0,%d), cpu=[%d,%d) (CRISPASR_N_GPU_LAYERS=%d)\n",
+                n_gpu_layers_env, n_gpu_layers_env, total_layers, n_gpu_layers_env);
+    } else {
+        if (!core_gguf::load_weights(path_model, ctx->backend, "glm_asr", wl)) {
+            fprintf(stderr, "glm_asr: failed to load weights from '%s'\n", path_model);
+            glm_asr_free(ctx); // frees the backends this ctx already owns
+            return nullptr;
+        }
+    }
+    m.ctx = wl.ctx;
+    m.buf = wl.buf;
+    m.buf_cpu = wl.buf_cpu;
+
+    // Map tensors
+    auto get = [&](const char* name) -> ggml_tensor* {
+        auto it = wl.tensors.find(name);
+        if (it == wl.tensors.end()) {
+            fprintf(stderr, "glm_asr: tensor '%s' not found\n", name);
+            return nullptr;
+        }
+        return it->second;
+    };
+    auto try_get = [&](const char* name) -> ggml_tensor* {
+        auto it = wl.tensors.find(name);
+        return it != wl.tensors.end() ? it->second : nullptr;
+    };
+
+    // Audio encoder tensors
+    m.audio.conv1_w = get("audio.conv1.weight");
+    m.audio.conv1_b = get("audio.conv1.bias");
+    m.audio.conv2_w = get("audio.conv2.weight");
+    m.audio.conv2_b = get("audio.conv2.bias");
+    m.audio.ln_post_w = get("audio.norm.weight");
+    m.audio.ln_post_b = try_get("audio.norm.bias");
+    m.audio.blocks.resize(hp.enc_n_layers);
+    for (int i = 0; i < hp.enc_n_layers; i++) {
+        char buf[128];
+        auto& b = m.audio.blocks[i];
+        snprintf(buf, sizeof(buf), "audio.blk.%d.attn_norm.weight", i);
+        b.attn_norm_w = get(buf);
+        snprintf(buf, sizeof(buf), "audio.blk.%d.attn_norm.bias", i);
+        b.attn_norm_b = try_get(buf);
+        snprintf(buf, sizeof(buf), "audio.blk.%d.attn_q.weight", i);
+        b.attn_q_w = get(buf);
+        snprintf(buf, sizeof(buf), "audio.blk.%d.attn_q.bias", i);
+        b.attn_q_b = try_get(buf);
+        snprintf(buf, sizeof(buf), "audio.blk.%d.attn_k.weight", i);
+        b.attn_k_w = get(buf);
+        snprintf(buf, sizeof(buf), "audio.blk.%d.attn_v.weight", i);
+        b.attn_v_w = get(buf);
+        snprintf(buf, sizeof(buf), "audio.blk.%d.attn_v.bias", i);
+        b.attn_v_b = try_get(buf);
+        snprintf(buf, sizeof(buf), "audio.blk.%d.attn_out.weight", i);
+        b.attn_out_w = get(buf);
+        snprintf(buf, sizeof(buf), "audio.blk.%d.attn_out.bias", i);
+        b.attn_out_b = try_get(buf);
+        snprintf(buf, sizeof(buf), "audio.blk.%d.ffn_norm.weight", i);
+        b.ffn_norm_w = get(buf);
+        snprintf(buf, sizeof(buf), "audio.blk.%d.ffn_norm.bias", i);
+        b.ffn_norm_b = try_get(buf);
+        snprintf(buf, sizeof(buf), "audio.blk.%d.ffn.up.weight", i);
+        b.ffn_up_w = get(buf);
+        snprintf(buf, sizeof(buf), "audio.blk.%d.ffn.up.bias", i);
+        b.ffn_up_b = try_get(buf);
+        snprintf(buf, sizeof(buf), "audio.blk.%d.ffn.down.weight", i);
+        b.ffn_down_w = get(buf);
+        snprintf(buf, sizeof(buf), "audio.blk.%d.ffn.down.bias", i);
+        b.ffn_down_b = try_get(buf);
+    }
+
+    // Projector
+    m.proj.linear1_w = get("proj.linear_1.weight");
+    m.proj.linear1_b = try_get("proj.linear_1.bias");
+    m.proj.linear2_w = get("proj.linear_2.weight");
+    m.proj.linear2_b = try_get("proj.linear_2.bias");
+
+    // LLM tensors
+    m.llm.token_embd_w = get("llm.token_embd.weight");
+    m.llm.output_norm_w = get("llm.norm.weight");
+    m.llm.lm_head_w = get("lm_head.weight");
+    m.llm.blocks.resize(hp.llm_n_layers);
+    for (int i = 0; i < hp.llm_n_layers; i++) {
+        char buf[128];
+        auto& b = m.llm.blocks[i];
+        snprintf(buf, sizeof(buf), "llm.blk.%d.attn_norm.weight", i);
+        b.attn_norm_w = get(buf);
+        snprintf(buf, sizeof(buf), "llm.blk.%d.ffn_norm.weight", i);
+        b.ffn_norm_w = get(buf);
+        snprintf(buf, sizeof(buf), "llm.blk.%d.attn_q.weight", i);
+        b.attn_q_w = get(buf);
+        snprintf(buf, sizeof(buf), "llm.blk.%d.attn_k.weight", i);
+        b.attn_k_w = get(buf);
+        snprintf(buf, sizeof(buf), "llm.blk.%d.attn_v.weight", i);
+        b.attn_v_w = get(buf);
+        snprintf(buf, sizeof(buf), "llm.blk.%d.attn_out.weight", i);
+        b.attn_out_w = get(buf);
+        snprintf(buf, sizeof(buf), "llm.blk.%d.ffn.gate.weight", i);
+        b.ffn_gate_w = get(buf);
+        snprintf(buf, sizeof(buf), "llm.blk.%d.ffn.up.weight", i);
+        b.ffn_up_w = get(buf);
+        snprintf(buf, sizeof(buf), "llm.blk.%d.ffn.down.weight", i);
+        b.ffn_down_w = get(buf);
+    }
+
+    // Scheduler
+    int n_be = 1;
+    ggml_backend_t backends[2] = {ctx->backend, nullptr};
+    if (ctx->backend_cpu && ctx->backend_cpu != ctx->backend) {
+        backends[n_be++] = ctx->backend_cpu;
+    }
+    ctx->sched = ggml_backend_sched_new(backends, nullptr, n_be, 16384, false, false);
+    crispasr_imatrix_install(ctx->sched); // no-op unless CRISPASR_IMATRIX_OUT is set
+    ctx->compute_meta.resize(ggml_tensor_overhead() * 16384 + ggml_graph_overhead_custom(16384, false));
+
+    int n_audio_t = 0, n_llm_t = 0;
+    for (int i = 0; i < hp.enc_n_layers; i++) {
+        if (m.audio.blocks[i].attn_q_w)
+            n_audio_t++;
+    }
+    for (int i = 0; i < hp.llm_n_layers; i++) {
+        if (m.llm.blocks[i].attn_q_w)
+            n_llm_t++;
+    }
+
+    if (params.verbosity >= 1) {
+        fprintf(stderr, "glm_asr: loaded %d audio + %d LLM layers, vocab %d\n", n_audio_t, n_llm_t, hp.llm_vocab);
+    }
+
+    return ctx;
+}
+
+extern "C" void glm_asr_free(struct glm_asr_context* ctx) {
+    if (!ctx)
+        return;
+    if (ctx->cached_enc_ctx)
+        ggml_free(ctx->cached_enc_ctx);
+    if (ctx->kv_buf)
+        ggml_backend_buffer_free(ctx->kv_buf);
+    if (ctx->kv_ctx)
+        ggml_free(ctx->kv_ctx);
+    if (ctx->sched)
+        ggml_backend_sched_free(ctx->sched);
+    if (ctx->model.buf)
+        core_gguf::release_weight_buffer(ctx->model.buf);
+    if (ctx->model.buf_cpu)
+        core_gguf::release_weight_buffer(ctx->model.buf_cpu);
+    if (ctx->model.ctx)
+        ggml_free(ctx->model.ctx);
+    if (ctx->backend_cpu && ctx->backend_cpu != ctx->backend)
+        ggml_backend_free(ctx->backend_cpu);
+    if (ctx->backend)
+        ggml_backend_free(ctx->backend);
+    delete ctx;
+}
+
+extern "C" const char* glm_asr_token_text(struct glm_asr_context* ctx, int id) {
+    if (!ctx || id < 0 || id >= (int)ctx->model.vocab.size())
+        return "";
+    return ctx->model.vocab[id].c_str();
+}
+
+extern "C" int32_t* glm_asr_tokenize(struct glm_asr_context* ctx, const char* text, int* out_n_tokens) {
+    // Byte-level BPE (GPT-2 family) + special-token scan, mirroring
+    // qwen3_asr_tokenize. Needs `tokenizer.ggml.merges` in the GGUF; on
+    // older GGUFs without merges only special tokens encode (plain text is
+    // dropped) and callers fall back to the baked default instruction.
+    if (!ctx || !text || !out_n_tokens)
+        return nullptr;
+
+    const auto& m = ctx->model;
+    std::vector<int32_t> ids;
+    const std::string s(text);
+
+    // Match a special token at `pos`: "<|...|>" form. Only exact vocab
+    // entries match — a literal '<' in user text is unaffected.
+    auto match_special = [&](size_t pos, int32_t& id) -> size_t {
+        if (s[pos] != '<' || pos + 1 >= s.size() || s[pos + 1] != '|')
+            return 0;
+        const size_t close = s.find("|>", pos + 2);
+        if (close == std::string::npos)
+            return 0;
+        const size_t len = close + 2 - pos;
+        auto it = m.token_to_id.find(s.substr(pos, len));
+        if (it == m.token_to_id.end())
+            return 0;
+        id = it->second;
+        return len;
+    };
+
+    size_t i = 0;
+    while (i < s.size()) {
+        // 1. Special token
+        {
+            int32_t sp_id = 0;
+            const size_t sp_len = match_special(i, sp_id);
+            if (sp_len > 0) {
+                ids.push_back(sp_id);
+                i += sp_len;
+                continue;
+            }
+        }
+
+        // 2. Plain-text segment up to the next recognized special token.
+        size_t j = i;
+        if (s[j] == '<')
+            j++; // always advance past a failed lookalike
+        while (j < s.size()) {
+            if (s[j] == '<') {
+                int32_t sp_id = 0;
+                if (match_special(j, sp_id) > 0)
+                    break;
+            }
+            j++;
+        }
+        std::string chunk = s.substr(i, j - i);
+        i = j;
+        if (chunk.empty())
+            continue;
+        if (m.merge_rank.empty())
+            continue; // no merges in this GGUF — plain text not encodable
+
+        // 3. Whitespace-boundary pre-split (leading space attaches to the
+        //    following word, GPT-2 convention), then byte-encode + BPE.
+        size_t k = 0;
+        while (k < chunk.size()) {
+            const size_t start = k;
+            if (chunk[k] == ' ' || chunk[k] == '\t' || chunk[k] == '\n')
+                k++;
+            while (k < chunk.size() && chunk[k] != ' ' && chunk[k] != '\t' && chunk[k] != '\n')
+                k++;
+            if (k == start)
+                k++;
+            const std::string pre(chunk, start, k - start);
+            const std::string encoded = core_bpe::bytes_to_unicode(pre.data(), pre.size());
+            core_bpe::bpe_one(m.token_to_id, m.merge_rank, encoded, ids);
+        }
+    }
+
+    *out_n_tokens = (int)ids.size();
+    if (ids.empty())
+        return nullptr;
+    auto* result = (int32_t*)malloc(ids.size() * sizeof(int32_t));
+    if (!result)
+        return nullptr;
+    memcpy(result, ids.data(), ids.size() * sizeof(int32_t));
+    return result;
+}
+
+// Stub implementations — the full pipeline will be implemented iteratively
+// following the voxtral.cpp pattern. For now, expose the API surface.
+
+// Internal: transcribe and (optionally) capture per-token ids + softmax probs.
+// When `out_token_ids` and `out_token_probs` are non-null, both are populated
+// in lock-step with the emitted (non-special, non-EOS) text tokens. The
+// returned char* is malloc'd and owned by the caller.
+static char* glm_asr_transcribe_impl(struct glm_asr_context* ctx, const float* samples, int n_samples,
+                                     std::vector<int32_t>* out_token_ids, std::vector<float>* out_token_probs) {
+    if (!ctx || !samples || n_samples <= 0)
+        return nullptr;
+
+    const auto& hp = ctx->model.hp;
+
+    // 1+2. Mel + encoder, blueprint window semantics (transformers glmasr
+    // GlmAsrProcessor._process_audio): the raw audio is cut into 30 s SAMPLE
+    // windows, each window is mel'd and encoded independently on a padded
+    // 3000-frame canvas (unmasked attention over the padding — the reference
+    // encodes-then-trims), and only the window's VALID post-conv frames
+    // survive: conv2 (k3 s2 p1) then a 4-frame merge,
+    //   valid = (((L_mel - 1) / 2 + 1) - 4) / 4 + 1.
+    // All windows' valid frames are concatenated into ONE audio-token stream
+    // and decoded in ONE LLM pass (processor max_audio_len = 655 s ≈ the
+    // 8192-token LLM context). The legacy path truncated everything past the
+    // first 30 s window — restore it with CRISPASR_GLM_ASR_SINGLE_WINDOW=1.
+    const bool legacy_single_window = [] {
+        const char* e = getenv("CRISPASR_GLM_ASR_SINGLE_WINDOW");
+        return e && atoi(e) != 0;
+    }();
+    const int kWindowSamples = 30 * 16000; // feature_extractor.chunk_length
+    const int kMaxWindows = 21;            // floor(655 s / 30 s), blueprint truncation
+    const int T_target = 3000;             // mel frames per padded window
+
+    int n_win = (n_samples + kWindowSamples - 1) / kWindowSamples;
+    if (legacy_single_window)
+        n_win = 1;
+    if (n_win > kMaxWindows) {
+        fprintf(stderr,
+                "glm_asr: audio %.1fs exceeds the model's %d s single-pass window — "
+                "truncating (use --chunk-seconds for longer audio)\n",
+                (double)n_samples / 16000.0, kMaxWindows * 30);
+        n_win = kMaxWindows;
+    }
+
+    int n_mels = 0, enc_dim = 0, N_enc = 0;
+    std::vector<float> audio_embeds_v;
+    std::vector<int> win_tokens; // valid audio tokens per window (prompt grouping)
+    for (int w = 0; w < n_win; w++) {
+        const float* win_samples = samples + (size_t)w * kWindowSamples;
+        const int win_n = std::min(kWindowSamples, n_samples - w * kWindowSamples);
+        if (win_n <= 0)
+            break;
+
+        int T_mel = 0;
+        float* mel;
+        {
+            glm_asr_bench_stage _b("mel");
+            mel = glm_asr_compute_mel(ctx, win_samples, win_n, &n_mels, &T_mel);
+        }
+        if (!mel)
+            return nullptr;
+
+        // Valid (pre-padding) mel length → post-conv+merge token count.
+        const int T_valid = std::min(T_mel, T_target);
+        const int conv_valid = (T_valid - 1) / 2 + 1;
+        const int tok_valid = (conv_valid - 4) / 4 + 1;
+
+        // Pad/truncate the window to the fixed 3000-frame canvas.
+        if (T_mel != T_target) {
+            std::vector<float> padded((size_t)n_mels * T_target, 0.0f);
+            for (int m = n_mels - 1; m >= 0; m--)
+                memcpy(padded.data() + (size_t)m * T_target, mel + (size_t)m * T_mel, (size_t)T_valid * sizeof(float));
+            free(mel);
+            mel = (float*)malloc(padded.size() * sizeof(float));
+            if (!mel)
+                return nullptr;
+            memcpy(mel, padded.data(), padded.size() * sizeof(float));
+            T_mel = T_target;
+        }
+
+        int N_win = 0;
+        float* win_embeds;
+        {
+            glm_asr_bench_stage _b("encoder");
+            win_embeds = glm_asr_run_encoder(ctx, mel, n_mels, T_mel, &N_win, &enc_dim);
+        }
+        free(mel);
+        if (!win_embeds)
+            return nullptr;
+
+        const int keep = legacy_single_window ? N_win : std::min(std::max(tok_valid, 0), N_win);
+        if (keep > 0) {
+            const size_t old = audio_embeds_v.size();
+            audio_embeds_v.resize(old + (size_t)keep * enc_dim);
+            memcpy(audio_embeds_v.data() + old, win_embeds, (size_t)keep * enc_dim * sizeof(float));
+            N_enc += keep;
+            win_tokens.push_back(keep);
+        }
+        free(win_embeds);
+    }
+    if (N_enc <= 0 || audio_embeds_v.empty())
+        return nullptr;
+    float* audio_embeds = audio_embeds_v.data();
+
+    // 3. Build prompt — blueprint chat template (chat_template.jinja +
+    //    GlmAsrProcessor.apply_transcription_request):
+    //      <|user|>\n<|begin_of_audio|><|pad|>×N<|end_of_audio|><|user|>\n
+    //      Please transcribe this audio into text<|assistant|>\n
+    //    The instruction is ALWAYS present in the blueprint (the processor's
+    //    default_transcription_prompt); the legacy C++ prompt omitted it and
+    //    all newlines (glm_asr_tokenize is specials-only and silently drops
+    //    plain text — see kDefaultInstruction note). Restore the legacy form
+    //    with CRISPASR_GLM_ASR_LEGACY_PROMPT=1.
+    //
+    //    kNewline / kDefaultInstruction are the GLM tokenizer's ids for "\n"
+    //    and "Please transcribe this audio into text", encoded with the HF
+    //    repo's own tokenizer.json (verified against the transformers-5.13
+    //    processor dump, tools/kaggle/glm-asr-blueprint-ref).
+    const bool legacy_prompt = [] {
+        const char* e = getenv("CRISPASR_GLM_ASR_LEGACY_PROMPT");
+        return e && atoi(e) != 0;
+    }();
+    static const int32_t kNewline = 10; // "Ċ"
+    static const int32_t kDefaultInstruction[] = {14215, 1700, 8091, 643, 14812, 1636, 2815};
+    //    Multi-window audio grouping follows the UPSTREAM reference
+    //    (zai-org/GLM-ASR inference.py build_prompt): each 30 s window gets
+    //    its OWN <|begin_of_audio|>…<|end_of_audio|> block — this is the
+    //    layout the model was trained on. (The transformers-5.x processor
+    //    puts one begin/end pair around ALL windows' tokens instead; that
+    //    generalisation is off-distribution for multi-window prompts.)
+    std::vector<int32_t> ids;
+    ids.push_back(59253); // <|user|>
+    if (!legacy_prompt)
+        ids.push_back(kNewline);
+    if (win_tokens.empty())
+        win_tokens.push_back(N_enc); // legacy single-window path
+    for (int wt : win_tokens) {
+        ids.push_back(59261); // <|begin_of_audio|>
+        for (int i = 0; i < wt; i++)
+            ids.push_back(59260); // <|pad|> (audio placeholder)
+        ids.push_back(59262);     // <|end_of_audio|>
+    }
+    ids.push_back(59253); // <|user|>
+
+    // Instruction: custom ask, translate, or the blueprint default.
+    {
+        std::string instr_str;
+        // Blueprint framing: "\n" + instruction, NO trailing newline (the
+        // verified scaffold puts <|assistant|> directly after the last
+        // instruction token).
+        if (!ctx->ask.empty()) {
+            instr_str = "\n" + ctx->ask;
+        } else if (ctx->params.translate) {
+            const char* tgt = ctx->params.target_lang ? ctx->params.target_lang : "English";
+            char buf[256];
+            snprintf(buf, sizeof(buf), "\nPlease translate the speech to %s.", tgt);
+            instr_str = buf;
+        }
+        bool instr_emitted = false;
+        if (!instr_str.empty()) {
+            int n_instr = 0;
+            int32_t* instr_ids = glm_asr_tokenize(ctx, instr_str.c_str(), &n_instr);
+            if (instr_ids && n_instr > 0) {
+                for (int i = 0; i < n_instr; i++)
+                    ids.push_back(instr_ids[i]);
+                free(instr_ids);
+                instr_emitted = true;
+            } else if (instr_ids) {
+                free(instr_ids);
+            }
+            if (!instr_emitted && ctx->params.verbosity >= 1) {
+                // glm_asr_tokenize is specials-only (no BPE merges in the
+                // GGUF yet) — plain-text instructions silently vanish. Fall
+                // through to the blueprint default below rather than sending
+                // an instruction-less prompt (the model needs SOME
+                // instruction; without one it hallucinates on noise).
+                fprintf(stderr,
+                        "glm_asr: instruction %.60s… not encodable (specials-only "
+                        "tokenizer) — using the default transcription prompt\n",
+                        instr_str.c_str());
+            }
+        }
+        if (!instr_emitted && !legacy_prompt) {
+            ids.push_back(kNewline);
+            for (int32_t id : kDefaultInstruction)
+                ids.push_back(id);
+        }
+    }
+    ids.push_back(59254); // <|assistant|>
+    if (!legacy_prompt)
+        ids.push_back(kNewline);
+
+    // 4. Embed tokens
+    float* text_embeds = glm_asr_embed_tokens(ctx, ids.data(), (int)ids.size());
+    if (!text_embeds)
+        return nullptr;
+
+    // 5. Splice audio embeddings into the <|pad|> positions
+    const int pdim = enc_dim; // 2048
+    int spliced = 0;
+    for (size_t i = 0; i < ids.size() && spliced < N_enc; i++) {
+        if (ids[i] == 59260) { // <|pad|>
+            memcpy(text_embeds + i * pdim, audio_embeds + (size_t)spliced * pdim, pdim * sizeof(float));
+            spliced++;
+        }
+    }
+    audio_embeds_v.clear();
+    audio_embeds_v.shrink_to_fit();
+
+    // 6. KV cache + prefill + greedy decode. Sized to the actual prompt —
+    //    a 655 s single-pass prompt is ~8k tokens, far past the old fixed
+    //    4096 (glm_asr_kv_init grows when a larger request arrives).
+    {
+        glm_asr_bench_stage _b("kv_init");
+        const int kv_needed = (int)ids.size() + 512 /*max_tokens*/ + 16;
+        if (!glm_asr_kv_init(ctx, std::max(4096, kv_needed))) {
+            free(text_embeds);
+            return nullptr;
+        }
+        glm_asr_kv_reset(ctx);
+    }
+
+    int n_t = 0, vocab = 0;
+    float* logits;
+    {
+        glm_asr_bench_stage _b("prefill");
+        logits = glm_asr_run_llm_kv(ctx, text_embeds, (int)ids.size(), 0, &n_t, &vocab);
+    }
+    free(text_embeds);
+    if (!logits)
+        return nullptr;
+
+    auto is_eos = [&](int id) {
+        for (int i = 0; i < hp.n_eos; i++)
+            if (id == hp.eos_token_ids[i])
+                return true;
+        return false;
+    };
+
+    // Generated token sequence (post-prompt) and per-token softmax probs,
+    // produced by either the greedy or beam-search path below.
+    glm_asr_bench_stage _b_dec("ar_decode");
+    std::vector<int32_t> gen_ids;
+    std::vector<float> gen_probs;
+    const int max_tokens = ctx->max_new_tokens > 0 ? ctx->max_new_tokens : 512; // #292
+    const int beam_size = ctx->params.beam_size > 0 ? ctx->params.beam_size : 1;
+
+    if (beam_size > 1) {
+        // Beam search: replay-from-prefix via core_beam_decode helper.
+        // Sampling and beam search are mutually exclusive — beam ignores
+        // temperature (deterministic top-K expansion).
+        core_beam_decode::Config cfg;
+        cfg.max_new_tokens = max_tokens;
+        cfg.eos_id = (hp.n_eos > 0) ? hp.eos_token_ids[0] : 2;
+        // glm-asr has up to 3 stop tokens (e.g. 59246, 59253, 59255). Pass
+        // them ALL to the beam helper — single-eos_id misses ~2/3 of the
+        // model's stop conditions and lets beams run to max_new_tokens.
+        for (int i = 0; i < hp.n_eos; i++)
+            cfg.eos_ids.push_back(hp.eos_token_ids[i]);
+        cfg.vocab_size = vocab;
+        cfg.beam_size = beam_size;
+        cfg.prompt_len = (int)ids.size();
+
+        auto replay = [](glm_asr_context* c, const int32_t* toks, int n, int prompt_len) -> float* {
+            float* emb = glm_asr_embed_tokens(c, toks, n);
+            if (!emb)
+                return nullptr;
+            float* lg = glm_asr_run_llm_kv(c, emb, n, prompt_len, nullptr, nullptr);
+            std::free(emb);
+            return lg;
+        };
+        auto r = core_beam_decode::run_with_probs(ctx, logits, replay, cfg);
+        free(logits);
+        gen_ids = std::move(r.tokens);
+        gen_probs = std::move(r.probs);
+    } else {
+        // Greedy / temperature-sampled path (unchanged behaviour).
+        int next = 0;
+        float next_prob = 0.0f;
+        next = sample_token(logits, vocab, ctx->params.temperature, &next_prob);
+        free(logits);
+
+        gen_ids.push_back(next);
+        gen_probs.push_back(next_prob);
+
+        int n_past = (int)ids.size();
+        for (int step = 0; step < max_tokens - 1; step++) {
+            if (is_eos(next))
+                break;
+            float* emb = glm_asr_embed_tokens(ctx, &next, 1);
+            if (!emb)
+                break;
+            float* lg = glm_asr_run_llm_kv(ctx, emb, 1, n_past, nullptr, nullptr);
+            free(emb);
+            if (!lg)
+                break;
+            n_past++;
+            next = sample_token(lg, vocab, ctx->params.temperature, &next_prob);
+            free(lg);
+            gen_ids.push_back(next);
+            gen_probs.push_back(next_prob);
+        }
+    }
+
+    // Detokenise: GPT-2 byte-level BPE → UTF-8. Drop EOS / special tokens
+    // and stop accumulating once an EOS is seen (matches greedy behaviour
+    // even for beam: beam[0] may end in EOS, which we skip in output).
+    std::string result;
+    for (size_t gi = 0; gi < gen_ids.size(); gi++) {
+        const int id = gen_ids[gi];
+        if (is_eos(id))
+            break;
+        if (id < 0 || id >= (int)ctx->model.vocab.size())
+            continue;
+        const auto& tok = ctx->model.vocab[id];
+        // Skip special tokens (no text contribution and no out-vector entry).
+        if (tok.size() >= 2 && tok[0] == '<' && tok[1] == '|')
+            continue;
+        result += core_bpe::token_bytes_to_utf8(tok);
+        if (out_token_ids && out_token_probs) {
+            out_token_ids->push_back(id);
+            out_token_probs->push_back(gi < gen_probs.size() ? gen_probs[gi] : 0.0f);
+        }
+    }
+
+    // CRISPASR_GLM_ASR_DEBUG=1: dump the raw decode before any framing strip
+    // (first/last generated ids + text) — decode-path diagnosis.
+    if (const char* dbg = getenv("CRISPASR_GLM_ASR_DEBUG"); dbg && atoi(dbg) != 0) {
+        fprintf(stderr, "glm_asr[debug]: prompt tail ids:");
+        for (size_t ti = ids.size() > 20 ? ids.size() - 20 : 0; ti < ids.size(); ti++)
+            fprintf(stderr, " %d", ids[ti]);
+        fprintf(stderr, "\nglm_asr[debug]: prompt=%d tokens (N_enc=%d), generated=%zu ids:", (int)ids.size(), N_enc,
+                gen_ids.size());
+        for (size_t i = 0; i < gen_ids.size() && i < 24; i++)
+            fprintf(stderr, " %d", gen_ids[i]);
+        if (gen_ids.size() > 24)
+            fprintf(stderr, " ...");
+        fprintf(stderr, "\nglm_asr[debug]: raw text (%zu chars): %.400s\n", result.size(), result.c_str());
+    }
+
+    // With the blueprint transcription prompt the model frames its answer
+    // ('The spoken content of the audio is "..."'). Strip the framing like
+    // GlmAsrProcessor._strip_assistant_prefix_and_quotes so callers get the
+    // bare transcript.
+    {
+        auto trim = [](std::string& s) {
+            size_t a = s.find_first_not_of(" \t\n\r");
+            size_t b = s.find_last_not_of(" \t\n\r");
+            s = (a == std::string::npos) ? std::string() : s.substr(a, b - a + 1);
+        };
+        trim(result);
+        static const char* kPrefixes[] = {
+            "The spoken content of the audio is",
+            "The transcription of the audio is",
+            "The content of the input audio is",
+        };
+        for (const char* p : kPrefixes) {
+            const size_t n = strlen(p);
+            if (result.compare(0, n, p) == 0) {
+                result.erase(0, n);
+                trim(result);
+                break;
+            }
+        }
+        if (!result.empty() && result.back() == '.') {
+            result.pop_back();
+            trim(result);
+        }
+        if (result.size() >= 2 && result.front() == result.back() &&
+            (result.front() == '"' || result.front() == '\'')) {
+            result = result.substr(1, result.size() - 2);
+            trim(result);
+        }
+    }
+
+    return strdup(result.c_str());
+}
+
+extern "C" char* glm_asr_transcribe(struct glm_asr_context* ctx, const float* samples, int n_samples) {
+    return glm_asr_transcribe_impl(ctx, samples, n_samples, nullptr, nullptr);
+}
+
+extern "C" struct glm_asr_result* glm_asr_transcribe_with_probs(struct glm_asr_context* ctx, const float* samples,
+                                                                int n_samples) {
+    std::vector<int32_t> ids;
+    std::vector<float> probs;
+    char* text = glm_asr_transcribe_impl(ctx, samples, n_samples, &ids, &probs);
+    if (!text)
+        return nullptr;
+    auto* r = (glm_asr_result*)calloc(1, sizeof(glm_asr_result));
+    r->text = text;
+    r->n_tokens = (int)ids.size();
+    if (r->n_tokens > 0) {
+        r->token_ids = (int*)malloc(sizeof(int) * (size_t)r->n_tokens);
+        r->token_probs = (float*)malloc(sizeof(float) * (size_t)r->n_tokens);
+        for (int i = 0; i < r->n_tokens; i++) {
+            r->token_ids[i] = ids[i];
+            r->token_probs[i] = probs[i];
+        }
+    }
+    return r;
+}
+
+extern "C" void glm_asr_set_seed(struct glm_asr_context* ctx, unsigned int seed) {
+    (void)ctx;
+    // glm-asr uses libc rand() in its multinomial sampler. Reseed only when
+    // a non-zero salt is supplied so the legacy non-best-of-N path keeps
+    // its historical (process-position-dependent) behaviour.
+    if (seed != 0)
+        srand(seed);
+}
+
+// PLAN §90: runtime beam-size setter so crispasr_session_set_beam_size
+// reaches glm-asr's decoder. Mutates ctx->params.beam_size, which the
+// transcribe path at line 629 then consults to pick greedy vs replay-
+// from-prefix beam search.
+extern "C" void glm_asr_set_beam_size(struct glm_asr_context* ctx, int beam_size) {
+    if (ctx)
+        ctx->params.beam_size = (beam_size > 0) ? beam_size : 1;
+}
+
+// #292: forward --max-new-tokens. <= 0 keeps the backend's 512 default.
+extern "C" void glm_asr_set_max_new_tokens(struct glm_asr_context* ctx, int n) {
+    if (ctx && n > 0)
+        ctx->max_new_tokens = n;
+}
+
+extern "C" void glm_asr_set_ask(struct glm_asr_context* ctx, const char* prompt) {
+    if (ctx)
+        ctx->ask = (prompt && prompt[0]) ? prompt : "";
+}
+
+extern "C" void glm_asr_result_free(struct glm_asr_result* r) {
+    if (!r)
+        return;
+    free(r->text);
+    free(r->token_ids);
+    free(r->token_probs);
+    free(r);
+}
+
+extern "C" float* glm_asr_compute_mel(struct glm_asr_context* ctx, const float* samples, int n_samples, int* out_n_mels,
+                                      int* out_T_mel) {
+    if (!ctx || !samples)
+        return nullptr;
+    const auto& hp = ctx->model.hp;
+
+    // Get mel_filters and mel_window from model tensors
+    ggml_tensor* mel_fb_t = ggml_get_tensor(ctx->model.ctx, "audio.mel_filters");
+    ggml_tensor* mel_win_t = ggml_get_tensor(ctx->model.ctx, "audio.mel_window");
+
+    if (!mel_fb_t || !mel_win_t) {
+        fprintf(stderr, "glm_asr: mel_filters or mel_window not found in model\n");
+        return nullptr;
+    }
+
+    // Read mel data from backend
+    int n_freqs = (int)mel_fb_t->ne[0];
+    int n_mels_fb = (int)mel_fb_t->ne[1];
+    if (n_mels_fb == 201) {
+        std::swap(n_freqs, n_mels_fb);
+    }
+    std::vector<float> mel_fb((size_t)n_freqs * n_mels_fb);
+    ggml_backend_tensor_get(mel_fb_t, mel_fb.data(), 0, mel_fb.size() * sizeof(float));
+
+    int win_len = (int)mel_win_t->ne[0];
+    std::vector<float> mel_win(win_len);
+    ggml_backend_tensor_get(mel_win_t, mel_win.data(), 0, mel_win.size() * sizeof(float));
+
+    // Compute mel using core_mel (Whisper/HF convention)
+    core_mel::Params p;
+    p.n_mels = hp.n_mels;
+    p.n_fft = 400;
+    p.hop_length = 160;
+    p.win_length = 400;
+    p.center_pad = true;
+    p.center_pad_reflect = true; // torchaudio default pad_mode="reflect"
+    p.log_base = core_mel::LogBase::Log10;
+    p.log_guard = core_mel::LogGuard::MaxClip;
+    p.log_eps = 1e-10f;
+    p.norm = core_mel::Normalization::GlobalClipMax;
+    p.layout = core_mel::Layout::MelsTime;
+    p.fb_layout = core_mel::FbLayout::FreqsMels; // HF layout
+    p.matmul = core_mel::MatmulPrecision::Double;
+
+    int T_mel = 0;
+    // Radix-2 FFT with zero-padding to next power of 2.
+    // core_mel calls fft(in, n_fft=400, out) — 400 is NOT a power of 2,
+    // so we pad to 512 internally.
+    auto glm_fft = [](const float* in, int N, float* out) {
+        // Pad to next power of 2
+        int N2 = 1;
+        while (N2 < N)
+            N2 <<= 1;
+
+        std::vector<float> buf(2 * N2, 0.0f);
+        for (int i = 0; i < N; i++)
+            buf[2 * i] = in[i];
+
+        // Bit-reversal permutation
+        for (int i = 1, j = 0; i < N2; i++) {
+            int bit = N2 >> 1;
+            for (; j & bit; bit >>= 1)
+                j ^= bit;
+            j ^= bit;
+            if (i < j) {
+                std::swap(buf[2 * i], buf[2 * j]);
+                std::swap(buf[2 * i + 1], buf[2 * j + 1]);
+            }
+        }
+        // Cooley-Tukey butterflies
+        for (int len = 2; len <= N2; len <<= 1) {
+            float ang = -2.0f * (float)M_PI / (float)len;
+            float wR = cosf(ang), wI = sinf(ang);
+            for (int i = 0; i < N2; i += len) {
+                float curR = 1.0f, curI = 0.0f;
+                for (int j = 0; j < len / 2; j++) {
+                    int a = i + j, b = i + j + len / 2;
+                    float uR = buf[2 * a], uI = buf[2 * a + 1];
+                    float vR = buf[2 * b], vI = buf[2 * b + 1];
+                    float tR = curR * vR - curI * vI, tI = curR * vI + curI * vR;
+                    buf[2 * a] = uR + tR;
+                    buf[2 * a + 1] = uI + tI;
+                    buf[2 * b] = uR - tR;
+                    buf[2 * b + 1] = uI - tI;
+                    float newR = curR * wR - curI * wI;
+                    curI = curR * wI + curI * wR;
+                    curR = newR;
+                }
+            }
+        }
+        // Copy first N bins to output (truncate the zero-padded part)
+        for (int i = 0; i < N; i++) {
+            out[2 * i] = buf[2 * i];
+            out[2 * i + 1] = buf[2 * i + 1];
+        }
+    };
+
+    auto mel =
+        core_mel::compute(samples, n_samples, mel_win.data(), win_len, mel_fb.data(), n_freqs, glm_fft, p, T_mel);
+    if (mel.empty())
+        return nullptr;
+
+    if (out_n_mels)
+        *out_n_mels = hp.n_mels;
+    if (out_T_mel)
+        *out_T_mel = T_mel;
+
+    float* result = (float*)malloc(mel.size() * sizeof(float));
+    if (!result)
+        return nullptr;
+    memcpy(result, mel.data(), mel.size() * sizeof(float));
+    return result;
+}
+
+extern "C" float* glm_asr_embed_tokens(struct glm_asr_context* ctx, const int32_t* ids, int n_ids) {
+    if (!ctx || !ids || n_ids <= 0)
+        return nullptr;
+
+    const auto& m = ctx->model;
+    const int d = m.hp.llm_hidden;
+
+    // Fast path: single-token lookup avoids graph build + sched overhead.
+    // Gated by CRISPASR_GLM_ASR_EMBED_FAST (default ON).
+    static int use_fast = -1;
+    if (use_fast < 0) {
+        const char* e = std::getenv("CRISPASR_GLM_ASR_EMBED_FAST");
+        use_fast = (!e || *e != '0') ? 1 : 0;
+    }
+    if (n_ids == 1 && use_fast && m.llm.token_embd_w) {
+        const ggml_tensor* w = m.llm.token_embd_w;
+        const size_t row_bytes = ggml_row_size(w->type, d);
+        float* result = (float*)malloc((size_t)d * sizeof(float));
+        if (!result)
+            return nullptr;
+        std::vector<uint8_t> raw(row_bytes);
+        ggml_backend_tensor_get(w, raw.data(), (size_t)ids[0] * row_bytes, row_bytes);
+        if (w->type == GGML_TYPE_F32) {
+            std::memcpy(result, raw.data(), (size_t)d * sizeof(float));
+        } else {
+            ggml_get_type_traits(w->type)->to_float(raw.data(), result, d);
+        }
+        return result;
+    }
+
+    // Build tiny graph: token_embd lookup
+    ggml_init_params ip = {ctx->compute_meta.size(), ctx->compute_meta.data(), true};
+    ggml_context* ctx0 = ggml_init(ip);
+    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 64, false);
+
+    ggml_tensor* inp = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_ids);
+    ggml_set_name(inp, "token_ids");
+    ggml_set_input(inp);
+
+    ggml_tensor* emb = ggml_get_rows(ctx0, m.llm.token_embd_w, inp);
+    ggml_set_name(emb, "embeddings");
+    ggml_build_forward_expand(gf, emb);
+    ggml_free(ctx0);
+
+    ggml_backend_sched_reset(ctx->sched);
+    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf))
+        return nullptr;
+
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "token_ids"), ids, 0, n_ids * sizeof(int32_t));
+
+    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS)
+        return nullptr;
+
+    ggml_tensor* out = ggml_graph_get_tensor(gf, "embeddings");
+    float* result = (float*)malloc((size_t)n_ids * d * sizeof(float));
+    if (!result)
+        return nullptr;
+    ggml_backend_tensor_get(out, result, 0, (size_t)n_ids * d * sizeof(float));
+    return result;
+}
+
+extern "C" bool glm_asr_kv_init(struct glm_asr_context* ctx, int max_ctx) {
+    if (!ctx || max_ctx <= 0)
+        return false;
+    if (ctx->kv_k) {
+        if (ctx->kv_k->ne[1] >= max_ctx)
+            return true; // already initialized and large enough
+        // Grow: a multi-window long-audio prompt (30 s ≈ 375 tokens/window,
+        // up to ~8k for 655 s) can exceed what an earlier shorter call
+        // allocated. Free and reallocate below at the new size.
+        ggml_backend_buffer_free(ctx->kv_buf);
+        ggml_free(ctx->kv_ctx);
+        ctx->kv_buf = nullptr;
+        ctx->kv_ctx = nullptr;
+        ctx->kv_k = nullptr;
+        ctx->kv_v = nullptr;
+    }
+    const auto& hp = ctx->model.hp;
+    const int hd = hp.llm_head_dim;
+    const int n_kv = hp.llm_n_kv_heads;
+    const int nl = hp.llm_n_layers;
+
+    // Must use no_alloc=true context + manual buffer allocation,
+    // so the scheduler recognizes KV tensors as pre-allocated.
+    ggml_init_params ip = {ggml_tensor_overhead() * 4 + 1024, nullptr, true};
+    ctx->kv_ctx = ggml_init(ip);
+    // PLAN #60e + #69e: per-half KV dtype. CRISPASR_KV_QUANT sets both,
+    // CRISPASR_KV_QUANT_{K,V} override per half. Default f16/f16.
+    const auto kv_pair = core_attn::kv_dtype_pair_from_env("glm_asr");
+    ctx->kv_k = ggml_new_tensor_4d(ctx->kv_ctx, kv_pair.k, hd, max_ctx, n_kv, nl);
+    ctx->kv_v = ggml_new_tensor_4d(ctx->kv_ctx, kv_pair.v, hd, max_ctx, n_kv, nl);
+    ggml_set_name(ctx->kv_k, "kv_k");
+    ggml_set_name(ctx->kv_v, "kv_v");
+    size_t kb = ggml_nbytes(ctx->kv_k), vb = ggml_nbytes(ctx->kv_v);
+    // PLAN #69b: optional KV-on-CPU spill.
+    ggml_backend_t kv_backend = core_attn::kv_backend_from_env(ctx->backend, ctx->backend_cpu, "glm_asr");
+    // #367: size and place via ggml, not ggml_nbytes() arithmetic. CUDA's
+    // get_alloc_size() pads a quantized row up to MATRIX_ROW_PADDING (512),
+    // and these KV rows are head_dim wide (128), so each q8_0 tensor needs
+    // 408 bytes more than nbytes — the hand-sized buffer came up short and
+    // ggml_backend_tensor_alloc aborted. f16 is not quantized, so this only
+    // ever fired with CRISPASR_KV_QUANT set, and only on CUDA.
+    ctx->kv_buf = ggml_backend_alloc_ctx_tensors(ctx->kv_ctx, kv_backend);
+    if (!ctx->kv_buf) {
+        ggml_free(ctx->kv_ctx);
+        ctx->kv_ctx = nullptr;
+        return false;
+    }
+    glm_asr_kv_reset(ctx);
+    if (ctx->params.verbosity >= 1) {
+        fprintf(stderr, "glm_asr: kv cache %zu MiB\n", (kb + vb) >> 20);
+    }
+    return true;
+}
+
+extern "C" void glm_asr_kv_reset(struct glm_asr_context* ctx) {
+    if (!ctx || !ctx->kv_buf)
+        return;
+    ggml_backend_buffer_clear(ctx->kv_buf, 0);
+}
+
+static ggml_cgraph* glm_build_encoder(glm_asr_context* ctx, int T_mel, ggml_context* arena_ctx = nullptr) {
+    const auto& m = ctx->model;
+    const auto& hp = m.hp;
+    const int d = hp.enc_hidden;          // 1280
+    const int n_heads = hp.enc_n_heads;   // 20
+    const int hd = hp.enc_head_dim;       // 64
+    const int n_layers = hp.enc_n_layers; // 32
+    const int n_mels = hp.n_mels;         // 128
+    const float scale = 1.0f / std::sqrt((float)hd);
+
+    ggml_init_params ip = {ctx->compute_meta.size(), ctx->compute_meta.data(), true};
+    ggml_context* ctx0 = arena_ctx ? arena_ctx : ggml_init(ip);
+    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 16384, false);
+
+    // Input mel (n_mels, T_mel)
+    ggml_tensor* mel = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, T_mel, n_mels);
+    ggml_set_name(mel, "mel");
+    ggml_set_input(mel);
+
+    // Conv stem: conv1(128→1280, k=3, s=1, p=1) + GELU + conv2(1280→1280, k=3, s=2, p=1) + GELU
+    auto bias_1d = [&](ggml_tensor* b) { return ggml_reshape_3d(ctx0, b, 1, b->ne[0], 1); };
+
+    ggml_tensor* cur = ggml_conv_1d(ctx0, m.audio.conv1_w, mel, 1, 1, 1);
+    cur = ggml_add(ctx0, cur, bias_1d(m.audio.conv1_b));
+    cur = ggml_gelu_erf(ctx0, cur);
+
+    cur = ggml_conv_1d(ctx0, m.audio.conv2_w, cur, 2, 1, 1);
+    cur = ggml_add(ctx0, cur, bias_1d(m.audio.conv2_b));
+    cur = ggml_gelu_erf(ctx0, cur);
+
+    // ggml_conv_1d with k=3, s=2, p=1 produces floor(T/2) frames for odd
+    // lengths in the unbatched (T, C) path used here. Using ceil(T/2) causes
+    // the first post-conv reshape to overrun by one frame on odd T_mel.
+    // ggml_conv_1d output has non-unit strides; ggml_reshape_2d requires
+    // contiguous input, so we materialise the buffer first.
+    cur = ggml_cont(ctx0, cur);
+    const int T_enc = glm_asr_encoder_frames_from_mel_frames(T_mel);
+    cur = ggml_reshape_2d(ctx0, cur, T_enc, d);
+    cur = ggml_cont(ctx0, ggml_transpose(ctx0, cur)); // (d, T_enc)
+
+    // Positions for partial RoPE
+    ggml_tensor* positions = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, T_enc);
+    ggml_set_name(positions, "enc_positions");
+    ggml_set_input(positions);
+
+    // 32 × encoder blocks (pre-norm, LayerNorm with bias, partial RoPE)
+    for (int il = 0; il < n_layers; il++) {
+        const auto& b = m.audio.blocks[il];
+        ggml_tensor* residual = cur;
+
+        // Pre-attention LayerNorm
+        ggml_tensor* x = ggml_norm(ctx0, cur, 1e-5f);
+        x = ggml_mul(ctx0, x, b.attn_norm_w);
+        if (b.attn_norm_b)
+            x = ggml_add(ctx0, x, b.attn_norm_b);
+
+        // Self-attention with partial RoPE (factor=0.5).
+        // RoPE applied to first hd/2 dims only; rest pass through unchanged.
+        {
+            const int rope_dim = (int)(hd * hp.partial_rotary); // 32
+            const int pass_dim = hd - rope_dim;                 // 32
+
+            // Q/K/V projections
+            ggml_tensor* Q = ggml_mul_mat(ctx0, b.attn_q_w, x);
+            if (b.attn_q_b)
+                Q = ggml_add(ctx0, Q, b.attn_q_b);
+            ggml_tensor* K = ggml_mul_mat(ctx0, b.attn_k_w, x);
+            ggml_tensor* V = ggml_mul_mat(ctx0, b.attn_v_w, x);
+            if (b.attn_v_b)
+                V = ggml_add(ctx0, V, b.attn_v_b);
+
+            // Reshape to (hd, n_heads, T)
+            Q = ggml_reshape_3d(ctx0, Q, hd, n_heads, T_enc);
+            K = ggml_reshape_3d(ctx0, K, hd, n_heads, T_enc);
+            V = ggml_reshape_3d(ctx0, V, hd, n_heads, T_enc);
+
+            // Partial RoPE: split → apply RoPE to first rope_dim → concat
+            // Q/K are (hd, n_heads, T). Split along dim 0 (hd).
+            ggml_tensor* Q_rope = ggml_view_3d(ctx0, Q, rope_dim, n_heads, T_enc, Q->nb[1], Q->nb[2], 0);
+            ggml_tensor* Q_pass =
+                ggml_view_3d(ctx0, Q, pass_dim, n_heads, T_enc, Q->nb[1], Q->nb[2], rope_dim * ggml_type_size(Q->type));
+            ggml_tensor* K_rope = ggml_view_3d(ctx0, K, rope_dim, n_heads, T_enc, K->nb[1], K->nb[2], 0);
+            ggml_tensor* K_pass =
+                ggml_view_3d(ctx0, K, pass_dim, n_heads, T_enc, K->nb[1], K->nb[2], rope_dim * ggml_type_size(K->type));
+
+            // Apply RoPE to the rope part only
+            Q_rope = ggml_rope_ext(ctx0, Q_rope, positions, nullptr, rope_dim, GGML_ROPE_TYPE_NEOX, hp.enc_max_pos,
+                                   10000.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+            K_rope = ggml_rope_ext(ctx0, K_rope, positions, nullptr, rope_dim, GGML_ROPE_TYPE_NEOX, hp.enc_max_pos,
+                                   10000.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+
+            // Concatenate: (rope_dim + pass_dim, n_heads, T) = (hd, n_heads, T)
+            Q = ggml_concat(ctx0, Q_rope, Q_pass, 0);
+            K = ggml_concat(ctx0, K_rope, K_pass, 0);
+
+            // Permute to flash-attn layout: (hd, T, n_heads)
+            Q = ggml_cont(ctx0, ggml_permute(ctx0, Q, 0, 2, 1, 3));
+            K = ggml_cont(ctx0, ggml_permute(ctx0, K, 0, 2, 1, 3));
+            V = ggml_cont(ctx0, ggml_permute(ctx0, V, 0, 2, 1, 3));
+
+            // Flash attention (bidirectional, no mask)
+            ggml_tensor* attn = ggml_flash_attn_ext(ctx0, Q, K, V, nullptr, scale, 0.0f, 0.0f);
+            // ggml_flash_attn_ext output shape: {v->ne[0], q->ne[2], q->ne[1], q->ne[3]}
+            //   = (hd=64, n_heads=20, T_enc=551). Flat layout: ih + hd*inh + hd*n_heads*it.
+            // reshape_2d(n_heads*hd, T_enc): element (j=ih+hd*inh, t) → ✓ (no extra permute needed).
+            attn = ggml_cont(ctx0, attn);
+            attn = ggml_reshape_2d(ctx0, attn, n_heads * hd, T_enc);
+
+            // Output projection
+            attn = ggml_mul_mat(ctx0, b.attn_out_w, attn);
+            if (b.attn_out_b)
+                attn = ggml_add(ctx0, attn, b.attn_out_b);
+            cur = ggml_add(ctx0, residual, attn);
+        }
+
+        // Post-attention LayerNorm + FFN (fc1 → GELU → fc2)
+        residual = cur;
+        x = ggml_norm(ctx0, cur, 1e-5f);
+        x = ggml_mul(ctx0, x, b.ffn_norm_w);
+        if (b.ffn_norm_b)
+            x = ggml_add(ctx0, x, b.ffn_norm_b);
+        x = ggml_mul_mat(ctx0, b.ffn_up_w, x);
+        if (b.ffn_up_b)
+            x = ggml_add(ctx0, x, b.ffn_up_b);
+        x = ggml_gelu_erf(ctx0, x);
+        x = ggml_mul_mat(ctx0, b.ffn_down_w, x);
+        if (b.ffn_down_b)
+            x = ggml_add(ctx0, x, b.ffn_down_b);
+        cur = ggml_add(ctx0, residual, x);
+    }
+
+    // Final LayerNorm
+    cur = ggml_norm(ctx0, cur, 1e-5f);
+    cur = ggml_mul(ctx0, cur, m.audio.ln_post_w);
+    if (m.audio.ln_post_b)
+        cur = ggml_add(ctx0, cur, m.audio.ln_post_b);
+
+    // Projector: 4-frame stacking → linear1(5120→4096,GELU) → linear2(4096→2048)
+    // Stack 4 consecutive frames: (d, T_enc) → (4*d, T_enc/4)
+    // cur is (d, T_enc) — ne[0]=d, ne[1]=T_enc.
+    // Slice first T_pack columns: keep ne[0]=d, ne[1]=T_pack.
+    // Note: ne0=T_pack, ne1=d would transpose d and T_pack, scrambling the stack.
+    const int T_proj = T_enc / 4;
+    const int T_pack = T_proj * 4;
+    const int proj_in = 4 * d; // 5120
+    if (T_pack != T_enc)
+        cur = ggml_view_2d(ctx0, cur, d, T_pack, cur->nb[1], 0);
+    cur = ggml_cont(ctx0, cur);
+    cur = ggml_reshape_2d(ctx0, cur, proj_in, T_proj);
+
+    cur = ggml_mul_mat(ctx0, m.proj.linear1_w, cur);
+    if (m.proj.linear1_b)
+        cur = ggml_add(ctx0, cur, m.proj.linear1_b);
+    cur = ggml_gelu_erf(ctx0, cur);
+
+    cur = ggml_mul_mat(ctx0, m.proj.linear2_w, cur);
+    if (m.proj.linear2_b)
+        cur = ggml_add(ctx0, cur, m.proj.linear2_b);
+
+    ggml_set_name(cur, "encoder_out");
+    ggml_build_forward_expand(gf, cur);
+    if (!arena_ctx)
+        ggml_free(ctx0);
+    return gf;
+}
+
+extern "C" float* glm_asr_run_encoder(struct glm_asr_context* ctx, const float* mel, int n_mels, int T_mel, int* out_N,
+                                      int* out_dim) {
+    if (!ctx || !mel)
+        return nullptr;
+
+    const auto& hp = ctx->model.hp;
+    const int T_enc = glm_asr_encoder_frames_from_mel_frames(T_mel);
+    const int T_proj = T_enc / 4;
+    const int llm_d = hp.llm_hidden; // 2048
+
+    // Build encoder graph fresh every call. The cached-graph optimisation
+    // (§176s) is unsafe on GPU backends: the scheduler's internal allocator
+    // regrows when subsequent larger graphs (LLM prefill/decode) are
+    // allocated, which frees the buffer objects the cached graph's tensors
+    // still reference. The next slice then reuses the cached graph with
+    // stale VkBuffer / CUdeviceptr handles → use-after-free → segfault.
+    // Same root cause as #215 (moss-transcribe Vulkan crash on multi-slice).
+    ggml_cgraph* gf;
+    {
+        if (ctx->cached_enc_ctx) {
+            ggml_free(ctx->cached_enc_ctx);
+            ctx->cached_enc_ctx = nullptr;
+            ctx->cached_enc_gf = nullptr;
+        }
+        ctx->cached_enc_meta.assign(ctx->compute_meta.size(), 0);
+        ggml_init_params aip = {ctx->cached_enc_meta.size(), ctx->cached_enc_meta.data(), true};
+        ctx->cached_enc_ctx = ggml_init(aip);
+        gf = glm_build_encoder(ctx, T_mel, ctx->cached_enc_ctx);
+        ctx->cached_enc_gf = gf;
+        ctx->cached_enc_T_mel = T_mel;
+    }
+    if (!gf)
+        return nullptr;
+
+    ggml_backend_sched_reset(ctx->sched);
+    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf))
+        return nullptr;
+
+    // Set mel input
+    ggml_tensor* mel_t = ggml_graph_get_tensor(gf, "mel");
+    ggml_backend_tensor_set(mel_t, mel, 0, (size_t)n_mels * T_mel * sizeof(float));
+
+    // Set encoder positions
+    ggml_tensor* pos = ggml_graph_get_tensor(gf, "enc_positions");
+    std::vector<int32_t> pos_data(T_enc);
+    for (int i = 0; i < T_enc; i++)
+        pos_data[i] = i;
+    ggml_backend_tensor_set(pos, pos_data.data(), 0, T_enc * sizeof(int32_t));
+
+    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS)
+        return nullptr;
+
+    ggml_tensor* out = ggml_graph_get_tensor(gf, "encoder_out");
+    float* result = (float*)malloc((size_t)T_proj * llm_d * sizeof(float));
+    if (!result)
+        return nullptr;
+    ggml_backend_tensor_get(out, result, 0, (size_t)T_proj * llm_d * sizeof(float));
+
+    if (out_N)
+        *out_N = T_proj;
+    if (out_dim)
+        *out_dim = llm_d;
+    return result;
+}
+
+static ggml_cgraph* glm_build_llm_kv(glm_asr_context* ctx, int n_past, int T, bool last_token_only) {
+    const auto& m = ctx->model;
+    const auto& hp = m.hp;
+    const int H = hp.llm_hidden;
+    const int n_heads = hp.llm_n_heads;
+    const int n_kv = hp.llm_n_kv_heads;
+    const int hd = hp.llm_head_dim;
+    const int grp = n_heads / n_kv;
+    const int L = hp.llm_n_layers;
+    const int V = hp.llm_vocab;
+    const float eps = hp.rms_eps;
+    const float scale = 1.0f / std::sqrt((float)hd);
+
+    ggml_init_params ip = {ctx->compute_meta.size(), ctx->compute_meta.data(), true};
+    ggml_context* ctx0 = ggml_init(ip);
+    ggml_cgraph* gf = ggml_new_graph_custom(ctx0, 16384, false);
+
+    ggml_tensor* cur = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, H, T);
+    ggml_set_name(cur, "llm_input");
+    ggml_set_input(cur);
+
+    ggml_tensor* positions = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, T);
+    ggml_set_name(positions, "positions");
+    ggml_set_input(positions);
+
+    // Causal mask for prefill (T > 1). For single-token decode, nullptr.
+    const int Lk = n_past + T;
+    ggml_tensor* causal_mask = nullptr;
+    if (T > 1) {
+        causal_mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F16, Lk, T);
+        ggml_set_name(causal_mask, "causal_mask");
+        ggml_set_input(causal_mask);
+    }
+
+    // L × Llama layers with KV cache
+    for (int il = 0; il < L; il++) {
+        const auto& b = m.llm.blocks[il];
+
+        core_attn::KvSelfAttnParams ap = {};
+        ap.n_heads = n_heads;
+        ap.n_kv_heads = n_kv;
+        ap.head_dim = hd;
+        ap.n_kv_grp = grp;
+        ap.n_ctx_orig = hp.llm_max_pos;
+        ap.rope_theta = 10000.0f;
+        ap.rope_beta_fast = 0.0f;
+        ap.rope_beta_slow = 0.0f;
+        ap.attn_scale = scale;
+        ap.qk_norm_eps = 0.0f;
+        ap.gqa_mode = core_attn::GQA_MANUAL_CONT;
+
+        ggml_tensor* residual = cur;
+
+        // Pre-attention RMSNorm
+        cur = ggml_rms_norm(ctx0, cur, eps);
+        cur = ggml_mul(ctx0, cur, b.attn_norm_w);
+
+        // KV-cached self-attention
+        cur = core_attn::kv_self_attn(ctx0, gf, cur, b.attn_q_w, b.attn_k_w, b.attn_v_w, b.attn_out_w, nullptr,
+                                      nullptr, // no Q/K norm
+                                      positions, causal_mask, ctx->kv_k, ctx->kv_v, il, n_past, ap);
+
+        cur = ggml_add(ctx0, residual, cur);
+
+        // Pre-FFN RMSNorm + SwiGLU
+        residual = cur;
+        cur = ggml_rms_norm(ctx0, cur, eps);
+        cur = ggml_mul(ctx0, cur, b.ffn_norm_w);
+        cur = core_ffn::swiglu(ctx0, cur, b.ffn_gate_w, b.ffn_up_w, b.ffn_down_w);
+        cur = ggml_add(ctx0, residual, cur);
+    }
+
+    // Final RMSNorm
+    cur = ggml_rms_norm(ctx0, cur, eps);
+    cur = ggml_mul(ctx0, cur, m.llm.output_norm_w);
+
+    // Last-token-only lm_head (for decode steps)
+    if (last_token_only && T > 1) {
+        cur = ggml_view_2d(ctx0, cur, H, 1, cur->nb[1], (size_t)(T - 1) * cur->nb[1]);
+    }
+
+    // LM head
+    cur = ggml_mul_mat(ctx0, m.llm.lm_head_w, cur);
+
+    ggml_set_name(cur, "logits");
+    ggml_build_forward_expand(gf, cur);
+    ggml_free(ctx0);
+    return gf;
+}
+
+extern "C" float* glm_asr_run_llm_kv(struct glm_asr_context* ctx, const float* inputs_embeds, int n_tokens, int n_past,
+                                     int* out_n_tokens, int* out_vocab_size) {
+    if (!ctx || !inputs_embeds || n_tokens <= 0)
+        return nullptr;
+
+    const auto& hp = ctx->model.hp;
+    const int H = hp.llm_hidden;
+    const int V = hp.llm_vocab;
+
+    ggml_cgraph* gf = glm_build_llm_kv(ctx, n_past, n_tokens, true);
+    if (!gf)
+        return nullptr;
+
+    ggml_backend_sched_reset(ctx->sched);
+
+    // Tell scheduler which backend owns the KV cache tensors
+    if (ctx->kv_k)
+        ggml_backend_sched_set_tensor_backend(ctx->sched, ctx->kv_k, ctx->backend);
+    if (ctx->kv_v)
+        ggml_backend_sched_set_tensor_backend(ctx->sched, ctx->kv_v, ctx->backend);
+
+    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf))
+        return nullptr;
+
+    // Set inputs
+    ggml_tensor* inp = ggml_graph_get_tensor(gf, "llm_input");
+    ggml_backend_tensor_set(inp, inputs_embeds, 0, (size_t)H * n_tokens * sizeof(float));
+
+    ggml_tensor* pos = ggml_graph_get_tensor(gf, "positions");
+    std::vector<int32_t> pos_data(n_tokens);
+    for (int i = 0; i < n_tokens; i++)
+        pos_data[i] = n_past + i;
+    ggml_backend_tensor_set(pos, pos_data.data(), 0, n_tokens * sizeof(int32_t));
+
+    // Causal mask (prefill only)
+    if (n_tokens > 1) {
+        const int Lk = n_past + n_tokens;
+        ggml_tensor* mask_t = ggml_graph_get_tensor(gf, "causal_mask");
+        if (mask_t) {
+            std::vector<ggml_fp16_t> mask_data((size_t)Lk * n_tokens);
+            const ggml_fp16_t zero = ggml_fp32_to_fp16(0.0f);
+            const ggml_fp16_t neg_inf = ggml_fp32_to_fp16(-INFINITY);
+            for (int q = 0; q < n_tokens; q++)
+                for (int k = 0; k < Lk; k++)
+                    mask_data[(size_t)q * Lk + k] = (k <= n_past + q) ? zero : neg_inf;
+            ggml_backend_tensor_set(mask_t, mask_data.data(), 0, mask_data.size() * sizeof(ggml_fp16_t));
+        }
+    }
+
+    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS)
+        return nullptr;
+
+    ggml_tensor* out = ggml_graph_get_tensor(gf, "logits");
+    int n_out = (int)out->ne[1]; // 1 for last-token-only
+    float* result = (float*)malloc((size_t)V * n_out * sizeof(float));
+    if (!result)
+        return nullptr;
+    ggml_backend_tensor_get(out, result, 0, (size_t)V * n_out * sizeof(float));
+
+    if (out_n_tokens)
+        *out_n_tokens = n_out;
+    if (out_vocab_size)
+        *out_vocab_size = V;
+    return result;
+}

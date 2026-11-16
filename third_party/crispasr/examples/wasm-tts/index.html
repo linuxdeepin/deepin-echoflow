@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Brickwright · on-device TTS (CrispASR WASM · kokoro)</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 16px; color: #1e293b; }
+  h1 { font-size: 20px; }
+  textarea { width: 100%; box-sizing: border-box; padding: 10px; border: 1px solid #cbd5e1; border-radius: 8px; font: inherit; }
+  button { padding: 10px 16px; border: none; border-radius: 8px; background: #0fbd8c; color: #fff; font: inherit; font-weight: 600; cursor: pointer; margin: 6px 6px 0 0; }
+  button:disabled { background: #cbd5e1; cursor: default; }
+  select { padding: 8px; border-radius: 8px; border: 1px solid #cbd5e1; font: inherit; }
+  #log { white-space: pre-wrap; background: #0c3a44; color: #c7f0e0; padding: 12px; border-radius: 8px; margin-top: 16px; font: 13px/1.5 monospace; max-height: 320px; overflow: auto; }
+  .warn { color: #b45309; }
+</style>
+</head>
+<body>
+<h1>🔊 Brickwright on-device TTS — CrispASR WASM (kokoro)</h1>
+<p>Fully client-side neural TTS: no cloud, no key, no cross-origin-isolation headers. First run loads the model (~135&nbsp;MB).</p>
+<p id="coi" class="warn"></p>
+
+<p>
+  <label>Voice
+    <select id="voice">
+      <option value="en|voice.gguf">English — af_heart (♀)</option>
+      <option value="de|voice_de.gguf">Deutsch — df_eva (♀)</option>
+    </select>
+  </label>
+</p>
+<textarea id="text" rows="3">Hello from Brickwright! This speech was generated entirely on your device.</textarea>
+<p><button id="speak" disabled>▶ Speak</button><button id="dl" disabled>⤓ Download WAV</button></p>
+<div id="log"></div>
+
+<script>
+// All WASM/TTS runs in tts-worker.js (off the main thread) — see that file for why.
+const logEl = document.getElementById('log');
+const log = (m) => { logEl.textContent += m + '\n'; logEl.scrollTop = logEl.scrollHeight; };
+let lastPCM = null, busy = false, worker = null;
+
+// Single-threaded WASM — no isolation needed. (Just note where the compute runs.)
+document.getElementById('coi').textContent = 'Single-threaded build: synthesis runs in a Web Worker (~30–70 s per sentence on this machine).';
+document.getElementById('coi').className = '';
+
+function setBusy (b) { busy = b; document.getElementById('speak').disabled = b; }
+
+function playPCM (pcm) {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const buf = ctx.createBuffer(1, pcm.length, 24000);
+    buf.getChannelData(0).set(pcm);
+    const src = ctx.createBufferSource();
+    src.buffer = buf; src.connect(ctx.destination);
+    (ctx.state === 'running' ? Promise.resolve() : ctx.resume().catch(() => {})).then(() => src.start());
+}
+
+function getWorker () {
+    if (!worker) {
+        worker = new Worker('./tts-worker.js');
+        worker.onmessage = (e) => {
+            const d = e.data;
+            if (d.log) { log('· ' + d.log); }
+            else if (d.error) { log('✗ ' + d.error); setBusy(false); }
+            else if (d.pcm) {
+                lastPCM = d.pcm;
+                log(`✓ ${d.pcm.length} samples (${(d.pcm.length / 24000).toFixed(2)}s) in ${(d.ms / 1000).toFixed(2)}s`);
+                playPCM(d.pcm);
+                document.getElementById('dl').disabled = false;
+                setBusy(false);
+            }
+        };
+        worker.onerror = (e) => { log('✗ worker error: ' + (e.message || e)); setBusy(false); };
+    }
+    return worker;
+}
+
+function speak () {
+    // Single-threaded WASM needs no SharedArrayBuffer, so no cross-origin isolation required.
+    if (busy) return;
+    setBusy(true);
+    const [lang, voiceFile] = document.getElementById('voice').value.split('|');
+    log('· speak (' + lang + ') — first run loads the model (~135 MB)…');
+    getWorker().postMessage({text: document.getElementById('text').value, lang, voiceFile});
+}
+
+function wavBlob (pcm, rate) {
+    const n = pcm.length, buf = new ArrayBuffer(44 + n*2), dv = new DataView(buf);
+    const s = (o, str) => { for (let i=0;i<str.length;i++) dv.setUint8(o+i, str.charCodeAt(i)); };
+    s(0,'RIFF'); dv.setUint32(4, 36+n*2, true); s(8,'WAVE'); s(12,'fmt '); dv.setUint32(16,16,true);
+    dv.setUint16(20,1,true); dv.setUint16(22,1,true); dv.setUint32(24,rate,true); dv.setUint32(28,rate*2,true);
+    dv.setUint16(32,2,true); dv.setUint16(34,16,true); s(36,'data'); dv.setUint32(40,n*2,true);
+    for (let i=0;i<n;i++){ let v=Math.max(-1,Math.min(1,pcm[i])); dv.setInt16(44+i*2, v<0?v*0x8000:v*0x7fff, true); }
+    return new Blob([buf], {type:'audio/wav'});
+}
+
+document.getElementById('speak').onclick = speak;
+document.getElementById('dl').onclick = () => {
+    if (!lastPCM) return;
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(wavBlob(lastPCM, 24000)); a.download = 'brickwright-tts.wav'; a.click();
+};
+// The worker loads the WASM lazily on first Speak; the button is ready immediately.
+document.getElementById('speak').disabled = false;
+log(self.crossOriginIsolated ? 'ready. pick a voice and press Speak.' :
+    '⚠ not isolated — restart `node server.mjs` and open http://localhost:8791');
+</script>
+</body>
+</html>

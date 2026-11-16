@@ -1,0 +1,131 @@
+{
+  "version": 2,
+  "worker_commit": "bbf9f165e97d5fe26d214cf77121b6cc4c0dcb5b",
+  "entry_sha256": "7c5e0f05d4188b367d5718d4c57c60b8324de79a9eb2b8b0bcbde4f2ce343b76",
+  "remote_source_identical": true,
+  "status": "COMPLETE",
+  "kernel": "${KAGGLE_ACCOUNT}/crispasr-nemotron-frontend-validation",
+  "validated": true,
+  "bundle": {
+    "sha": "1977bd047d73b5e35cf5d267801fe21e859cfc1c",
+    "cuda": "12.4.1",
+    "architectures": [
+      75
+    ],
+    "ggml_sha": "c36dab89b662838f0f5d4826c399198c0b90bbfc",
+    "bundle_revision": "7eb6302442d6c3524426de1147d9cb34341221d0",
+    "bundle_sha256": "05e41880708d705f96e47e89c3a71a8a940093781ee8a1b3a8ec8ff1e2a5d2c9",
+    "build_run": 37943881572,
+    "remote_verified": true
+  },
+  "scope": "F16 original three-stage/26-transcript controls and native streaming packet/reset/flush invariants; no original streaming parity or Q4 promotion",
+  "previous_runs": [
+    {
+      "version": 1,
+      "status": "ERROR",
+      "inference_started": false,
+      "reason": "Validator assumed unversioned libcrispasr.so; bundle contains libcrispasr.so.1",
+      "proof": {
+        "repo": "cstr/crispasr-regression-fixtures",
+        "repo_type": "dataset",
+        "revision": "1fafc5a7f68189b1718e237ef37b9f1a3728d8db",
+        "path": "tts-asr/nemotron-frontend-gpu-v1-20261009/proof.zip",
+        "sha256": "47c618f5ea2a1ca2e4bfacc8b3b5def5f664c9794aacb52520697644773700cd",
+        "bytes": 9750,
+        "remote_verified": true
+      }
+    }
+  ],
+  "hardware": "Tesla T4, 7.5, 15360 MiB\nTesla T4, 7.5, 15360 MiB",
+  "gpu_process_allocations": "7, 1330",
+  "stages": {
+    "mel_spectrogram": {
+      "cosine_min": 1.0,
+      "native_norm": 3802.327423724644,
+      "reference_norm": 3802.3278125707384,
+      "relative_l2": 1.0037382467243056e-05,
+      "max_abs": 0.006104469299316406,
+      "passed": true
+    },
+    "pre_encode_output": {
+      "cosine_min": 1.0,
+      "native_norm": 35037.27131994719,
+      "reference_norm": 35037.281174288575,
+      "relative_l2": 4.749317146031651e-05,
+      "max_abs": 0.046783447265625,
+      "passed": true
+    },
+    "encoder_output": {
+      "cosine_min": 0.9999908804893494,
+      "native_norm": 16.613050709011176,
+      "reference_norm": 16.612932357599302,
+      "relative_l2": 0.00028003937974455275,
+      "max_abs": 0.001037895679473877,
+      "passed": true
+    }
+  },
+  "original_word_matches": 26,
+  "fresh_reused_differences": 0,
+  "proof": {
+    "repo": "cstr/crispasr-regression-fixtures",
+    "repo_type": "dataset",
+    "revision": "e220deba247a13f48b38a52d8f023fcfd9bb257d",
+    "path": "tts-asr/nemotron-frontend-gpu-v2-20261009/proof.zip",
+    "sha256": "dbece176f9a1a1f5f91b44ad33a16e7a68b36cb533e3dbfb66ff371f4694f305",
+    "bytes": 3161831,
+    "remote_verified": true
+  },
+  "streams": {
+    "0": [
+      {
+        "packet_samples": 1600,
+        "tokens_before_flush": 132,
+        "final_frames": 414
+      },
+      {
+        "packet_samples": 1600,
+        "tokens_before_flush": 132,
+        "final_frames": 414
+      },
+      {
+        "packet_samples": 3217,
+        "tokens_before_flush": 132,
+        "final_frames": 414
+      }
+    ],
+    "2": [
+      {
+        "packet_samples": 1600,
+        "tokens_before_flush": 126,
+        "final_frames": 414
+      },
+      {
+        "packet_samples": 1600,
+        "tokens_before_flush": 126,
+        "final_frames": 414
+      },
+      {
+        "packet_samples": 3217,
+        "tokens_before_flush": 126,
+        "final_frames": 414
+      }
+    ],
+    "3": [
+      {
+        "packet_samples": 1600,
+        "tokens_before_flush": 113,
+        "final_frames": 414
+      },
+      {
+        "packet_samples": 1600,
+        "tokens_before_flush": 113,
+        "final_frames": 414
+      },
+      {
+        "packet_samples": 3217,
+        "tokens_before_flush": 113,
+        "final_frames": 414
+      }
+    ]
+  }
+}

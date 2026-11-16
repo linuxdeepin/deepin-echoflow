@@ -1,0 +1,33 @@
+{
+  "name": "crispasr",
+  "version": "@PROJECT_VERSION@",
+  "description": "CrispASR speech recognition",
+  "main": "crispasr.js",
+  "exports": {
+    ".": "./crispasr.js",
+    "./c2pa": "./c2pa.mjs",
+    "./c2pa-verify": "./c2pa-verify.mjs"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "test:unit": "node --test test/c2pa.unit.test.mjs",
+    "test:parity": "node --test test/c2pa.parity.test.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CrispStrobe/CrispASR"
+  },
+  "keywords": [
+    "openai",
+    "whisper",
+    "speech-to-text",
+    "speech-recognition",
+    "transformer"
+  ],
+  "author": "Georgi Gerganov",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/CrispStrobe/CrispASR/issues"
+  },
+  "homepage": "https://github.com/CrispStrobe/CrispASR#readme"
+}

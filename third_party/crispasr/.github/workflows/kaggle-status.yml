@@ -1,0 +1,166 @@
+# Check / trigger Kaggle regression kernels via the Kaggle CLI.
+#
+# Two uses:
+#
+#   1. Manual dispatch ("Check status") — verifies the validate and
+#      rebake kernels exist, shows their last-run status + timestamp,
+#      and warns if either hasn't run in the expected window. Does NOT
+#      download any artifacts. Useful for confirming the Kaggle
+#      scheduler is still active after a long gap.
+#
+#   2. Manual dispatch with trigger=true — pushes the current
+#      kernel bootstrap (crispasr-regression.py) to Kaggle, which
+#      triggers an immediate run AND refreshes the code. Use this
+#      after changing the bootstrap script itself.
+#
+# The Kaggle schedule itself can only be set in the Kaggle UI
+# (the CLI / API doesn't expose it). See tools/kaggle/README.md §4.
+# This workflow is the closest we can get to programmatic verification.
+#
+# Required secrets: KAGGLE_ACCOUNT (Kaggle username) and KAGGLE_TOKEN (raw
+# API token from kaggle.com → Settings → Account → "API token").
+
+name: Kaggle kernel status
+
+on:
+  workflow_dispatch:
+    inputs:
+      trigger_run:
+        description: 'Push bootstrap + trigger immediate run? (set to "true" to re-push)'
+        required: false
+        default: 'false'
+      kernel_dir:
+        description: 'Kernel directory to push when trigger_run is true (default: the validate kernel)'
+        required: false
+        default: 'tools/kaggle'
+      status_kernel:
+        description: 'Kernel slug (without the account) whose status and log tail to print'
+        required: false
+        default: ''
+  schedule:
+    # Weekly on Monday at 06:00 UTC — a few hours after the Kaggle
+    # validate kernel is supposed to finish (Sun 04:00 UTC start,
+    # ~2 h typical runtime). If Kaggle's scheduler skipped the run
+    # the status check here will show the previous week's run.
+    - cron: '0 6 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  kaggle-status:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Account and token come from repository secrets; nothing account-specific
+    # is committed (kernel metadata carries ${KAGGLE_ACCOUNT}, rendered by
+    # tools/kaggle/kpush.py).
+    env:
+      KAGGLE_ACCOUNT: ${{ secrets.KAGGLE_ACCOUNT }}
+      KAGGLE_TOKEN: ${{ secrets.KAGGLE_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install kaggle CLI
+        run: pip install kaggle
+
+      - name: Write Kaggle credentials
+        run: |
+          mkdir -p ~/.kaggle
+          # Modern token format (raw token, not JSON).
+          printf '%s' "$KAGGLE_TOKEN" > ~/.kaggle/access_token
+          chmod 600 ~/.kaggle/access_token
+
+      - name: Check validate kernel status
+        id: validate_status
+        run: |
+          echo "=== validate kernel ==="
+          kaggle kernels status ${KAGGLE_ACCOUNT}/crispasr-regression-suite || \
+            echo "WARNING: could not fetch validate kernel status (first push not done?)"
+
+      - name: Check rebake kernel status
+        id: rebake_status
+        run: |
+          echo "=== rebake kernel ==="
+          kaggle kernels status ${KAGGLE_ACCOUNT}/crispasr-auto-rebake-refs || \
+            echo "WARNING: could not fetch rebake kernel status (first push not done?)"
+
+      - name: Verify URLs (no auth needed)
+        run: |
+          echo "Validate kernel: https://www.kaggle.com/code/${KAGGLE_ACCOUNT}/crispasr-regression-suite"
+          echo "Rebake kernel:   https://www.kaggle.com/code/${KAGGLE_ACCOUNT}/crispasr-auto-rebake-refs"
+          echo
+          echo "To verify the schedule is active, open each URL and check"
+          echo "Settings → 'Schedule a notebook run'. Expected:"
+          echo "  validate — Weekly · Sun · 04:00 UTC"
+          echo "  rebake   — Monthly · 1st · 04:00 UTC"
+          echo
+          echo "Progress from running kernels (public HF dataset):"
+          echo "  https://huggingface.co/datasets/cstr/crispasr-kaggle-progress"
+
+      # Status + log of any one kernel, by slug (no account in the input).
+      # This is how a one-off verification kernel's result is read back:
+      # push once, then dispatch this with status_kernel set — never re-push
+      # to "see" a result.
+      - name: Status + log of a named kernel (if requested)
+        if: github.event.inputs.status_kernel != ''
+        env:
+          STATUS_KERNEL: ${{ github.event.inputs.status_kernel }}
+        run: |
+          case "$STATUS_KERNEL" in
+            [A-Za-z0-9._-]*) ;;
+            *) echo "refusing status_kernel"; exit 2 ;;
+          esac
+          kaggle kernels status "${KAGGLE_ACCOUNT}/${STATUS_KERNEL}" || true
+          mkdir -p /tmp/kout
+          # Logs FIRST, and never the whole output tree: a kernel's working
+          # directory holds the cloned repo, the build and the models, and an
+          # unfiltered 'kernels output' sat downloading until the job timed
+          # out. Never hide the CLI's own output either — a kernel that died
+          # early has no files, and the reason is in what these print.
+          mask() { sed "s/${KAGGLE_ACCOUNT}/<account>/g"; }
+          echo "=== kaggle kernels logs (last 300 lines) ==="
+          timeout 180 kaggle kernels logs "${KAGGLE_ACCOUNT}/${STATUS_KERNEL}" 2>&1 | mask | tail -300 || true
+          echo "=== small output files ==="
+          timeout 180 kaggle kernels output "${KAGGLE_ACCOUNT}/${STATUS_KERNEL}" -p /tmp/kout \
+            --file-pattern '(progress\.jsonl|\.log|summary.*\.json)$' 2>&1 | mask | tail -20 || true
+          ls -laR /tmp/kout 2>/dev/null | mask | head -40 || true
+          for f in /tmp/kout/*.log; do
+            [ -f "$f" ] || continue
+            echo "=== $f (last 400 lines, account name masked) ==="
+            python3 - "$f" <<'PY'
+          import json, os, sys
+          acct = os.environ.get("KAGGLE_ACCOUNT", "")
+          raw = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+          try:
+              lines = [r.get("data", "") for r in json.loads(raw)]
+              text = "".join(lines)
+          except Exception:
+              text = raw
+          if acct:
+              text = text.replace(acct, "<account>")
+          print("\n".join(text.splitlines()[-400:]))
+          PY
+          done
+
+      - name: Push bootstrap + trigger run (if requested)
+        if: github.event.inputs.trigger_run == 'true'
+        env:
+          KERNEL_DIR: ${{ github.event.inputs.kernel_dir || 'tools/kaggle' }}
+        run: |
+          # KERNEL_DIR comes from the dispatch input through the environment,
+          # never interpolated into the script, and must be a kernel directory
+          # of this repo.
+          case "$KERNEL_DIR" in
+            tools/kaggle|tools/kaggle/[A-Za-z0-9._-]*) ;;
+            *) echo "refusing kernel_dir '$KERNEL_DIR'"; exit 2 ;;
+          esac
+          test -f "$KERNEL_DIR/kernel-metadata.json"
+          echo "Pushing kernel from $KERNEL_DIR ..."
+          python3 tools/kaggle/kpush.py "$KERNEL_DIR"
+          echo "Done. Watch at: https://www.kaggle.com/code/${KAGGLE_ACCOUNT}/crispasr-regression-suite"
+          echo
+          echo "NOTE: re-push is only needed when crispasr-regression.py itself"
+          echo "changes (new pip deps, new env knobs). Pure C++ / manifest changes"
+          echo "are picked up automatically at runtime via git clone."

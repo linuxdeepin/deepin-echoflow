@@ -1,0 +1,69 @@
+name: Sync HF Space
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'hf-space/**'
+      - '.github/workflows/sync-hf-space.yml'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install huggingface_hub
+        run: pip install --quiet huggingface_hub
+
+      - name: Upload hf-space/ files to HuggingFace Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'EOF'
+          import os
+          import sys
+          from huggingface_hub import HfApi
+
+          token = os.environ.get("HF_TOKEN", "").strip()
+          if not token:
+              print("HF_TOKEN is not set — skipping upload.")
+              sys.exit(0)
+
+          repo_id = "cstr/CrispASR"
+          files = [
+              "app.py",
+              "start.sh",
+              "requirements.txt",
+              "README.md",
+              "Dockerfile",
+          ]
+
+          api = HfApi(token=token)
+          workspace = os.path.join(os.environ.get("GITHUB_WORKSPACE", "."), "hf-space")
+
+          for filename in files:
+              local_path = os.path.join(workspace, filename)
+              if not os.path.isfile(local_path):
+                  print(f"  SKIP {filename} (not found locally)")
+                  continue
+              api.upload_file(
+                  path_or_fileobj=local_path,
+                  path_in_repo=filename,
+                  repo_id=repo_id,
+                  repo_type="space",
+                  commit_message=f"sync {filename} from GitHub Actions",
+              )
+              print(f"  OK   {filename}")
+
+          print("Sync complete.")
+          EOF

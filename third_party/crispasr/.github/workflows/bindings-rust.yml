@@ -1,0 +1,126 @@
+name: Bindings Tests (Rust)
+# The Rust crates had no PR-time job at all. release-wrappers.yml's comment
+# claims `cargo check` on both crates runs "on every push", and uses that as the
+# stated reason publishing may use `--no-verify` — but no workflow in this repo
+# ever invoked cargo. Reported alongside #362.
+#
+# It could not have existed before now: `cargo test -p crispasr` did not run
+# unaided, because crispasr-sys emitted its rpath via `cargo:rustc-link-arg`,
+# which cargo does not propagate to a DEPENDENT's test binaries. The suite died
+# with "Library not loaded: @rpath/libcrispasr". crispasr/build.rs now re-emits
+# it, so the suite is runnable and therefore worth gating on.
+on:
+  push:
+    paths:
+      - crispasr/**
+      - crispasr-sys/**
+      - include/**
+      - src/crispasr_c_api.cpp
+      - src/crispasr_audio_resample.cpp
+      - tests/test_python_audio_resample.py
+      - src/CMakeLists.txt
+      # This job runs the backend wiring audit (below), so a change to the
+      # audit itself must re-run it — otherwise the gate's own regressions
+      # land unexercised.
+      - tools/check-backend-wiring.py
+      - .github/workflows/bindings-rust.yml
+  pull_request:
+    paths:
+      - crispasr/**
+      - crispasr-sys/**
+      - include/**
+      - src/crispasr_c_api.cpp
+      - src/crispasr_audio_resample.cpp
+      - tests/test_python_audio_resample.py
+      - src/CMakeLists.txt
+      # This job runs the backend wiring audit (below), so a change to the
+      # audit itself must re-run it — otherwise the gate's own regressions
+      # land unexercised.
+      - tools/check-backend-wiring.py
+      - .github/workflows/bindings-rust.yml
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ubuntu-22:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Build the C library once and point the sys crate at it, rather than
+      # letting build.rs run cmake itself into OUT_DIR — same wall-clock, but the
+      # build log is visible when it fails.
+      - name: Build libcrispasr
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=ON \
+            -DCRISPASR_BUILD_TESTS=OFF \
+            -DCRISPASR_BUILD_EXAMPLES=ON \
+            -DCRISPASR_BUILD_SERVER=OFF \
+            -DGGML_CUDA=OFF \
+            -DCRISPASR_OPUS_FETCH=ON
+          # crispasr-lib, not crispasr: `crispasr` is the CLI's OUTPUT_NAME, not
+          # a target name, and Make fails with "No rule to make target
+          # 'crispasr'". crispasr-lib is the shared library the sys crate links.
+          #
+          # crispasr-cli is built alongside it for the wiring audit below, which
+          # needs the backend roster (`crispasr --list-backends-json`) to know
+          # what the shared library is supposed to contain. That is also why
+          # CRISPASR_BUILD_EXAMPLES is ON here: the CLI lives under examples/,
+          # and with it OFF the target does not exist at all.
+          cmake --build build -j"$(nproc)" --target crispasr-lib crispasr-cli
+
+      # THE ONLY PLACE IN CI WHERE THIS CAN RUN AT ALL.
+      #
+      # check-backend-wiring.py's shipped-library check reads the SYMBOL TABLE
+      # of a built libcrispasr and asserts every backend's `<x>_init_from_file`
+      # survived the link -- CMake linkage is not evidence, because the linker
+      # drops a static-archive member that nothing references. That is not a
+      # hypothetical: v0.8.17 shipped a .dylib with no mel_band_roformer_*
+      # symbols in it while the CLI worked, because the CLI links the static
+      # archive directly and the bindings do not.
+      #
+      # ci.yml's `Backend wiring audit` step runs the same script, but that job
+      # configures without BUILD_SHARED_LIBS, so no shared library is ever
+      # produced, the check prints "skipped" and the run goes green having
+      # proved nothing. This job is the one that builds a shared libcrispasr on
+      # Linux, so this is where the check has teeth -- and it guards exactly the
+      # consumer it is about, since the Rust/Python/Go/Dart/C# bindings all load
+      # this .so rather than linking the archives.
+      #
+      # --require-lib turns "no library found" from a silent skip into a
+      # failure, so this step cannot decay back into a no-op if the build
+      # config above ever changes.
+      - name: Backend wiring audit (shipped-library symbols)
+        run: |
+          python3 tools/check-backend-wiring.py \
+            --crispasr ./build/bin/crispasr --require-lib
+
+      - name: Python audio C ABI against the shipped shared library
+        env:
+          CRISPASR_TEST_LIB: ${{ github.workspace }}/build/src/libcrispasr.so
+        run: |
+          python3 -m pip install numpy
+          python3 -m unittest discover -s tests -p test_python_audio_resample.py -v
+
+      - name: cargo check (both crates)
+        env:
+          CRISPASR_SYS_LIB_DIR: ${{ github.workspace }}/build
+        run: |
+          cargo check --manifest-path crispasr-sys/Cargo.toml
+          cargo check --manifest-path crispasr/Cargo.toml
+
+      # No LD_LIBRARY_PATH here on purpose. Needing it is the bug
+      # crispasr/build.rs fixes, so running without it is what proves the fix
+      # stays fixed — if the rpath regresses, this step fails to load the
+      # library rather than passing quietly.
+      - name: cargo test (model-free; gated cases self-skip)
+        env:
+          CRISPASR_SYS_LIB_DIR: ${{ github.workspace }}/build
+        run: cargo test --manifest-path crispasr/Cargo.toml

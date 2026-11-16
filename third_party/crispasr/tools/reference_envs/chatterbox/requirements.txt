@@ -1,0 +1,27 @@
+# Reference-dump env for `--backend chatterbox`
+# Bootstrap: tools/bootstrap_ref_env.sh chatterbox
+#
+# Hand-curated. The auto-scaffold would only emit a TODO for the upstream
+# chatterbox package; the entries below are what actually produces archives
+# bit-compatible with the existing chatterbox-ref.gguf.
+
+numpy>=2.0
+gguf>=0.10
+
+# Pinned torch + torchaudio: chatterbox's S3Tokenizer / S3Gen flow matcher
+# uses RoPE + conv1d_dw kernels that gained native CPU paths in 2.x.
+# Match the version the GGUF weights were converted under (last known good:
+# torch 2.5.x). Update when chatterbox upstream changes pin.
+torch>=2.5
+torchaudio>=2.5
+
+# librosa for the prompt-mel branch of voice cloning
+librosa>=0.10
+
+# Upstream chatterbox: local clone is at /Volumes/backups/ai/resemble-chatterbox.
+# For a from-network install, use the resemble-ai fork at the sha that matches
+# the .safetensors checkpoints in /Volumes/backups/ai/chatterbox-official.
+# Local-clone install (preferred when on the work machine):
+#   pip install -e /Volumes/backups/ai/resemble-chatterbox
+# From-network install (paste the sha used to convert your GGUFs):
+#   chatterbox @ git+https://github.com/resemble-ai/chatterbox.git@<sha>

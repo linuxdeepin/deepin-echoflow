@@ -1,0 +1,245 @@
+// crispasr_backend_chatterbox.cpp — adapter for Chatterbox TTS (base, turbo,
+// Kartoffelbox). Two-GGUF runtime: T3 AR model (--model) and S3Gen
+// encoder+vocoder (--codec-model).
+
+#include "crispasr_backend.h"
+#include "crispasr_backend_utils.h"
+#include "crispasr_cache.h"
+#include "crispasr_model_mgr_cli.h"
+#include "crispasr_model_registry.h"
+#include "whisper_params.h"
+
+#include "chatterbox.h"
+#include "core/tts_lang.h"
+
+#include <cctype>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <sys/stat.h>
+#include <string>
+#include <vector>
+
+namespace {
+
+static bool file_exists(const std::string& path) {
+    struct stat st;
+    return stat(path.c_str(), &st) == 0;
+}
+
+static bool contains_ci(const std::string& haystack, const std::string& needle) {
+    if (needle.empty() || haystack.size() < needle.size())
+        return false;
+    for (size_t i = 0; i + needle.size() <= haystack.size(); ++i) {
+        bool match = true;
+        for (size_t j = 0; j < needle.size(); ++j) {
+            unsigned char a = (unsigned char)haystack[i + j];
+            unsigned char b = (unsigned char)needle[j];
+            if ((char)std::tolower(a) != (char)std::tolower(b)) {
+                match = false;
+                break;
+            }
+        }
+        if (match)
+            return true;
+    }
+    return false;
+}
+
+static bool is_auto_companion_arg(const std::string& arg) {
+    return arg.empty() || arg == "auto" || arg == "default";
+}
+
+static std::string discover_s3gen(const whisper_params& p) {
+    if (!p.tts_codec_model.empty() && p.tts_codec_model != "auto" && p.tts_codec_model != "default") {
+        return crispasr_resolve_model_cli(p.tts_codec_model, p.backend, p.no_prints, p.cache_dir, p.auto_download,
+                                          p.tts_codec_quant);
+    }
+
+    const bool turbo_like = contains_ci(p.backend, "turbo") || contains_ci(p.backend, "kartoffel") ||
+                            contains_ci(p.backend, "nano") || contains_ci(p.model, "turbo") ||
+                            contains_ci(p.model, "kartoffel") || contains_ci(p.model, "nano");
+    const char* const* candidates = nullptr;
+    static const char* turbo_candidates[] = {
+        "chatterbox-turbo-s3gen-f16.gguf",
+        nullptr,
+    };
+    static const char* base_candidates[] = {
+        "chatterbox-s3gen-q8_0.gguf",
+        "chatterbox-s3gen-f16.gguf",
+        nullptr,
+    };
+    candidates = turbo_like ? turbo_candidates : base_candidates;
+
+    auto try_dir = [&](const std::string& dir) -> std::string {
+        for (const char* const* it = candidates; *it; ++it) {
+            const std::string path = dir + "/" + *it;
+            if (file_exists(path))
+                return path;
+        }
+        return "";
+    };
+
+    auto sep = p.model.find_last_of("/\\");
+    const std::string model_dir = (sep == std::string::npos) ? std::string(".") : p.model.substr(0, sep);
+    std::string path = try_dir(model_dir);
+    if (!path.empty())
+        return path;
+
+    const std::string cache_dir = crispasr_cache::dir(p.cache_dir);
+    path = try_dir(cache_dir);
+    if (!path.empty())
+        return path;
+
+    CrispasrRegistryEntry entry;
+    if (crispasr_registry_lookup(p.backend, entry, p.tts_codec_quant) && !entry.companion_filename.empty()) {
+        return crispasr_resolve_model_cli(entry.companion_filename, p.backend, p.no_prints, p.cache_dir,
+                                          p.auto_download, p.tts_codec_quant);
+    }
+    if (p.auto_download || !is_auto_companion_arg(p.tts_codec_model)) {
+        const char* wanted = turbo_like ? "chatterbox-turbo-s3gen-f16.gguf" : "chatterbox-s3gen-q8_0.gguf";
+        return crispasr_resolve_model_cli(wanted, p.backend, p.no_prints, p.cache_dir, p.auto_download,
+                                          p.tts_codec_quant);
+    }
+
+    return "";
+}
+
+class ChatterboxBackend : public CrispasrBackend {
+public:
+    ChatterboxBackend() = default;
+    ~ChatterboxBackend() override { ChatterboxBackend::shutdown(); }
+
+    const char* name() const override { return "chatterbox"; }
+
+    uint32_t capabilities() const override {
+        return CAP_TTS | CAP_AUTO_DOWNLOAD | CAP_TEMPERATURE | CAP_FLASH_ATTN | CAP_VOICE_CLONING |
+               CAP_SRC_TGT_LANGUAGE;
+    }
+
+    std::vector<crispasr_segment> transcribe(const float* /*samples*/, int /*n_samples*/, int64_t /*t_offset_cs*/,
+                                             const whisper_params& /*params*/) override {
+        fprintf(stderr, "crispasr[chatterbox]: transcription is not supported by this backend\n");
+        return {};
+    }
+
+    bool init(const whisper_params& p) override {
+        chatterbox_context_params cp = chatterbox_context_default_params();
+        cp.n_threads = p.n_threads;
+        cp.verbosity = p.no_prints ? 0 : 1;
+        cp.use_gpu = p.use_gpu;
+        ctx_ = chatterbox_init_from_file(p.model.c_str(), cp);
+        if (!ctx_) {
+            fprintf(stderr, "crispasr[chatterbox]: failed to load T3 model '%s'\n", p.model.c_str());
+            return false;
+        }
+        std::string s3gen_path = discover_s3gen(p);
+        if (!s3gen_path.empty()) {
+            if (chatterbox_set_s3gen_path(ctx_, s3gen_path.c_str()) != 0) {
+                fprintf(stderr, "crispasr[chatterbox]: failed to load S3Gen '%s'\n", s3gen_path.c_str());
+                return false;
+            }
+            s3gen_loaded_ = true;
+            if (!p.no_prints) {
+                fprintf(stderr, "crispasr[chatterbox]: S3Gen loaded from '%s'\n", s3gen_path.c_str());
+            }
+        }
+        return true;
+    }
+
+    std::vector<float> synthesize(const std::string& text, const whisper_params& params) override {
+        if (!ctx_ || text.empty())
+            return {};
+        if (!s3gen_loaded_) {
+            fprintf(stderr, "crispasr[chatterbox]: S3Gen not loaded. Pass --codec-model <s3gen.gguf>\n");
+            return {};
+        }
+        // --voice: load a baked voice GGUF (or a WAV — currently routed to
+        // the baker hint, see chatterbox_set_voice_from_wav). Per-call key
+        // cache so server callers can switch voice between requests without
+        // reloading on every synthesise.
+        if (!params.tts_voice.empty() && params.tts_voice != last_voice_key_) {
+            if (chatterbox_set_voice_from_wav(ctx_, params.tts_voice.c_str()) == 0) {
+                last_voice_key_ = params.tts_voice;
+                if (!params.no_prints) {
+                    fprintf(stderr, "crispasr[chatterbox]: voice '%s' loaded\n", params.tts_voice.c_str());
+                }
+            } else {
+                // chatterbox_set_voice_from_wav already printed a precise
+                // diagnostic; surface it as a synthesis-blocker to mirror
+                // vibevoice's posture and avoid silently falling back to
+                // the default baked-in voice (which would mask the error).
+                return {};
+            }
+        }
+        chatterbox_set_seed(ctx_, (uint32_t)params.seed);
+        // Multilingual language selection (#170/#348). `--target-lang` is the
+        // explicit TTS output language; `-l` remains the convenient fallback.
+        const std::string output_lang = !params.target_lang.empty() ? params.target_lang : params.language;
+        // Finnish Nano is monolingual and retains Nano's English tokenizer.
+        // `-l fi` selects this backend in the CLI router, but `[fi]` is not a
+        // token in its vocabulary and must not be injected into the prompt.
+        const bool finnish_nano =
+            contains_ci(params.backend, "finnish-nano") || contains_ci(params.backend, "finnish_nano");
+        if (!finnish_nano && !output_lang.empty() && output_lang != "auto")
+            chatterbox_set_language(ctx_, output_lang.c_str());
+        else
+            chatterbox_set_language(ctx_, nullptr); // clear
+        // 75c-opt-2: native backend knobs
+        if (params.tts_top_p >= 0.0f)
+            chatterbox_set_top_p(ctx_, params.tts_top_p);
+        if (params.tts_min_p >= 0.0f)
+            chatterbox_set_min_p(ctx_, params.tts_min_p);
+        if (params.tts_top_k >= 0)
+            chatterbox_set_top_k(ctx_, params.tts_top_k);
+        if (params.tts_repetition_penalty >= 0.0f)
+            chatterbox_set_repetition_penalty(ctx_, params.tts_repetition_penalty);
+        if (params.tts_cfg_scale >= 0.0f)
+            chatterbox_set_cfg_weight(ctx_, params.tts_cfg_scale);
+        else if (core_tts_lang::is_cross_lingual(output_lang, params.source_lang)) {
+            // Upstream V3 warns that a reference recorded in another language
+            // can carry its accent into the target language. Its documented
+            // mitigation is cfg_weight=0 for cross-lingual cloning.
+            chatterbox_set_cfg_weight(ctx_, 0.0f);
+        } else {
+            // The adapter is reused by the server; restore the upstream
+            // default after a previous cross-lingual request.
+            chatterbox_set_cfg_weight(ctx_, 0.5f);
+        }
+        if (params.tts_num_steps >= 0)
+            chatterbox_set_cfm_steps(ctx_, params.tts_num_steps);
+        if (params.tts_exaggeration >= 0.0f)
+            chatterbox_set_exaggeration(ctx_, params.tts_exaggeration);
+        if (params.tts_max_speech_tokens >= 0)
+            chatterbox_set_max_speech_tokens(ctx_, params.tts_max_speech_tokens);
+        if (params.temperature > 0.0f)
+            chatterbox_set_temperature(ctx_, params.temperature);
+        int n = 0;
+        float* pcm = chatterbox_synthesize(ctx_, text.c_str(), &n);
+        if (!pcm || n <= 0)
+            return {};
+        std::vector<float> out(pcm, pcm + n);
+        chatterbox_pcm_free(pcm);
+        return out;
+    }
+
+    void shutdown() override {
+        if (ctx_) {
+            chatterbox_free(ctx_);
+            ctx_ = nullptr;
+        }
+        s3gen_loaded_ = false;
+        last_voice_key_.clear();
+    }
+
+private:
+    std::string last_voice_key_;
+    chatterbox_context* ctx_ = nullptr;
+    bool s3gen_loaded_ = false;
+};
+
+} // namespace
+
+std::unique_ptr<CrispasrBackend> crispasr_make_chatterbox_backend() {
+    return std::unique_ptr<CrispasrBackend>(new ChatterboxBackend());
+}

@@ -1,0 +1,23 @@
+# Reference-dump env for `--backend gigaam` (ai-sage/GigaAM-v3).
+# Bootstrap: tools/bootstrap_ref_env.sh gigaam
+#
+# The dump loads the checkpoint with trust_remote_code=True, so the deps are
+# whatever `modeling_gigaam.py` imports at module scope — hydra + omegaconf
+# (the config is instantiated through hydra.utils.instantiate) and torchaudio
+# (MelSpectrogram). sentencepiece is only needed for the e2e_* revisions, but
+# it is cheap and the charwise ones ignore it.
+#
+# NOT included: pyannote-audio. It is imported lazily by
+# `segment_audio_file()` for `transcribe_longform()`, which the dump never
+# calls — and it needs an HF_TOKEN.
+
+numpy>=2.0
+torch>=2.4
+torchaudio>=2.4
+transformers>=4.50
+hydra-core>=1.3
+omegaconf>=2.3
+sentencepiece>=0.2
+
+# Always required by the dump driver itself
+gguf>=0.10

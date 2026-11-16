@@ -1,0 +1,225 @@
+// crispasr_backend_zonos.cpp -- adapter for Zyphra/Zonos-v0.1-transformer
+// (AR transformer + DAC 44.1 kHz codec, Apache 2.0).
+//
+// Two-GGUF runtime: the AR transformer (--model) and the DAC 44 kHz
+// decoder (--codec-model, or auto-discovered as sibling).
+//
+// Rich conditioning controls via CLI flags:
+//   --pitch-std N      (0-400, default 20)
+//   --speaking-rate N  (0-40, default 15)
+//   --fmax N           (0-24000, default 22050)
+//   --voice FILE.wav   (reference audio for speaker cloning)
+//   --language CODE    (eSpeak language code, default en-us)
+
+#include "crispasr_backend.h"
+#include "crispasr_backend_utils.h"
+#include "crispasr_model_mgr_cli.h"
+#include "crispasr_model_registry.h"
+#include "whisper_params.h"
+
+#include "zonos_tts.h"
+
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <sys/stat.h>
+#include <vector>
+
+namespace {
+
+static bool file_exists(const std::string& path) {
+    struct stat st;
+    return stat(path.c_str(), &st) == 0;
+}
+
+// Look for a sibling DAC codec file next to the Zonos model.
+static std::string discover_codec(const std::string& model_path) {
+    auto dir_of = [](const std::string& p) -> std::string {
+        auto sep = p.find_last_of("/\\");
+        return (sep == std::string::npos) ? std::string(".") : p.substr(0, sep);
+    };
+    const std::string dir = dir_of(model_path);
+    static const char* candidates[] = {
+        "dac-44khz-f16.gguf",
+        "dac-44khz.gguf",
+        "dac_44khz.gguf",
+        "zonos-dac-44khz.gguf",
+    };
+    for (const char* name : candidates) {
+        std::string p = dir + "/" + name;
+        if (file_exists(p)) {
+            return p;
+        }
+    }
+    return "";
+}
+
+class ZonosBackend : public CrispasrBackend {
+public:
+    ZonosBackend() = default;
+    ~ZonosBackend() override { ZonosBackend::shutdown(); }
+
+    const char* name() const override { return "zonos"; }
+
+    uint32_t capabilities() const override {
+        // NOT CAP_VOICE_CLONING (#435). zonos_tts_set_voice() is a hard stub
+        // returning -1 ("not yet implemented") — cloning needs a ResNet293
+        // speaker encoder that is not ported. The only other route,
+        // zonos_tts_set_speaker_embedding(), is called from NOWHERE in the CLI
+        // or the C API and has no flag, so there is no path to a cloned voice
+        // at all. Declaring the cap made `--voice` accepted, warned about, and
+        // then silently answered with a RANDOM speaker. Re-declare it with a
+        // working encoder, not before.
+        return CAP_TTS | CAP_AUTO_DOWNLOAD | CAP_TEMPERATURE | CAP_FLASH_ATTN;
+    }
+
+    int tts_sample_rate() const override { return 44100; }
+
+    std::vector<crispasr_segment> transcribe(const float* /*samples*/, int /*n_samples*/, int64_t /*t_offset_cs*/,
+                                             const whisper_params& /*params*/) override {
+        fprintf(stderr, "crispasr[zonos]: transcription is not supported by this backend\n");
+        return {};
+    }
+
+    bool init(const whisper_params& p) override {
+        zonos_tts_params zp = zonos_tts_default_params();
+        zp.n_threads = p.n_threads;
+        zp.verbosity = p.no_prints ? 0 : 1;
+        zp.use_gpu = crispasr_backend_should_use_gpu(p);
+        zp.flash_attn = p.flash_attn;
+        zp.seed = p.seed;
+
+        if (p.temperature > 0.0f) {
+            zp.temperature = p.temperature;
+        }
+
+        ctx_ = zonos_tts_init_from_file(p.model.c_str(), zp);
+        if (!ctx_) {
+            fprintf(stderr, "crispasr[zonos]: failed to load model '%s'\n", p.model.c_str());
+            return false;
+        }
+
+        // DAC codec discovery
+        std::string codec_path = p.tts_codec_model;
+        if (!codec_path.empty() && codec_path != "auto" && codec_path != "default") {
+            codec_path = crispasr_resolve_model_cli(codec_path, p.backend, p.no_prints, p.cache_dir, p.auto_download,
+                                                    p.tts_codec_quant);
+        } else {
+            codec_path.clear();
+        }
+        if (codec_path.empty()) {
+            codec_path = discover_codec(p.model);
+        }
+        if (codec_path.empty()) {
+            CrispasrRegistryEntry entry;
+            if (crispasr_registry_lookup(p.backend, entry, p.tts_codec_quant) && !entry.companion_filename.empty()) {
+                codec_path = crispasr_resolve_model_cli(entry.companion_filename, p.backend, p.no_prints, p.cache_dir,
+                                                        p.auto_download, p.tts_codec_quant);
+            }
+        }
+        if (!codec_path.empty()) {
+            zonos_tts_set_codec_path(ctx_, codec_path.c_str());
+            if (!p.no_prints) {
+                fprintf(stderr, "crispasr[zonos]: codec path = '%s'\n", codec_path.c_str());
+            }
+        } else if (!p.no_prints) {
+            fprintf(stderr, "crispasr[zonos]: no DAC codec found. Pass --codec-model PATH or place "
+                            "dac-44khz-f16.gguf next to the model.\n");
+        }
+
+        // Set language if specified
+        if (!p.language.empty()) {
+            // Only record it as applied if it WAS applied (see synthesize()).
+            if (zonos_tts_set_language(ctx_, p.language.c_str()) == 0)
+                cur_language_ = p.language; // #435: baseline for the per-request check
+            else
+                fprintf(stderr, "crispasr[zonos]: warning: could not set language '%s'\n", p.language.c_str());
+        }
+
+        // Load reference voice for speaker cloning
+        if (!p.tts_voice.empty()) {
+            // If it's a .wav file, extract speaker embedding
+            const std::string& v = p.tts_voice;
+            if (v.size() > 4 && (v.substr(v.size() - 4) == ".wav" || v.substr(v.size() - 4) == ".mp3" ||
+                                 v.substr(v.size() - 5) == ".flac")) {
+                if (zonos_tts_set_voice(ctx_, v.c_str()) != 0) {
+                    // Not a file problem: the speaker encoder is not implemented.
+                    // Saying "failed to load" sent #435's reporter looking at
+                    // their wav. Name the real cause and the real consequence.
+                    fprintf(stderr,
+                            "crispasr[zonos]: --voice is NOT supported by this backend: the speaker "
+                            "encoder (ResNet293) is not implemented, so '%s' was ignored and a RANDOM "
+                            "speaker will be used. This is not a problem with your file.\n",
+                            v.c_str());
+                }
+            }
+        }
+
+        return true;
+    }
+
+    std::vector<float> synthesize(const std::string& text, const whisper_params& params) override {
+        if (!ctx_ || text.empty()) {
+            return {};
+        }
+
+        // #435: honour the PER-REQUEST language. init() froze whatever the CLI
+        // was started with (default en-us), and synthesize() applied only
+        // temperature and seed — so `POST /v1/audio/speech {"language":"ru"}`
+        // reached a throwaway params struct and never the model. A server
+        // started without -l phonemised every language as en-us, which for
+        // Cyrillic meant no usable phonemes at all.
+        //
+        // Tracked so the call is skipped when nothing changed: zonos resolves
+        // the string to a language_id and espeak re-selects its voice, neither
+        // of which is worth redoing per request.
+        if (!params.language.empty() && params.language != "auto" && params.language != cur_language_) {
+            // #435: latch ONLY on success. Recording the request unconditionally
+            // made a FAILED switch sticky: the next request for the same
+            // language compared equal to cur_language_, skipped the call, and
+            // the model kept the language it was actually still set to. A
+            // failure has to stay retryable, and it has to be audible.
+            if (zonos_tts_set_language(ctx_, params.language.c_str()) == 0)
+                cur_language_ = params.language;
+            else
+                fprintf(stderr,
+                        "crispasr[zonos]: warning: request language '%s' not applied; "
+                        "still speaking '%s'\n",
+                        params.language.c_str(), cur_language_.c_str());
+        }
+
+        if (params.temperature > 0.0f) {
+            zonos_tts_set_temperature(ctx_, params.temperature);
+        }
+        zonos_tts_set_seed(ctx_, params.seed);
+
+        int n = 0;
+        float* pcm = zonos_tts_synthesize(ctx_, text.c_str(), &n);
+        if (!pcm || n <= 0) {
+            return {};
+        }
+        std::vector<float> out(pcm, pcm + n);
+        zonos_tts_pcm_free(pcm);
+        return out;
+    }
+
+    void shutdown() override {
+        if (ctx_) {
+            zonos_tts_free(ctx_);
+            ctx_ = nullptr;
+        }
+    }
+
+private:
+    zonos_tts_context* ctx_ = nullptr;
+    // #435: language currently applied to ctx_, so a per-request change is
+    // detected and an unchanged one costs nothing.
+    std::string cur_language_;
+};
+
+} // namespace
+
+std::unique_ptr<CrispasrBackend> crispasr_make_zonos_backend() {
+    return std::unique_ptr<CrispasrBackend>(new ZonosBackend());
+}
