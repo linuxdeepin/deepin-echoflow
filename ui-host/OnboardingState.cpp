@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "OnboardingState.h"
+#include "../service/ProjectPaths.h"
 
 #include <QDir>
 #include <QFileInfo>
@@ -77,6 +78,7 @@ QString OnboardingState::path() const
 
 QString OnboardingState::defaultPath()
 {
-    return QStandardPaths::writableLocation(QStandardPaths::ConfigLocation)
-        + QStringLiteral("/echoflow/ui-state.ini");
+    const auto config = echoflow::projectConfigPath(
+        QStandardPaths::writableLocation(QStandardPaths::ConfigLocation).toStdString());
+    return QString::fromStdString((config.parent_path() / "ui-state.ini").string());
 }

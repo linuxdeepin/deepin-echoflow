@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Hualet Wang
+// SPDX-License-Identifier: MIT
+
 // CrispASR — C-ABI consumed by every CrispASR consumer: the CLI in
 // `examples/cli/`, the Dart FFI binding in `flutter/crispasr/`, the Python
 // ctypes binding in `python/crispasr/`, and the Rust `crispasr-sys` crate.
@@ -1108,6 +1111,10 @@ struct crispasr_stream {
     // Stateful adapters own their backend state in these closures. Parent
     // model session must outlive the stream, as for the existing adapters.
     std::function<int(const float*, int, bool)> append;
+    std::function<void(bool)> set_live_decode;
+    std::function<void(bool)> set_full_segment_decode;
+    std::function<int()> refresh;
+    std::function<int64_t()> inference_count;
     std::function<void()> release;
     bool finalized = false;
     void* kyutai_stream_state = nullptr;
@@ -1479,13 +1486,27 @@ CA_EXPORT int crispasr_stream_flush(crispasr_stream* s) {
     return crispasr_stream_run_decode(s) == 0 ? 1 : -2;
 }
 
-// PLAN #7 phase 3 — voxtral4b live-captions toggle on a unified stream.
-// Forwards to voxtral4b_stream_set_live_decode if the underlying stream is
-// voxtral4b; no-op for other backends. Set BEFORE the first feed for
-// clean semantics. Idempotent.
+// Toggle interim decoding. Qwen buffers every sample while disabled and
+// coalesces catch-up/flush into one decode; backend state remains single-threaded.
+CA_EXPORT int crispasr_stream_refresh(crispasr_stream* s) {
+    return s && !s->finalized && s->refresh ? s->refresh() : -1;
+}
+
+CA_EXPORT void crispasr_stream_set_full_segment_decode(crispasr_stream* s, int enabled) {
+    if (s && s->set_full_segment_decode) s->set_full_segment_decode(enabled != 0);
+}
+
+CA_EXPORT int64_t crispasr_stream_inference_count(crispasr_stream* s) {
+    return s && s->inference_count ? s->inference_count() : -1;
+}
+
 CA_EXPORT void crispasr_stream_set_live_decode(crispasr_stream* s, int enabled) {
     if (!s)
         return;
+    if (s->set_live_decode) {
+        s->set_live_decode(enabled != 0);
+        return;
+    }
 #if !defined(CRISPASR_QWEN3_ONLY) && __has_include("voxtral4b.h")
     if (s->voxtral4b_stream_state) {
         voxtral4b_stream_set_live_decode((voxtral4b_stream*)s->voxtral4b_stream_state, enabled);
@@ -2121,6 +2142,9 @@ struct crispasr_session {
 #endif
 #ifdef CA_HAVE_QWEN3
     qwen3_asr_context* qwen3_ctx = nullptr;
+    // Model-owned fixed prompt cache survives stream close. The runtime KV
+    // revision prevents reuse after another inference touched this context.
+    std::shared_ptr<core_qwen3_stream_model::PrefixKvCache> qwen3_stream_prefix_cache;
 #endif
 #ifdef CA_HAVE_HIGGS_STT
     higgs_stt_context* higgs_ctx = nullptr;
@@ -11063,7 +11087,7 @@ CA_EXPORT int crispasr_session_stream_kind(crispasr_session* s) {
 }
 
 static int crispasr_stream_publish(crispasr_stream* w, const std::string& text) {
-    if (text == w->out_text || text.empty())
+    if (text == w->out_text || (text.empty() && !w->has_output))
         return 0;
     w->out_text = text;
     w->out_t1_s = w->stream_time_s;
@@ -11125,28 +11149,17 @@ CA_EXPORT crispasr_stream* crispasr_session_stream_open(crispasr_session* s, int
 #endif
 #ifdef CA_HAVE_QWEN3
     if (s->qwen3_ctx && !qwen3_asr_is_raon_speech(s->qwen3_ctx)) {
-        struct State {
-            core_qwen3_stream::State algorithm;
-            core_qwen3_stream::Hooks hooks;
-            core_qwen3_stream::Schedule schedule;
-            std::vector<float> pending;
-            bool r2t2 = false;
-            int chunk = 32000;
-            int max_new = 256;
-        };
-        auto state = std::make_shared<State>();
+        if (!core_qwen3_stream::BufferedStream::valid_step_ms(step_ms))
+            return nullptr;
+        bool r2t2 = false;
         if (auto* meta = core_gguf::open_metadata(s->model_path.c_str())) {
-            state->r2t2 = core_gguf::kv_str(meta, "qwen3asr.streaming_recipe", "") == "r2t2";
+            r2t2 = core_gguf::kv_str(meta, "qwen3asr.streaming_recipe", "") == "r2t2";
             gguf_free(meta);
         }
-        // Stock defaults match QwenLM/Qwen3-ASR init_streaming_state.
-        state->algorithm.cfg.stock_qwen = !state->r2t2;
-        state->algorithm.cfg.unfixed_chunk_num = state->r2t2 ? 0 : 2;
-        state->algorithm.cfg.unfixed_token_num = state->r2t2 ? 1 : 5;
+        auto state = std::make_shared<core_qwen3_stream::BufferedStream>(r2t2, step_ms, s->max_new_tokens);
         if (!lang.empty() && lang != "auto") {
             core_qwen3_stream::utf8_decode(ca_iso_to_english_lang(lang), state->algorithm.cfg.force_language);
         }
-        state->schedule.init(2560, 2560);
         auto* ctx = s->qwen3_ctx;
         state->hooks.encode = [ctx](const std::string& text) {
             int n = 0;
@@ -11167,41 +11180,46 @@ CA_EXPORT crispasr_stream* crispasr_session_stream_open(crispasr_session* s, int
             state->algorithm.cfg.force_language.empty()
                 ? ""
                 : "language " + core_qwen3_stream::utf8_encode(state->algorithm.cfg.force_language) + "<asr_text>";
-        state->hooks.generate = [ctx, suffix](const std::vector<float>& audio, const std::string& prefix, int max_new) {
+        const char* reuse = std::getenv("CRISPASR_QWEN3_STREAM_REUSE_PREFIX");
+        const bool retain_prefix = !reuse || std::atoi(reuse) != 0;
+        if (!s->qwen3_stream_prefix_cache) {
+            s->qwen3_stream_prefix_cache = std::make_shared<core_qwen3_stream_model::PrefixKvCache>();
+        }
+        auto prefixCache = retain_prefix ? s->qwen3_stream_prefix_cache
+            : std::make_shared<core_qwen3_stream_model::PrefixKvCache>();
+        const char* split = std::getenv("CRISPASR_QWEN3_STREAM_SPLIT_PREFILL");
+        const bool split_prefill = split && std::atoi(split) != 0;
+        const char* encoder_cache_setting = std::getenv("CRISPASR_QWEN3_STREAM_ENCODER_CACHE");
+        const bool use_encoder_cache = !encoder_cache_setting || std::atoi(encoder_cache_setting) != 0;
+        auto encoderCache = std::shared_ptr<crisp_audio_encoder_cache>(
+            use_encoder_cache ? crisp_audio_encoder_cache_new() : nullptr, &crisp_audio_encoder_cache_free);
+        if (use_encoder_cache && !encoderCache) return nullptr;
+        state->hooks.generate = [ctx, suffix, prefixCache, split_prefill, encoderCache](const std::vector<float>& audio,
+                                                           const std::string& prefix, int max_new) {
             bool ok = false;
-            auto result = core_qwen3_stream_model::generate(ctx, false, audio, suffix + prefix, max_new, &ok);
+            auto result = core_qwen3_stream_model::generate(ctx, false, audio, suffix + prefix,
+                                                             max_new, &ok, prefixCache.get(), nullptr, split_prefill, encoderCache.get());
             if (!ok)
                 throw std::runtime_error("Qwen streaming inference failed");
             return result;
         };
         auto* w = new crispasr_stream();
+        w->inference_count = [state]() { return state->inference_count; };
+        w->set_live_decode = [state](bool enabled) { state->set_live_decode(enabled); };
+        w->set_full_segment_decode = [state](bool enabled) { state->set_full_segment_decode(enabled); };
         w->append = [w, state](const float* pcm, int n, bool flush) {
             try {
-                if (n)
-                    state->pending.insert(state->pending.end(), pcm, pcm + n);
                 int changed = 0;
-                auto chunk = [&]() { return state->r2t2 ? state->schedule.next_chunk_samples() : state->chunk; };
-                while ((int)state->pending.size() >= chunk()) {
-                    const int count = chunk();
-                    const auto result =
-                        core_qwen3_stream::step(state->algorithm, state->hooks, state->pending.data(), count,
-                                                state->r2t2 ? state->schedule.max_new : state->max_new);
-                    state->pending.erase(state->pending.begin(), state->pending.begin() + count);
-                    if (state->r2t2)
-                        state->schedule.update(result.fixed_text);
-                    changed |= crispasr_stream_publish(w, core_qwen3_stream::utf8_encode(state->algorithm.text));
-                }
-                if (flush) {
-                    core_qwen3_stream::finish(state->algorithm, state->hooks, state->pending.data(),
-                                              state->pending.size(),
-                                              state->r2t2 ? state->schedule.first_max_new : state->max_new);
-                    state->pending.clear();
-                    changed |= crispasr_stream_publish(w, core_qwen3_stream::utf8_encode(state->algorithm.text));
-                }
+                state->append(pcm, n, flush, [&](const std::string& text) {
+                    changed |= crispasr_stream_publish(w, text);
+                });
                 return changed;
             } catch (...) {
                 return -2;
             }
+        };
+        w->refresh = [w, state]() {
+            return state->full_segment_decode ? w->append(nullptr, 0, true) : -1;
         };
         return w;
     }

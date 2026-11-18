@@ -67,6 +67,21 @@
               "text": "Enable streaming transcription",
               "type": "checkbox",
               "default": true
+            },
+            {
+              "key": "noise_suppression",
+              "text": "Reduce microphone noise",
+              "type": "checkbox",
+              "default": false
+            },
+            {
+              "key": "stream_step_ms",
+              "name": "Transcription update interval (ms)",
+              "type": "spinbutton",
+              "default": 500,
+              "min": 100,
+              "max": 4000,
+              "step": 100
             }
           ]
         },
@@ -176,18 +191,6 @@
           ]
         },
         {
-          "key": "fcitx",
-          "name": "Fcitx",
-          "options": [
-            {
-              "key": "fcitx_commit",
-              "text": "Commit text through Fcitx",
-              "type": "checkbox",
-              "default": true
-            }
-          ]
-        },
-        {
           "key": "storage",
           "name": "Storage",
           "options": [
@@ -195,7 +198,7 @@
               "key": "recordings_dir",
               "name": "Recordings directory",
               "type": "lineedit",
-              "default": "$HOME/.local/share/echoflow/recordings"
+              "default": "$HOME/.local/share/deepin-echoflow/recordings"
             },
             {
               "key": "save_live_debug_audio",

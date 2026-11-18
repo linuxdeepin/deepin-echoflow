@@ -4,9 +4,12 @@
 #include "VoiceSession.h"
 
 #include "log.h"
+#include "StreamingTextPolisher.h"
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <cmath>
 #include <exception>
 #include <sstream>
 
@@ -70,6 +73,9 @@ VoiceSession::VoiceSession(Config cfg, IRecorder& recorder, IAsrEngine& asr,
     , ui_(ui)
     , threadLauncher_(threadLauncher ? std::move(threadLauncher) : defaultThreadLauncher())
 {
+    nextGeneration_ = static_cast<std::uint64_t>(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+    setupAudioLevelCallback();
 }
 
 VoiceSession::VoiceSession(Config cfg, ILiveVoicePipeline& livePipeline,
@@ -81,57 +87,194 @@ VoiceSession::VoiceSession(Config cfg, ILiveVoicePipeline& livePipeline,
     , threadLauncher_(threadLauncher ? std::move(threadLauncher) : defaultThreadLauncher())
     , partialCallbackState_(std::make_shared<PartialCallbackState>())
 {
+    nextGeneration_ = static_cast<std::uint64_t>(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+    setupAudioLevelCallback();
     partialCallbackState_->ui = &ui_;
+    partialCallbackState_->committer = &committer_;
     livePipeline_->setPartialTextCallback(
         [state = partialCallbackState_](const std::string& text) {
-            IUiNotifier* notifier = nullptr;
             {
                 std::lock_guard<std::mutex> lock(state->mutex);
-                if (!text.empty() && state->accepting && state->ui) {
-                    ++state->active;
-                    notifier = state->ui;
+                if (!state->accepting && !state->preeditAccepting) return;
+                state->rawText = text;
+                if (!state->pendingConfirmedRaw.empty()
+                    && text.rfind(state->pendingConfirmedRaw, 0) == 0) {
+                    state->confirmedRaw = std::move(state->pendingConfirmedRaw);
+                    state->polishedConfirmed = std::move(state->pendingPolished);
+                    state->pendingConfirmedRaw.clear();
+                    state->pendingPolished.clear();
                 }
             }
-
-            if (notifier) {
-                const auto finishNotification = [&state] {
-                    {
-                        std::lock_guard<std::mutex> lock(state->mutex);
-                        --state->active;
-                    }
-                    state->condition.notify_all();
-                };
-                try {
-                    notifier->send("STREAM_TEXT " + text);
-                } catch (...) {
-                    finishNotification();
-                    throw;
-                }
-                finishNotification();
-            }
+            state->condition.notify_all();
+            publishPartial(state);
         });
+}
+
+void VoiceSession::setupAudioLevelCallback()
+{
+    audioLevelCallbackState_ = std::make_shared<AudioLevelCallbackState>();
+    audioLevelCallbackState_->ui = &ui_;
+    auto callback = [state = audioLevelCallbackState_](const AudioLevelFrame& frame) {
+        IUiNotifier* notifier;
+        {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            if (!state->accepting || !state->ui || !std::isfinite(frame.level)) return;
+            ++state->active;
+            notifier = state->ui;
+        }
+        // Independent of preedit delivery: a busy ASR/commit socket must not
+        // delay metering on the capture thread. UI sends are nonblocking.
+        try {
+            const auto encode = [](double level) {
+                return std::to_string(static_cast<int>(std::lround(
+                    (std::isfinite(level) ? std::clamp(level, 0.0, 1.0) : 0.0) * 1000)));
+            };
+            std::string message = "AUDIO_LEVEL " + encode(frame.level);
+            for (const double bar : frame.bars) message += " " + encode(bar);
+            notifier->send(message);
+        } catch (...) {
+            log("voice audio level notification failed");
+        }
+        {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            --state->active;
+        }
+        state->condition.notify_all();
+    };
+    if (livePipeline_) livePipeline_->setAudioLevelCallback(std::move(callback));
+    else recorder_->setAudioLevelCallback(std::move(callback));
+}
+
+void VoiceSession::setAudioLevelAccepting(bool accepting)
+{
+    const auto state = audioLevelCallbackState_;
+    std::unique_lock<std::mutex> lock(state->mutex);
+    state->accepting = accepting;
+    if (!accepting) state->condition.wait(lock, [state] { return state->active == 0; });
+}
+
+void VoiceSession::shutdownAudioLevelCallback()
+{
+    setAudioLevelAccepting(false);
+    if (livePipeline_) livePipeline_->setAudioLevelCallback({});
+    else recorder_->setAudioLevelCallback({});
+    std::lock_guard<std::mutex> lock(audioLevelCallbackState_->mutex);
+    audioLevelCallbackState_->ui = nullptr;
+}
+
+void VoiceSession::publishPartial(const std::shared_ptr<PartialCallbackState>& state)
+{
+    // Serialize delivery, including retries, so old previews cannot overtake
+    // a newer ASR/polish result. Render again after taking this lock.
+    std::lock_guard<std::mutex> delivery(state->deliveryMutex);
+    const auto render = [&] {
+        auto text = state->rawText;
+        if (!state->confirmedRaw.empty() && text.rfind(state->confirmedRaw, 0) == 0) {
+            text = state->polishedConfirmed + text.substr(state->confirmedRaw.size());
+        }
+        return text;
+    };
+    IUiNotifier* notifier = nullptr;
+    ICommitter* committer = nullptr;
+    std::uint64_t generation = 0;
+    std::uint64_t revision = 0;
+    std::string text;
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        if (!state->accepting && !state->preeditAccepting) return;
+        text = render();
+        if (state->published && text == state->lastPublished) return;
+        // A failed/uncertain send must not suppress a later identical result.
+        state->published = false;
+        ++state->active;
+        notifier = state->ui;
+        if (state->preeditAccepting) committer = state->committer;
+        generation = state->generation;
+        revision = ++state->revision;
+    }
+    const auto finishNotification = [&] {
+        {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            --state->active;
+        }
+        state->condition.notify_all();
+    };
+    try {
+        constexpr int kMaxAttempts = 3;
+        for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
+            bool ok = false;
+            bool retryable = false;
+            try {
+                const auto result = committer
+                    ? committer->setPreedit(text, generation, revision)
+                    : std::pair<bool, std::string>{true, "disabled"};
+                ok = result.first;
+                const auto& detail = result.second;
+                retryable = detail == "socket" || detail == "bind"
+                    || detail == "sendto" || detail == "timeout";
+                if (!ok && detail != "preedit unsupported") {
+                    log("voice preedit update failed: " + detail);
+                }
+            } catch (const std::exception& error) {
+                retryable = true;
+                log(std::string("voice preedit update failed: ") + error.what());
+            }
+            std::unique_lock<std::mutex> lock(state->mutex);
+            if (ok) {
+                state->lastPublished = text;
+                state->published = true;
+                break;
+            }
+            if (!retryable || attempt + 1 == kMaxAttempts) break;
+            // Wake immediately when cancellation or newer text supersedes this
+            // attempt; no later ASR callback is needed to retry stable text.
+            const bool superseded = state->condition.wait_for(lock, std::chrono::milliseconds(40), [&] {
+                return !state->preeditAccepting || state->generation != generation || render() != text;
+            });
+            if (superseded) break;
+            revision = ++state->revision;
+        }
+        if (notifier) notifier->send("STREAM_TEXT " + text);
+    } catch (...) {
+        finishNotification();
+        throw;
+    }
+    finishNotification();
 }
 
 VoiceSession::~VoiceSession()
 {
     bool cancelRecording = false;
+    std::uint64_t shutdownGeneration = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         shuttingDown_ = true;
         if (state_ == SessionState::Recording) {
             cancelRecording = true;
+            shutdownGeneration = runningGeneration_;
             setStateLocked(SessionState::Idle);
             runningGeneration_ = 0;
         } else if (state_ == SessionState::Transcribing || state_ == SessionState::Cancelling) {
+            shutdownGeneration = runningGeneration_;
             cancelRequested_ = true;
             setStateLocked(SessionState::Cancelling);
         }
     }
     condition_.notify_all();
+    if (streamingPolisher_) streamingPolisher_->cancel();
 
     // Close the finalization/commit gate before callback teardown can block.
     // No external collaborator is called while the session mutex is held.
+    shutdownAudioLevelCallback();
     shutdownPartialTextCallback();
+    if (shutdownGeneration != 0) {
+        try {
+            committer_.cancelVoiceSession(shutdownGeneration);
+        } catch (const std::exception& e) {
+            log(std::string("voice session cancel during shutdown failed: ") + e.what());
+        }
+    }
 
     if (cancelRecording) {
         try {
@@ -148,6 +291,11 @@ VoiceSession::~VoiceSession()
     if (finalizationWorker_.joinable()) {
         finalizationWorker_.join();
     }
+    if (livePipeline_) {
+        livePipeline_->setConfirmedTextCallback({});
+        livePipeline_->setRecognitionBusyCallback({});
+    }
+    streamingPolisher_.reset();
 }
 
 SessionState VoiceSession::state() const
@@ -158,7 +306,42 @@ SessionState VoiceSession::state() const
 
 void VoiceSession::setTextPolisher(ITextPolisher* polisher)
 {
-    polisher_ = polisher;
+    streamingPolisher_.reset();
+    if (polisher) {
+        const auto state = partialCallbackState_;
+        streamingPolisher_ = std::make_shared<StreamingTextPolisher>(*polisher,
+            [state](std::uint64_t session, const std::string& raw, const std::string& polished) {
+                if (!state) return;
+                {
+                    std::lock_guard<std::mutex> lock(state->mutex);
+                    if (session != state->polishSession || state->polishSession == 0
+                        || raw.size() < std::max(state->confirmedRaw.size(),
+                                                 state->pendingConfirmedRaw.size())) return;
+                    if (state->rawText.rfind(raw, 0) == 0) {
+                        state->confirmedRaw = raw;
+                        state->polishedConfirmed = polished;
+                        state->pendingConfirmedRaw.clear();
+                        state->pendingPolished.clear();
+                    } else {
+                        // Confirmation can precede the corresponding ASR preview.
+                        // Keep the already-rendered prefix until ASR catches up.
+                        state->pendingConfirmedRaw = raw;
+                        state->pendingPolished = polished;
+                    }
+                }
+                state->condition.notify_all();
+                publishPartial(state);
+            });
+    }
+    if (livePipeline_) {
+        const std::weak_ptr<StreamingTextPolisher> weak = streamingPolisher_;
+        livePipeline_->setRecognitionBusyCallback([weak](bool busy) {
+            if (const auto worker = weak.lock()) worker->setRecognitionBusy(busy);
+        });
+        livePipeline_->setConfirmedTextCallback([weak](const std::string& text) {
+            if (const auto worker = weak.lock()) worker->appendConfirmed(text);
+        });
+    }
 }
 
 std::string VoiceSession::handleCommand(const std::string& command)
@@ -240,6 +423,18 @@ std::string VoiceSession::startRecording()
 
     std::uint64_t phaseVersion = 0;
     try {
+        const auto polishSession = streamingPolisher_ ? streamingPolisher_->start() : 0;
+        if (partialCallbackState_) {
+            std::lock_guard<std::mutex> lock(partialCallbackState_->mutex);
+            partialCallbackState_->polishSession = polishSession;
+            partialCallbackState_->rawText.clear();
+            partialCallbackState_->confirmedRaw.clear();
+            partialCallbackState_->polishedConfirmed.clear();
+            partialCallbackState_->pendingConfirmedRaw.clear();
+            partialCallbackState_->pendingPolished.clear();
+            partialCallbackState_->lastPublished.clear();
+            partialCallbackState_->published = false;
+        }
         if (livePipeline_) {
             livePipeline_->start();
         } else {
@@ -247,6 +442,14 @@ std::string VoiceSession::startRecording()
         }
     } catch (const std::exception& e) {
         log(std::string("voice start failed: ") + e.what());
+        if (streamingPolisher_) streamingPolisher_->cancel();
+        if (livePipeline_) {
+            try {
+                livePipeline_->cancel();
+            } catch (const std::exception& cancelError) {
+                log(std::string("voice start rollback failed: ") + cancelError.what());
+            }
+        }
         {
             std::lock_guard<std::mutex> lock(mutex_);
             phaseVersion = setStateLocked(SessionState::Idle);
@@ -259,15 +462,55 @@ std::string VoiceSession::startRecording()
         return "ERR " + std::string(e.what());
     }
 
+    std::uint64_t generation = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         runningGeneration_ = ++nextGeneration_;
+        generation = runningGeneration_;
         cancelRequested_ = false;
         commitClaimed_ = false;
         finalizationStartPublished_ = false;
         phaseVersion = setStateLocked(SessionState::Recording);
     }
+    if (partialCallbackState_) {
+        std::lock_guard<std::mutex> lock(partialCallbackState_->mutex);
+        partialCallbackState_->generation = generation;
+        partialCallbackState_->revision = 0;
+    }
+    std::string beginError;
+    try {
+        const auto [ok, detail] = committer_.beginVoiceSession(generation);
+        if (!ok) beginError = detail.empty() ? "voice session begin rejected" : detail;
+    } catch (const std::exception& e) {
+        beginError = e.what();
+    }
+    if (!beginError.empty()) {
+        log("voice session begin failed: " + beginError);
+        if (streamingPolisher_) streamingPolisher_->cancel();
+        // A timed-out BEGIN may already have bound the plugin's input context.
+        // Cancel this generation even when receipt of BEGIN is uncertain.
+        try {
+            const auto [ok, detail] = committer_.cancelVoiceSession(generation);
+            if (!ok) log("voice begin rollback cancel failed: " + detail);
+        } catch (const std::exception& e) {
+            log(std::string("voice begin rollback cancel failed: ") + e.what());
+        }
+        try {
+            if (livePipeline_) livePipeline_->cancel();
+            else recorder_->stop();
+        } catch (const std::exception& e) {
+            log(std::string("voice start rollback failed: ") + e.what());
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            phaseVersion = setStateLocked(SessionState::Idle);
+            runningGeneration_ = 0;
+        }
+        publishPhase(SessionState::Idle, phaseVersion);
+        return "ERR " + beginError;
+    }
     publishPhase(SessionState::Recording, phaseVersion);
+    setAudioLevelAccepting(true);
     setPartialTextAccepting(true);
     return "RECORDING";
 }
@@ -308,7 +551,8 @@ std::string VoiceSession::startFinalization()
         return "ERR " + launchError;
     }
 
-    setPartialTextAccepting(false);
+    setAudioLevelAccepting(false);
+    setPartialTextAccepting(false, true);
     publishPhase(SessionState::Transcribing, phaseVersion);
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -334,10 +578,12 @@ void VoiceSession::finalize(std::uint64_t generation)
     }
 
     std::string text;
+    bool recognitionFailed = false;
     if (livePipeline_) {
         try {
             text = livePipeline_->finish();
         } catch (const std::exception& e) {
+            recognitionFailed = true;
             log(std::string("asr transcribe failed: ") + e.what());
         }
     } else {
@@ -350,12 +596,20 @@ void VoiceSession::finalize(std::uint64_t generation)
             log(std::string("asr transcribe failed: ") + e.what());
         }
     }
+    setPartialTextAccepting(false, true);
+    if (recognitionFailed && partialCallbackState_) {
+        std::lock_guard<std::mutex> lock(partialCallbackState_->mutex);
+        text = partialCallbackState_->rawText;
+        log("ASR finalization failed; retaining recognized preview, bytes=" + std::to_string(text.size()));
+    }
     if (cfg_.logTranscripts) {
         log("transcript: " + text);
     }
-    if (polisher_ && !text.empty()) {
-        text = polishText(text);
+    if (streamingPolisher_) {
+        if (!text.empty()) text = polishText(text);
+        else streamingPolisher_->cancel();
     }
+    setPartialTextAccepting(false);
     if (cfg_.stripTrailingPunctuation) {
         text = stripPunctuation(text);
     }
@@ -363,6 +617,9 @@ void VoiceSession::finalize(std::uint64_t generation)
         log("commit text: " + text);
     }
 
+    // Keep the composition visible until the addon handles COMMIT. Clearing
+    // it in a separate request creates a blank gap and loses the preview if
+    // the commit has not reached the addon yet.
     bool commitClaimed = false;
     {
         std::unique_lock<std::mutex> lock(mutex_);
@@ -379,12 +636,20 @@ void VoiceSession::finalize(std::uint64_t generation)
 
     if (commitClaimed) {
         try {
-            const auto [ok, detail] = committer_.commitText(text);
+            const auto [ok, detail] = committer_.commitText(text, generation);
             if (!ok) {
                 log("voice commit failed: " + detail);
+                committer_.cancelVoiceSession(generation);
             }
         } catch (const std::exception& e) {
             log(std::string("voice commit failed: ") + e.what());
+            try { committer_.cancelVoiceSession(generation); } catch (...) {}
+        }
+    } else {
+        try {
+            committer_.cancelVoiceSession(generation);
+        } catch (const std::exception& e) {
+            log(std::string("voice session cleanup failed: ") + e.what());
         }
     }
 
@@ -415,23 +680,11 @@ void VoiceSession::finalize(std::uint64_t generation)
 
 std::string VoiceSession::polishText(const std::string& text)
 {
-    const auto aborted = [this] {
+    {
         std::lock_guard<std::mutex> lock(mutex_);
-        return cancelRequested_ || shuttingDown_;
-    };
-    if (aborted()) {
-        return text;
+        if (cancelRequested_ || shuttingDown_) return text;
     }
-    try {
-        std::string polished = polisher_->polish(text, aborted);
-        if (!polished.empty()) {
-            return polished;
-        }
-        log("text polish returned empty text; committing raw transcript");
-    } catch (const std::exception& e) {
-        log(std::string("text polish failed; committing raw transcript: ") + e.what());
-    }
-    return text;
+    return streamingPolisher_->finish(text);
 }
 
 void VoiceSession::joinCompletedWorker()
@@ -448,7 +701,7 @@ void VoiceSession::joinCompletedWorker()
     }
 }
 
-void VoiceSession::setPartialTextAccepting(bool accepting)
+void VoiceSession::setPartialTextAccepting(bool accepting, bool keepPreedit)
 {
     if (!partialCallbackState_) {
         return;
@@ -457,6 +710,9 @@ void VoiceSession::setPartialTextAccepting(bool accepting)
     const auto state = partialCallbackState_;
     std::unique_lock<std::mutex> lock(state->mutex);
     state->accepting = accepting;
+    state->preeditAccepting = accepting || keepPreedit;
+    if (!accepting && !keepPreedit) state->polishSession = 0;
+    state->condition.notify_all();
     if (!accepting) {
         state->condition.wait(lock, [state] { return state->active == 0; });
     }
@@ -472,7 +728,10 @@ void VoiceSession::shutdownPartialTextCallback()
     {
         std::lock_guard<std::mutex> lock(state->mutex);
         state->accepting = false;
+        state->preeditAccepting = false;
+        state->polishSession = 0;
     }
+    state->condition.notify_all();
     livePipeline_->setPartialTextCallback({});
     {
         std::unique_lock<std::mutex> lock(state->mutex);
@@ -485,6 +744,7 @@ std::string VoiceSession::cancelActiveSession()
 {
     bool cancelRecording = false;
     bool publishCancellation = false;
+    std::uint64_t cancellationGeneration = 0;
     std::string result = "CANCELLED";
     SessionState notification = SessionState::Idle;
     std::uint64_t notificationVersion = 0;
@@ -493,6 +753,7 @@ std::string VoiceSession::cancelActiveSession()
         std::lock_guard<std::mutex> lock(mutex_);
         if (state_ == SessionState::Recording) {
             cancelRecording = true;
+            cancellationGeneration = runningGeneration_;
             notificationVersion = setStateLocked(SessionState::Idle);
             runningGeneration_ = 0;
             cancelRequested_ = false;
@@ -502,6 +763,7 @@ std::string VoiceSession::cancelActiveSession()
             // in-flight phase honestly; cancellation can no longer suppress it.
             result = "TRANSCRIBING";
         } else if (state_ == SessionState::Transcribing || state_ == SessionState::Cancelling) {
+            cancellationGeneration = runningGeneration_;
             cancelRequested_ = true;
             notification = SessionState::Cancelling;
             notificationVersion = setStateLocked(SessionState::Cancelling);
@@ -513,11 +775,24 @@ std::string VoiceSession::cancelActiveSession()
         }
     }
 
-    if (cancelRecording) {
+    if (cancelRecording || publishCancellation) {
+        setAudioLevelAccepting(false);
+        if (streamingPolisher_) streamingPolisher_->cancel();
         // No phase after Recording may overtake an already-admitted partial.
         // This wait uses only the callback-state mutex and releases it while
         // the external notifier completes.
         setPartialTextAccepting(false);
+    }
+
+    if ((cancelRecording || publishCancellation) && cancellationGeneration != 0) {
+        try {
+            const auto [ok, detail] = committer_.cancelVoiceSession(cancellationGeneration);
+            if (!ok && detail != "preedit unsupported") {
+                log("voice session cancel failed: " + detail);
+            }
+        } catch (const std::exception& e) {
+            log(std::string("voice session cancel failed: ") + e.what());
+        }
     }
 
     if (publishCancellation) {

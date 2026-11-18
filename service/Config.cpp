@@ -92,7 +92,7 @@ Config Config::defaultConfig()
     std::string h = home ? home : "/tmp";
 
     Config c;
-    c.recordingsDir = h + "/.local/share/echoflow/recordings";
+    c.recordingsDir = h + "/.local/share/deepin-echoflow/recordings";
     return c;
 }
 
@@ -149,17 +149,17 @@ fs::path runtimeDir()
 
 fs::path controlSocketPath(const Config&)
 {
-    return runtimeDir() / "echoflow-control.sock";
+    return runtimeDir() / "deepin-echoflow-control.sock";
 }
 
 fs::path fcitxSocketPath(const Config&)
 {
-    return runtimeDir() / "echoflow-fcitx.sock";
+    return runtimeDir() / "deepin-echoflow-fcitx.sock";
 }
 
 fs::path uiSocketPath(const Config&)
 {
-    return runtimeDir() / "echoflow-ui.sock";
+    return runtimeDir() / "deepin-echoflow-ui.sock";
 }
 
 std::string stripPunctuation(const std::string& text)
@@ -240,6 +240,14 @@ Config loadDtkConf(const fs::path& path)
             cfg.prompt = val;
         } else if (section == "basic.recognition.stream_transcription") {
             cfg.streamTranscription = parseBool(val);
+        } else if (section == "basic.recognition.noise_suppression") {
+            cfg.noiseSuppression = parseBool(val);
+        } else if (section == "basic.recognition.stream_step_ms") {
+            size_t parsed = 0;
+            cfg.streamStepMs = std::stoi(val, &parsed);
+            if (parsed != val.size()) {
+                throw std::invalid_argument("invalid stream step: " + val);
+            }
         } else if (section == "basic.recognition.strip_trailing_punctuation") {
             cfg.stripTrailingPunctuation = parseBool(val);
         } else if (section == "basic.polish.enabled") {
@@ -260,8 +268,6 @@ Config loadDtkConf(const fs::path& path)
             cfg.asrTimeoutSeconds = std::stoi(val);
         } else if (section == "advanced.runtime.openblas_threads") {
             cfg.openBlasThreads = std::max(1, std::stoi(val));
-        } else if (section == "advanced.fcitx.fcitx_commit") {
-            cfg.fcitxCommit = parseBool(val);
         } else if (section == "advanced.storage.recordings_dir") {
             cfg.recordingsDir = val;
         } else if (section == "advanced.storage.log_transcripts") {
@@ -289,6 +295,10 @@ Config loadDtkConf(const fs::path& path)
         } else if (section == "advanced.vad.min_silence_ms") {
             cfg.vadMinSilenceMs = std::stoi(val);
         }
+    }
+
+    if (cfg.streamStepMs < 100 || cfg.streamStepMs > 4000) {
+        throw std::invalid_argument("stream step must be between 100 and 4000 ms");
     }
 
     if (cfg.vadBackend != "energy" && cfg.vadBackend != "silero") {

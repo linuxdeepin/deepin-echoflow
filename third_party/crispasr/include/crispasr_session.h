@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Hualet Wang
+// SPDX-License-Identifier: MIT
+
 // crispasr_session.h — forward declarations for the session C ABI.
 //
 // AUTO-GENERATED from CA_EXPORT definitions in src/crispasr_c_api.cpp.
@@ -207,7 +210,22 @@ CRISPASR_SESSION_API int crispasr_stream_feed(crispasr_stream* s, const float* p
 CRISPASR_SESSION_API int crispasr_stream_get_text(crispasr_stream* s, char* out_text, int out_cap, double* out_t0_s,
                                                   double* out_t1_s, int64_t* out_counter);
 CRISPASR_SESSION_API int crispasr_stream_flush(crispasr_stream* s);
+// Qwen: disable intermediate decoding while retaining PCM; re-enabling
+// coalesces deferred audio at the next update, and flush always decodes the
+// complete tail. May toggle between feeds on the stream's owning thread.
+// Voxtral4b also supports this toggle; other backends leave it unchanged.
 CRISPASR_SESSION_API void crispasr_stream_set_live_decode(crispasr_stream* s, int enabled);
+// Qwen opt-in: revise all transcript text within this stream rather than
+// conditioning on early transcript guesses. Flush decodes the complete audio
+// once even at an exact update boundary. Configure before the first feed;
+// the default prefix recipe and unsupported backends are unchanged.
+CRISPASR_SESSION_API void crispasr_stream_set_full_segment_decode(crispasr_stream* s, int enabled);
+// Qwen full-segment mode only: decode buffered audio without finalizing the
+// stream. Feeding may continue afterwards. Returns -1 if unsupported/finalized.
+CRISPASR_SESSION_API int crispasr_stream_refresh(crispasr_stream* s);
+// Qwen: completed decode calls, including unchanged/empty output; -1 for NULL
+// or an unsupported backend. Query only on the stream's owning thread.
+CRISPASR_SESSION_API int64_t crispasr_stream_inference_count(crispasr_stream* s);
 CRISPASR_SESSION_API parakeet_context* crispasr_parakeet_init(const char* model_path, int n_threads, int use_flash);
 CRISPASR_SESSION_API void crispasr_parakeet_free(parakeet_context* ctx);
 CRISPASR_SESSION_API parakeet_result* crispasr_parakeet_transcribe(parakeet_context* ctx, const float* pcm,
@@ -712,6 +730,12 @@ CRISPASR_SESSION_API void crispasr_session_translate_text_free(char* text);
 // model caches, 3 text-prefix streaming. Model session must outlive its stream;
 // only one active stream/inference call per model session is supported.
 CRISPASR_SESSION_API int crispasr_session_stream_kind(crispasr_session* s);
+// Qwen text-prefix streaming: step_ms is an audio-time decode interval in
+// [100, 4000] ms; 0 preserves recipe defaults (stock: 2000 ms, R2T2: 160 ms).
+// R2T2 adds 160 ms of lookahead to the first interval. Invalid steps return
+// NULL. length_ms/keep_ms apply to rolling windows, not Qwen's cumulative audio.
+// A positive session max_new_tokens is snapshotted at open and bounds every
+// Qwen decode, including flush. R2T2 retains any smaller adaptive token budget.
 CRISPASR_SESSION_API crispasr_stream* crispasr_session_stream_open(crispasr_session* s, int n_threads, int step_ms,
                                                                    int length_ms, int keep_ms, const char* language,
                                                                    int translate);

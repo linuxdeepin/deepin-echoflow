@@ -9,7 +9,8 @@ import unittest
 from pathlib import Path
 
 from scripts import release_evidence
-from tests.test_performance_gate import IDENTITY, result
+from scripts.performance_gate import LIVE_BENCHMARK_SOURCE, compare_release_results
+from tests.test_performance_gate import IDENTITY, result, with_live
 
 
 class ReleaseEvidenceTest(unittest.TestCase):
@@ -101,6 +102,34 @@ class ReleaseEvidenceTest(unittest.TestCase):
     def test_valid_release_commit_passes(self):
         commit = self.make_release(evidence=self.evidence())
         release_evidence.verify_release(self.repo, commit)
+
+    def add_live_benchmark(self):
+        source = self.repo / LIVE_BENCHMARK_SOURCE
+        source.parent.mkdir(parents=True)
+        source.write_text("benchmark\n", encoding="utf-8")
+        changelog = self.repo / "debian/changelog"
+        changelog.write_text("deepin-" + changelog.read_text(encoding="utf-8"), encoding="utf-8")
+        self.git("add", ".")
+        self.git("commit", "-q", "-m", "add live benchmark")
+        self.candidate = self.git("rev-parse", "HEAD").strip()
+
+    def test_live_release_accepts_legacy_baseline(self):
+        self.add_live_benchmark()
+        evidence = self.evidence()
+        evidence["schema_version"] = 2
+        evidence["baseline"]["identity"]["benchmark_schema"] = 2
+        evidence["candidate"]["identity"]["benchmark_schema"] = 2
+        evidence["candidate"]["result"] = with_live()
+        evidence["comparison"] = compare_release_results(
+            evidence["baseline"]["result"], evidence["candidate"]["result"], live_candidate=True)
+        commit = self.make_release(evidence=evidence)
+        release_evidence.verify_release(self.repo, commit)
+
+    def test_live_release_rejects_legacy_evidence(self):
+        self.add_live_benchmark()
+        commit = self.make_release(evidence=self.evidence())
+        with self.assertRaisesRegex(ValueError, "unsupported performance evidence schema"):
+            release_evidence.verify_release(self.repo, commit)
 
     def test_uses_latest_release_tag_when_changelog_skipped_versions(self):
         self.git("tag", "v0.2.2", self.candidate)

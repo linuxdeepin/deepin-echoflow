@@ -31,6 +31,13 @@ QString CapsuleController::phaseName(Phase phase) {
 CapsuleController::CapsuleController(SendCommand sendCommand, QObject *parent)
     : QObject(parent)
     , sendCommand_(std::move(sendCommand)) {
+    recordingClockTimer_.setInterval(1000);
+    recordingClockTimer_.setTimerType(Qt::PreciseTimer);
+    connect(&recordingClockTimer_, &QTimer::timeout,
+            this, &CapsuleController::recordingDurationChanged);
+    audioLevelTimer_.setSingleShot(true);
+    audioLevelTimer_.setInterval(kAudioLevelTimeoutMs);
+    connect(&audioLevelTimer_, &QTimer::timeout, this, [this] { setAudioLevel(0); });
     clock_.start();
     hintTimer_.setSingleShot(true);
     hintTimer_.setInterval(kDefaultHintTimeoutMs);
@@ -73,6 +80,8 @@ void CapsuleController::setPersistent(bool persistent) {
     }
 
     phase_ = Phase::Cancelling;
+    stopRecordingClock();
+    resetAudioLevel();
     message_ = tr("Cancelling");
     publish();
     sendCommand_("CANCEL");
@@ -97,32 +106,53 @@ bool CapsuleController::applyServiceMessage(QString message) {
         return applyFocusMessage(verb, separator < 0 ? QString() : message.sliced(separator + 1));
     }
 
+    if (verb == QStringLiteral("AUDIO_LEVEL")) {
+        if (phase_ != Phase::Recording || separator < 0) return false;
+        const auto values = message.sliced(separator + 1).split(QLatin1Char(' '), Qt::SkipEmptyParts);
+        // Older senders supply one level; new senders supply that level and
+        // amplitudes from the same audio window. Validate atomically.
+        if (values.size() != 1 && values.size() != 6 && values.size() != 8) return false;
+        QList<double> levels;
+        for (const auto& value : values) {
+            bool ok = false;
+            const auto level = value.toUInt(&ok);
+            if (!ok || level > 1000) return false;
+            levels.append(level / 1000.0);
+        }
+        QVariantList waveform;
+        if (levels.size() > 1) {
+            for (qsizetype i = 1; i < levels.size(); ++i) waveform.append(levels[i]);
+        }
+        setAudioLevel(levels.front(), waveform);
+        audioLevelTimer_.start();
+        return true;
+    }
+
+    const auto previousPhase = phase_;
     if (message == QStringLiteral("RECORDING")) {
         phase_ = Phase::Recording;
         message_ = tr("Listening");
-        liveText_ = false;
-    } else if (message.startsWith(QStringLiteral("STREAM_TEXT "))) {
-        const QString streamText = message.sliced(12);
-        if (phase_ != Phase::Recording || streamText.isEmpty()) {
-            return false;
-        }
-        message_ = streamText;
-        liveText_ = true;
     } else if (message == QStringLiteral("TRANSCRIBING")) {
         phase_ = Phase::Transcribing;
         message_ = tr("Transcribing");
-        liveText_ = false;
     } else if (message == QStringLiteral("CANCELLING")) {
         phase_ = Phase::Cancelling;
         message_ = tr("Cancelling");
-        liveText_ = false;
     } else if (message == QStringLiteral("IDLE")
                || message == QStringLiteral("HIDE_TOOLTIP")) {
         phase_ = Phase::Idle;
         message_.clear();
-        liveText_ = false;
     } else {
         return false;
+    }
+
+    if (phase_ != Phase::Recording || previousPhase != Phase::Recording) resetAudioLevel();
+    if (phase_ == Phase::Recording && previousPhase != Phase::Recording) {
+        recordingClock_.start();
+        recordingClockTimer_.start();
+        emit recordingDurationChanged();
+    } else if (phase_ != Phase::Recording) {
+        stopRecordingClock();
     }
 
     if (phase_ != Phase::Idle) {
@@ -132,6 +162,42 @@ bool CapsuleController::applyServiceMessage(QString message) {
     updateHint();
     publish();
     return true;
+}
+
+void CapsuleController::setAudioLevel(double level, const QVariantList& waveform)
+{
+    // Replace one complete snapshot; never shift amplitudes from older inputs.
+    const auto levels = level <= 0
+        ? QVariantList{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}
+        : (waveform.isEmpty() ? QVariantList{level, level, level, level, level, level, level} : waveform);
+    if (levels != audioLevels_) {
+        audioLevels_ = levels;
+        emit audioLevelsChanged();
+    }
+    if (audioLevel_ != level) {
+        audioLevel_ = level;
+        emit audioLevelChanged();
+    }
+}
+
+QString CapsuleController::recordingDuration() const
+{
+    const auto seconds = recordingClock_.isValid() ? recordingClock_.elapsed() / 1000 : 0;
+    return QStringLiteral("%1:%2").arg(seconds / 60, 2, 10, QLatin1Char('0'))
+        .arg(seconds % 60, 2, 10, QLatin1Char('0'));
+}
+
+void CapsuleController::stopRecordingClock()
+{
+    recordingClockTimer_.stop();
+    recordingClock_.invalidate();
+    emit recordingDurationChanged();
+}
+
+void CapsuleController::resetAudioLevel()
+{
+    audioLevelTimer_.stop();
+    setAudioLevel(0);
 }
 
 bool CapsuleController::applyFocusMessage(const QString &verb, const QString &geometry) {

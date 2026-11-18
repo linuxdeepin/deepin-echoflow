@@ -1,0 +1,41 @@
+{
+  "audio_seconds": 3.255,
+  "cer_normalization": "NFKC, casefold, remove Unicode punctuation and whitespace",
+  "end_silence_ms": 500,
+  "language": "Korean",
+  "model": "qwen3-asr-0.6b-q4_k.gguf",
+  "model_sha256": "f63771c02dfa486d9399d41ab6ab8cd2d8ca24e077cd32130ea1f67f4fd8dade",
+  "noise_suppression": false,
+  "reference": "",
+  "schema_version": 1,
+  "scope": "unpaced_quality_replay_not_latency_ab",
+  "step_ms": 500,
+  "threads": 2,
+  "variants": {
+    "prefix_stream_raw": {
+      "confirmed_segments": 1,
+      "elapsed_ms": 3759.312229,
+      "final_decode_total_ms": 760.721653,
+      "full_segment_correction": false,
+      "inference_calls": 6,
+      "max_segment_ms": 3000,
+      "transcript": "내일 오전에 회의 자료를 보내주세요.",
+      "updates": 5
+    },
+    "stream_raw": {
+      "confirmed_segments": 1,
+      "elapsed_ms": 4968.048093,
+      "final_decode_total_ms": 951.467309,
+      "full_segment_correction": true,
+      "inference_calls": 7,
+      "max_segment_ms": 8000,
+      "transcript": "내일 오전에 회의 자료를 보내주세요.",
+      "updates": 5
+    },
+    "whole_raw": {
+      "elapsed_ms": 1273.42852,
+      "transcript": "내일 오전에 회의 자료를 보내주세요."
+    }
+  },
+  "wav_sha256": "9e6438f0a18a1d723653a93fe04f588e702866e8a573ce2bbf43033012ee90da"
+}

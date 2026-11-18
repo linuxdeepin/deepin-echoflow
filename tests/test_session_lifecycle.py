@@ -26,7 +26,7 @@ def running(pid):
 
 class SessionLifecycleTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="echoflow-session-test-")
+        self.temp = tempfile.TemporaryDirectory(prefix="deepin-echoflow-session-test-")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.bindir = self.root / "prefix with spaces" / "bin"
@@ -39,7 +39,7 @@ class SessionLifecycleTests(unittest.TestCase):
         fake_bin.mkdir()
         self.write_executable(fake_bin / "systemctl", "#!/bin/sh\nexit 0\n")
         self.env = dict(os.environ, PATH=f"{fake_bin}:/usr/bin:/bin", UI_PIDS=str(self.marker))
-        self.write_executable(self.bindir / "echoflow-ui", f"""#!{sys.executable}
+        self.write_executable(self.bindir / "deepin-echoflow-ui", f"""#!{sys.executable}
 import os
 import time
 with open(os.environ['UI_PIDS'], 'a') as marker:
@@ -84,18 +84,18 @@ time.sleep(60)
                 process.wait(timeout=3)
 
     def stop(self):
-        result = subprocess.run([str(ROOT / "scripts/echoflow-session-stop"), str(self.bindir)],
+        result = subprocess.run([str(ROOT / "scripts/deepin-echoflow-session-stop"), str(self.bindir)],
                                 capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_stops_launcher_and_ui_preserving_other_installation(self):
-        shutil.copy(ROOT / "scripts/echoflow-session-start", self.bindir)
+        shutil.copy(ROOT / "scripts/deepin-echoflow-session-start", self.bindir)
         other = self.root / "other-installation"
         other.mkdir()
-        shutil.copy(self.bindir / "echoflow-ui", other)
-        unrelated = self.spawn([str(other / "echoflow-ui")])
+        shutil.copy(self.bindir / "deepin-echoflow-ui", other)
+        unrelated = self.spawn([str(other / "deepin-echoflow-ui")])
         self.wait_ui()
-        launcher = self.spawn([str(self.bindir / "echoflow-session-start")])
+        launcher = self.spawn([str(self.bindir / "deepin-echoflow-session-start")])
         ui_pid = self.wait_ui(2)
         self.stop()
         self.assertEqual(launcher.wait(timeout=3), 0)
@@ -103,9 +103,9 @@ time.sleep(60)
         self.assertIsNone(unrelated.poll())
 
     def test_stops_legacy_supervisor_without_respawning_ui(self):
-        launcher_path = self.bindir / "echoflow-session-start"
+        launcher_path = self.bindir / "deepin-echoflow-session-start"
         self.write_executable(launcher_path, '#!/bin/sh\nwhile :; do\n'
-                              '  "$(dirname "$0")/echoflow-ui"\n  sleep 0.05\ndone\n')
+                              '  "$(dirname "$0")/deepin-echoflow-ui"\n  sleep 0.05\ndone\n')
         launcher = self.spawn([str(launcher_path)])
         ui_pid = self.wait_ui()
         self.stop()
@@ -114,18 +114,32 @@ time.sleep(60)
         time.sleep(0.15)
         self.assertEqual(len(self.marker.read_text().splitlines()), 1)
 
+    def test_upgrade_stops_old_named_launcher_and_ui(self):
+        legacy_ui = self.bindir / "echoflow-ui"
+        shutil.copy(self.bindir / "deepin-echoflow-ui", legacy_ui)
+        legacy_launcher = self.bindir / "echoflow-session-start"
+        self.write_executable(legacy_launcher, '#!/bin/sh\nwhile :; do\n'
+                              '  "$(dirname "$0")/echoflow-ui"\n  sleep 0.05\ndone\n')
+        process = self.spawn([str(legacy_launcher)])
+        ui_pid = self.wait_ui()
+        self.stop()
+        process.wait(timeout=3)
+        self.assertFalse(running(ui_pid))
+        time.sleep(0.15)
+        self.assertEqual(len(self.marker.read_text().splitlines()), 1)
+
     def test_stops_launcher_through_symlinked_prefix(self):
-        shutil.copy(ROOT / "scripts/echoflow-session-start", self.bindir)
+        shutil.copy(ROOT / "scripts/deepin-echoflow-session-start", self.bindir)
         alias = self.root / "linked-prefix"
         alias.symlink_to(self.bindir.parent, target_is_directory=True)
-        launcher = self.spawn([str(alias / "bin/echoflow-session-start")])
+        launcher = self.spawn([str(alias / "bin/deepin-echoflow-session-start")])
         ui_pid = self.wait_ui()
         self.stop()
         self.assertEqual(launcher.wait(timeout=3), 0)
         self.assertFalse(running(ui_pid))
 
     def test_stops_replaced_executable(self):
-        binary = self.bindir / "echoflow-ui"
+        binary = self.bindir / "deepin-echoflow-ui"
         binary.unlink()
         shutil.copyfile(shutil.which("sleep"), binary)
         binary.chmod(0o755)
@@ -137,19 +151,19 @@ time.sleep(60)
         process.wait(timeout=3)
 
     def test_clean_ui_exit_stops_launcher(self):
-        shutil.copy(ROOT / "scripts/echoflow-session-start", self.bindir)
-        self.write_executable(self.bindir / "echoflow-ui", "#!/bin/sh\nexit 0\n")
-        launcher = self.spawn([str(self.bindir / "echoflow-session-start")])
+        shutil.copy(ROOT / "scripts/deepin-echoflow-session-start", self.bindir)
+        self.write_executable(self.bindir / "deepin-echoflow-ui", "#!/bin/sh\nexit 0\n")
+        launcher = self.spawn([str(self.bindir / "deepin-echoflow-session-start")])
         self.assertEqual(launcher.wait(timeout=5), 0)
 
     def test_crashed_ui_restarts_and_can_be_stopped(self):
-        shutil.copy(ROOT / "scripts/echoflow-session-start", self.bindir)
-        ui = self.bindir / "echoflow-ui"
+        shutil.copy(ROOT / "scripts/deepin-echoflow-session-start", self.bindir)
+        ui = self.bindir / "deepin-echoflow-ui"
         ui.write_text(ui.read_text().replace("time.sleep(60)",
             "if not os.path.exists(os.environ['UI_PIDS'] + '.crashed'):\n"
             "    open(os.environ['UI_PIDS'] + '.crashed', 'w').close()\n"
             "    raise SystemExit(1)\ntime.sleep(60)"))
-        launcher = self.spawn([str(self.bindir / "echoflow-session-start")])
+        launcher = self.spawn([str(self.bindir / "deepin-echoflow-session-start")])
         ui_pid = self.wait_ui(2)
         self.stop()
         self.assertEqual(launcher.wait(timeout=3), 0)

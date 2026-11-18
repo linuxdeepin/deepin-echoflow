@@ -1,6 +1,6 @@
 <!DOCTYPE RCC>
 <RCC version="1.0">
   <qresource prefix="/icons">
-    <file alias="echoflow.svg">icons/echoflow.svg</file>
+    <file alias="deepin-echoflow.svg">icons/deepin-echoflow.svg</file>
   </qresource>
 </RCC>

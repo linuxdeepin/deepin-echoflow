@@ -15,8 +15,8 @@ enum class CommandChannel { Control, Wakeup, Ui };
 
 inline bool sendAddonCommand(const std::string &runtimeDir, CommandChannel channel,
                              std::string_view command) {
-    const char *name = channel == CommandChannel::Wakeup ? "echoflow-wakeup.sock"
-        : channel == CommandChannel::Ui ? "echoflow-ui.sock" : "echoflow-control.sock";
+    const char *name = channel == CommandChannel::Wakeup ? "deepin-echoflow-wakeup.sock"
+        : channel == CommandChannel::Ui ? "deepin-echoflow-ui.sock" : "deepin-echoflow-control.sock";
     const std::string path = runtimeDir + "/" + name;
     sockaddr_un server {};
     if (path.size() >= sizeof(server.sun_path)) {

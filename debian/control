@@ -1,8 +1,9 @@
-Source: echoflow
+Source: deepin-echoflow
 Section: utils
 Priority: optional
 Maintainer: Hualet Wang <hualet@deepin.org>
 Build-Depends: cmake (>= 3.16),
+               pkg-config,
                debhelper-compat (= 13),
                qt6-base-dev,
                qt6-base-dev-tools,
@@ -15,15 +16,19 @@ Build-Depends: cmake (>= 3.16),
                desktop-file-utils,
                libfcitx5core-dev,
                libxcb1-dev,
+               libsamplerate0-dev,
                libopenblas-dev
 Standards-Version: 4.6.2
-Homepage: https://github.com/hualet/echoflow
+Homepage: https://github.com/hualet/deepin-echoflow
 
-Package: echoflow
+Package: deepin-echoflow
 Architecture: any
+Conflicts: echoflow
+Replaces: echoflow
+Provides: echoflow
 Depends: ${shlibs:Depends}, ${misc:Depends}, fcitx5, pipewire-bin
 Description: Offline voice input method for Fcitx5
- EchoFlow is an offline voice input method for deepin and Fcitx5.
+ deepin-echoflow is an offline voice input method for deepin and Fcitx5.
  It ships a native daemon, Fcitx5 addon, Qt/DTK settings UI, and
  qwen-asr runtime integration. Model weights are downloaded from the
  settings UI after installation and are not included in this package.

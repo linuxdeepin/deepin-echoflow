@@ -49,6 +49,7 @@ public:
 public slots:
     void start();
     void retryFailed();
+    void finishAndRestartFcitx();
 
 signals:
     void itemStateChanged(SetupItem item, SetupItemState state,
@@ -57,6 +58,7 @@ signals:
     void runningChanged(bool running);
     void aggregateErrorChanged(const QString &error);
     void setupComplete();
+    void readyToOpenSettings();
     void setupFailed(const QString &error);
 
 private:
@@ -80,6 +82,7 @@ private:
     qint64 progressDone_ = 0;
     qint64 progressTotal_ = 0;
     bool complete_ = false;
+    bool finishRequested_ = false;
     bool started_ = false;
     bool startRequested_ = false;
     bool serviceStartAfterModel_ = false;

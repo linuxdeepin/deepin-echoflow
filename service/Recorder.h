@@ -8,6 +8,9 @@
 #include "Interfaces.h"
 
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 #include <filesystem>
 #include <string>
 #include <sys/types.h>
@@ -22,10 +25,20 @@ std::vector<std::string> buildPipeWireLiveRecordArgs(const Config& cfg);
 class PipeWireRecorder : public IRecorder {
 public:
     explicit PipeWireRecorder(Config cfg);
+    ~PipeWireRecorder() override;
     void start() override;
     std::filesystem::path stop() override;
+    void setAudioLevelCallback(std::function<void(const AudioLevelFrame&)> callback) override;
 
 private:
+    void monitorLevels(std::filesystem::path path);
+    void stopLevelMonitor();
+
+    std::thread levelThread_;
+    std::mutex levelMutex_;
+    std::condition_variable levelCondition_;
+    bool levelStopped_ = true;
+    std::function<void(const AudioLevelFrame&)> audioLevelCallback_;
     Config cfg_;
     pid_t child_ = -1;
     std::filesystem::path path_;

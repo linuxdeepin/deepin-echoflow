@@ -4,7 +4,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/echoflow-ui-install-spec.XXXXXX")"
+TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/deepin-echoflow-ui-install-spec.XXXXXX")"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 for command_name in cmake desktop-file-validate; do
@@ -22,8 +22,8 @@ CUSTOM_PREFIX="/opt/Echo Flow"
 cmake -S "$ROOT/ui-host" -B "$NATIVE_BUILD" \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
   -DCMAKE_INSTALL_PREFIX=/usr >/dev/null
-grep -qFx 'Exec="/usr/bin/echoflow-ui" --activate' \
-  "$NATIVE_BUILD/echoflow.desktop" || {
+grep -qFx 'Exec="/usr/bin/deepin-echoflow-ui" --activate' \
+  "$NATIVE_BUILD/deepin-echoflow.desktop" || {
     echo "FAIL - native desktop Exec is not /usr/bin" >&2
     exit 1
   }
@@ -34,14 +34,14 @@ cmake -S "$ROOT/ui-host" -B "$CUSTOM_BUILD" \
 cmake --build "$CUSTOM_BUILD" -j2 >/dev/null
 DESTDIR="$DESTDIR_ROOT" cmake --install "$CUSTOM_BUILD" >/dev/null
 
-INSTALLED_DESKTOP="$DESTDIR_ROOT$CUSTOM_PREFIX/share/applications/echoflow.desktop"
-INSTALLED_ICON="$DESTDIR_ROOT$CUSTOM_PREFIX/share/icons/hicolor/scalable/apps/echoflow.svg"
-INSTALLED_BINARY="$DESTDIR_ROOT$CUSTOM_PREFIX/bin/echoflow-ui"
+INSTALLED_DESKTOP="$DESTDIR_ROOT$CUSTOM_PREFIX/share/applications/deepin-echoflow.desktop"
+INSTALLED_ICON="$DESTDIR_ROOT$CUSTOM_PREFIX/share/icons/hicolor/scalable/apps/deepin-echoflow.svg"
+INSTALLED_BINARY="$DESTDIR_ROOT$CUSTOM_PREFIX/bin/deepin-echoflow-ui"
 
 [[ -x "$INSTALLED_BINARY" ]] || { echo "FAIL - standalone UI binary not installed" >&2; exit 1; }
 [[ -f "$INSTALLED_DESKTOP" ]] || { echo "FAIL - desktop entry not installed" >&2; exit 1; }
 [[ -f "$INSTALLED_ICON" ]] || { echo "FAIL - icon not installed" >&2; exit 1; }
-grep -qFx 'Exec="/opt/Echo Flow/bin/echoflow-ui" --activate' "$INSTALLED_DESKTOP" || {
+grep -qFx 'Exec="/opt/Echo Flow/bin/deepin-echoflow-ui" --activate' "$INSTALLED_DESKTOP" || {
   echo "FAIL - custom-prefix desktop Exec is incorrect" >&2
   exit 1
 }

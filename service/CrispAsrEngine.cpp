@@ -4,6 +4,7 @@
 #include "CrispAsrEngine.h"
 
 #include "CrispSession.h"
+#include "StreamingDenoiser.h"
 #include "log.h"
 
 #include <algorithm>
@@ -66,6 +67,8 @@ CrispAsrEngine::CrispAsrEngine(Config cfg)
                                               cfg_.crispThreads);
     if (session_->isLoaded()) {
         auto lang = languageCode(cfg_.language.value_or(""));
+        log("file ASR configuration: language=" + lang + ", threads=" + std::to_string(cfg_.crispThreads)
+            + ", noise_suppression=" + (cfg_.noiseSuppression ? "rnnoise" : "off"));
         if (!lang.empty()) {
             session_->setLanguage(lang);
         }
@@ -90,6 +93,15 @@ std::string CrispAsrEngine::transcribe(const std::filesystem::path& audio)
         return {};
     }
 
+    if (cfg_.noiseSuppression) {
+        StreamingDenoiser denoiser;
+        auto cleaned = denoiser.append(pcm.data(), pcm.size());
+        const auto tail = denoiser.finish();
+        cleaned.insert(cleaned.end(), tail.begin(), tail.end());
+        log("file denoise: samples=" + std::to_string(denoiser.inputSamples())
+            + ", processing_ms=" + std::to_string(denoiser.processingMs()));
+        pcm = std::move(cleaned);
+    }
     std::string text = session_->transcribe(pcm.data(), static_cast<int>(pcm.size()));
     return text;
 }

@@ -12,13 +12,13 @@
 #include <QRect>
 #include <QString>
 #include <QTimer>
+#include <QVariantList>
 
 class CapsuleController final : public QObject {
     Q_OBJECT
-    // True while the capsule shows streamed partial text rather than a
-    // localized placeholder, so the QML can lay out without comparing
-    // translated strings.
-    Q_PROPERTY(bool hasLiveText READ hasLiveText NOTIFY capsuleChanged)
+    Q_PROPERTY(double audioLevel READ audioLevel NOTIFY audioLevelChanged)
+    Q_PROPERTY(QVariantList audioLevels READ audioLevels NOTIFY audioLevelsChanged)
+    Q_PROPERTY(QString recordingDuration READ recordingDuration NOTIFY recordingDurationChanged)
 
 public:
     using SendCommand = std::function<bool(std::string_view)>;
@@ -29,6 +29,7 @@ public:
     static constexpr int kHintHeight = 28;
     static constexpr int kCaretGap = 6;
     static constexpr int kDefaultHintTimeoutMs = 3000;
+    static constexpr int kAudioLevelTimeoutMs = 250;
     static constexpr int kHintSettleMs = 30;
     // A focus report this close to a left press is taken as caused by it.
     static constexpr int kClickFocusWindowMs = 400;
@@ -43,7 +44,9 @@ public:
 
     bool persistent() const;
     bool idle() const;
-    bool hasLiveText() const { return phase_ == Phase::Recording && liveText_; }
+    double audioLevel() const { return audioLevel_; }
+    QVariantList audioLevels() const { return audioLevels_; }
+    QString recordingDuration() const;
     void setHintTimeout(int milliseconds);
 
 public slots:
@@ -57,6 +60,9 @@ public slots:
     void requestCancel();
 
 signals:
+    void audioLevelChanged();
+    void audioLevelsChanged();
+    void recordingDurationChanged();
     // (moveX, moveY) is the bottom-center anchor at the lower middle of the
     // primary screen; the capsule never follows the caret.
     void capsuleChanged(bool visible, QString phase, QString message,
@@ -77,6 +83,9 @@ private:
     static QString phaseName(Phase phase);
     static QPoint placeBesideCaret(const QRect &caret, int height);
     bool applyFocusMessage(const QString &verb, const QString &geometry);
+    void setAudioLevel(double level, const QVariantList& waveform = {});
+    void resetAudioLevel();
+    void stopRecordingClock();
     void publish();
     void updateHint();
     void publishHint();
@@ -87,7 +96,11 @@ private:
     SendCommand sendCommand_;
     Phase phase_ = Phase::Idle;
     QString message_;
-    bool liveText_ = false;
+    double audioLevel_ = 0;
+    QVariantList audioLevels_{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    QTimer audioLevelTimer_;
+    QElapsedTimer recordingClock_;
+    QTimer recordingClockTimer_;
     bool persistent_ = false;
 
     bool focused_ = false;

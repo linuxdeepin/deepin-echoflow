@@ -35,6 +35,16 @@ def result(latencies=(100.0, 100.0), *, cer=0.0, transcript="测试", ids=("norm
     return {"identity": copy.deepcopy(IDENTITY), "samples": samples, "aggregate_cer": cer}
 
 
+def with_live(*, preview=(500.0, 500.0, 500.0), stop=(100.0, 100.0, 100.0),
+              cer=0.0, transcript="测试", ids=("normal",)):
+    offline = result(ids=ids)
+    live = result(stop, cer=cer, transcript=transcript, ids=ids)
+    for sample in live["samples"]:
+        sample["first_preview_ms"] = list(preview)
+    offline["live"] = live
+    return offline
+
+
 class PerformanceGateTest(unittest.TestCase):
     def test_reuses_matching_identity(self):
         self.assertTrue(gate.identities_match(IDENTITY, copy.deepcopy(IDENTITY)))
@@ -84,6 +94,36 @@ class PerformanceGateTest(unittest.TestCase):
         candidate["samples"][0]["sha256"] = "f" * 64
         comparison = gate.compare_results(result(), candidate)
         self.assertIn("sample_hash:normal", comparison["failures"])
+
+    def test_first_live_release_establishes_a_baseline(self):
+        comparison = gate.compare_release_results(result(), with_live(), live_candidate=True)
+        self.assertTrue(comparison["passed"])
+        self.assertEqual(comparison["metrics"]["live"]["mode"], "establish_baseline")
+
+    def test_live_release_cannot_skip_required_measurements(self):
+        with self.assertRaisesRegex(ValueError, "missing live replay"):
+            gate.compare_release_results(result(), result(), live_candidate=True)
+        with self.assertRaisesRegex(ValueError, "missing live replay"):
+            gate.compare_release_results(result(), with_live(), live_candidate=True, live_baseline=True)
+
+    def test_live_latency_and_quality_regressions_are_independent_of_offline(self):
+        comparison = gate.compare_release_results(with_live(),
+            with_live(preview=(650.0,) * 3, stop=(130.0,) * 3, cer=0.1),
+            live_candidate=True, live_baseline=True)
+        self.assertIn("live:sample_first_preview:normal", comparison["failures"])
+        self.assertIn("live:aggregate_first_preview", comparison["failures"])
+        self.assertIn("live:sample_latency:normal", comparison["failures"])
+        self.assertIn("live:aggregate_cer", comparison["failures"])
+
+    def test_short_clip_without_preview_is_valid_but_lost_preview_is_not(self):
+        baseline = with_live(ids=("normal", "short"))
+        baseline["live"]["samples"][1]["first_preview_ms"] = [None] * 3
+        candidate = copy.deepcopy(baseline)
+        comparison = gate.compare_release_results(baseline, candidate, live_candidate=True, live_baseline=True)
+        self.assertTrue(comparison["passed"])
+        candidate["live"]["samples"][0]["first_preview_ms"] = [500.0, None, None]
+        comparison = gate.compare_release_results(baseline, candidate, live_candidate=True, live_baseline=True)
+        self.assertIn("live:missing_preview:normal", comparison["failures"])
 
 
 if __name__ == "__main__":

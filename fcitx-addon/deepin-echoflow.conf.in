@@ -1,7 +1,7 @@
 [Addon]
-Name=echoflow
+Name=deepin-echoflow
 Category=Module
-Library=libechoflow
+Library=libdeepin-echoflow
 Type=SharedLibrary
 OnDemand=False
 Configurable=False

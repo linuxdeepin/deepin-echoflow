@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 cmake_minimum_required(VERSION 3.16)
-project(EchoFlow LANGUAGES C CXX)
+project(deepin-echoflow LANGUAGES C CXX)
 
 include(GNUInstallDirs)
 
@@ -49,17 +49,17 @@ set(CRISPASR_WASM OFF CACHE BOOL "" FORCE)
 set(CRISPASR_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(CRISPASR_QWEN3_ONLY ON CACHE BOOL "" FORCE)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-# EchoFlow feeds live PCM (PipeWire) to the ASR engine — it never decodes
+# deepin-echoflow feeds live PCM (PipeWire) to the ASR engine — it never decodes
 # .opus/.ogg files. Disabling opus skips FetchContent for libopus/libogg/
 # opusfile and the miniaudio opus backend (~145 .o).
 set(CRISPASR_OPUS OFF CACHE BOOL "" FORCE)
-# EchoFlow never writes signed WAV files, so skip the C2PA signer and its
+# deepin-echoflow never writes signed WAV files, so skip the C2PA signer and its
 # nested submodule.
 set(CRISPASR_NO_C2PA_NATIVE ON CACHE BOOL "" FORCE)
 
 add_subdirectory(third_party/crispasr EXCLUDE_FROM_ALL)
 
-# EchoFlow only consumes the qwen3 session API. Keep its C API dispatcher and
+# deepin-echoflow only consumes the qwen3 session API. Keep its C API dispatcher and
 # the compatibility implementation that the dispatcher still references;
 # omit file decoding, device I/O, VAD, diarization, alignment, enhancement,
 # chat, and other library surfaces. Adjust the target after CrispASR declares
@@ -99,6 +99,20 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(crispasr-llama-core PRIVATE -ffunction-sections -fdata-sections)
 endif()
 
+# Keep the persistent RNNoise front-end separate from CrispASR's batch wrapper.
+# These are unmodified vendored BSD sources; no model downloads are required.
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(SAMPLERATE REQUIRED IMPORTED_TARGET samplerate)
+add_library(echoflow_rnnoise STATIC
+    third_party/crispasr/src/rnnoise/denoise.c
+    third_party/crispasr/src/rnnoise/rnn.c
+    third_party/crispasr/src/rnnoise/rnn_data.c
+    third_party/crispasr/src/rnnoise/pitch.c
+    third_party/crispasr/src/rnnoise/celt_lpc.c
+    third_party/crispasr/src/rnnoise/kiss_fft.c)
+target_include_directories(echoflow_rnnoise PUBLIC ${CMAKE_SOURCE_DIR}/third_party/crispasr/src/rnnoise)
+target_link_libraries(echoflow_rnnoise PUBLIC m)
+
 add_subdirectory(service)
 add_subdirectory(fcitx-addon)
 add_subdirectory(ui-host)
@@ -109,26 +123,26 @@ endif()
 
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/systemd/user")
 configure_file(
-    "${CMAKE_SOURCE_DIR}/systemd/user/echoflow.service.in"
-    "${CMAKE_BINARY_DIR}/systemd/user/echoflow.service"
+    "${CMAKE_SOURCE_DIR}/systemd/user/deepin-echoflow.service.in"
+    "${CMAKE_BINARY_DIR}/systemd/user/deepin-echoflow.service"
     @ONLY)
 configure_file(
-    "${CMAKE_SOURCE_DIR}/systemd/user/echoflow.socket.in"
-    "${CMAKE_BINARY_DIR}/systemd/user/echoflow.socket"
+    "${CMAKE_SOURCE_DIR}/systemd/user/deepin-echoflow.socket.in"
+    "${CMAKE_BINARY_DIR}/systemd/user/deepin-echoflow.socket"
     @ONLY)
 configure_file(
-    "${CMAKE_SOURCE_DIR}/ui-host/echoflow-autostart.desktop.in"
-    "${CMAKE_BINARY_DIR}/echoflow-autostart.desktop"
+    "${CMAKE_SOURCE_DIR}/ui-host/deepin-echoflow-autostart.desktop.in"
+    "${CMAKE_BINARY_DIR}/deepin-echoflow-autostart.desktop"
     @ONLY)
 install(FILES
-    "${CMAKE_BINARY_DIR}/systemd/user/echoflow.service"
-    "${CMAKE_BINARY_DIR}/systemd/user/echoflow.socket"
+    "${CMAKE_BINARY_DIR}/systemd/user/deepin-echoflow.service"
+    "${CMAKE_BINARY_DIR}/systemd/user/deepin-echoflow.socket"
     DESTINATION "lib/systemd/user")
-install(FILES "${CMAKE_BINARY_DIR}/echoflow-autostart.desktop"
+install(FILES "${CMAKE_BINARY_DIR}/deepin-echoflow-autostart.desktop"
     DESTINATION "${CMAKE_INSTALL_SYSCONFDIR}/xdg/autostart")
-install(FILES "${CMAKE_BINARY_DIR}/echoflow-autostart.desktop"
-    DESTINATION "${CMAKE_INSTALL_DATADIR}/echoflow")
+install(FILES "${CMAKE_BINARY_DIR}/deepin-echoflow-autostart.desktop"
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/deepin-echoflow")
 install(PROGRAMS
-    "${CMAKE_SOURCE_DIR}/scripts/echoflow-session-start"
-    "${CMAKE_SOURCE_DIR}/scripts/echoflow-session-stop"
+    "${CMAKE_SOURCE_DIR}/scripts/deepin-echoflow-session-start"
+    "${CMAKE_SOURCE_DIR}/scripts/deepin-echoflow-session-stop"
     DESTINATION "${CMAKE_INSTALL_BINDIR}")

@@ -2,14 +2,16 @@
 # SPDX-FileCopyrightText: 2026 Hualet Wang
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Model-free verification for EchoFlow release performance evidence."""
+"""Model-free verification for deepin-echoflow release performance evidence."""
 
 import json
 import re
 import subprocess
 from pathlib import Path
 
-from scripts.performance_gate import compare_results, identities_match
+from scripts.performance_gate import (
+    LIVE_BENCHMARK_SCHEMA, LIVE_BENCHMARK_SOURCE, compare_release_results, identities_match,
+)
 
 
 def _git(repo, *args):
@@ -22,7 +24,7 @@ def _git(repo, *args):
 
 
 def _version(changelog):
-    match = re.match(r"^echoflow \((\d+\.\d+\.\d+)\) ", changelog)
+    match = re.match(r"^(?:deepin-)?echoflow \((\d+\.\d+\.\d+)\) ", changelog)
     if not match:
         raise ValueError("cannot parse native Debian version from changelog")
     return match.group(1)
@@ -73,7 +75,9 @@ def verify_release(repo, commit="HEAD", tag=None):
     if changed != allowed:
         raise ValueError("release commit must change changelog and performance evidence only")
 
-    if evidence.get("schema_version") != 1:
+    live_candidate = bool(_git(repo, "ls-tree", parent, "--", LIVE_BENCHMARK_SOURCE).strip())
+    expected_schema = LIVE_BENCHMARK_SCHEMA if live_candidate else 1
+    if evidence.get("schema_version") != expected_schema:
         raise ValueError("unsupported performance evidence schema")
     if evidence.get("status") != "pass":
         raise ValueError("performance evidence status is not pass")
@@ -94,7 +98,11 @@ def verify_release(repo, commit="HEAD", tag=None):
     if not identities_match(baseline.get("identity", {}), candidate.get("identity", {})):
         raise ValueError("baseline and candidate benchmark identity do not match")
 
-    recalculated = compare_results(baseline.get("result", {}), candidate.get("result", {}))
+    if candidate["identity"].get("benchmark_schema") != expected_schema:
+        raise ValueError("benchmark identity has an unexpected schema")
+    live_baseline = bool(_git(repo, "ls-tree", baseline_commit, "--", LIVE_BENCHMARK_SOURCE).strip())
+    recalculated = compare_release_results(baseline.get("result", {}), candidate.get("result", {}),
+                                           live_candidate=live_candidate, live_baseline=live_baseline)
     if evidence.get("comparison") != recalculated:
         raise ValueError("recorded comparison does not match raw benchmark results")
     if not recalculated["passed"]:

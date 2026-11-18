@@ -307,6 +307,8 @@ OnboardingDialog::OnboardingDialog(OnboardingSetupController *controller,
             this, [this] { renderSetup(); });
     connect(controller_, &OnboardingSetupController::setupComplete, this,
             [this] { renderSetup(); });
+    connect(controller_, &OnboardingSetupController::readyToOpenSettings, this,
+            &OnboardingDialog::finishedAndSettingsRequested);
     connect(controller_, &OnboardingSetupController::setupFailed, this,
             [this] { renderSetup(); });
 
@@ -568,7 +570,7 @@ void OnboardingDialog::handlePrimaryAction()
         return;
     }
     if (controller_->isComplete()) {
-        emit finishedAndSettingsRequested();
+        controller_->finishAndRestartFcitx();
         return;
     }
     if (controller_->isRunning()) {

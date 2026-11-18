@@ -90,7 +90,7 @@ bool SingleInstanceGuard::acquire(const fs::path& socketPath, std::string* error
 
     if (socketHasLivePeer(socketPath)) {
         if (error) {
-            *error = "echoflow-service is already running";
+            *error = "deepin-echoflow-service is already running";
         }
         return false;
     }

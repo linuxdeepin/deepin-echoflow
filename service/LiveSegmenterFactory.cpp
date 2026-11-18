@@ -7,6 +7,7 @@
 #include "SileroLiveSegmenter.h"
 #include "SileroVadBackend.h"
 
+#include <algorithm>
 #include <stdexcept>
 #include <utility>
 
@@ -17,12 +18,17 @@ std::unique_ptr<ILiveSegmenter> makeLiveSegmenter(const Config& config)
     if (config.vadBackend == "energy") {
         AudioSegmenterConfig energy;
         energy.sampleRate = config.pwRecord.rate;
+        energy.maxSegmentMs = config.streamStepMs;
+        energy.minSegmentMs = std::min(energy.minSegmentMs, config.streamStepMs);
+        energy.forceOverlapMs = std::min(energy.forceOverlapMs, config.streamStepMs / 4);
         return std::make_unique<AudioSegmenter>(energy);
     }
     if (config.vadBackend == "silero") {
         SileroLiveSegmenterConfig live;
         live.sampleRate = config.pwRecord.rate;
         live.minSpeechMs = config.vadMinSpeechMs;
+        live.maxSegmentMs = config.streamStepMs;
+        live.forceOverlapMs = std::min(live.forceOverlapMs, config.streamStepMs / 4);
         auto backend = std::make_unique<SileroVadBackend>(
             config.vadModelPath, config.vadThreshold, config.vadEndThreshold,
             config.vadMinSpeechMs, config.vadMinSilenceMs);

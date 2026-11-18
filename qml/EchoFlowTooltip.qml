@@ -38,7 +38,6 @@ Window {
     readonly property color capsuleText: typeof theme !== "undefined" ? theme.capsuleText : "#f4f6f8"
     readonly property color accent: typeof theme !== "undefined" ? theme.accent : "#0081ff"
     readonly property color accentText: typeof theme !== "undefined" ? theme.accentText : "white"
-    onAccentChanged: waveCanvas.requestPaint()
     onAccentTextChanged: {
         microphoneCanvas.requestPaint()
         confirmCanvas.requestPaint()
@@ -49,7 +48,6 @@ Window {
     readonly property bool recording: root.phase === "recording"
     readonly property bool transcribing: root.phase === "transcribing"
     readonly property bool cancelling: root.phase === "cancelling"
-    readonly property bool hasLiveText: root.recording && tooltipController.hasLiveText
 
     // (targetX, targetY) is the capsule's bottom-center anchor.
     width: capsule.width
@@ -81,30 +79,19 @@ Window {
         id: capsule
         anchors.centerIn: parent
 
-        readonly property int kHeight: 40
-        readonly property int kButtonSize: 28
+        readonly property int kHeight: 50
+        readonly property int kButtonSize: 30
         readonly property int kRadius: kHeight / 2
         readonly property int kButtonInset: (kHeight - kButtonSize) / 2
-        readonly property int kHPad: 10
-        readonly property int kGap: 8
-        // symbolic waveform geometry. kWaveHeight caps the tallest bar so the
-        // wave stays roughly level with the 13px text and the 12-14px glyphs.
-        readonly property int kWaveBars: 5
-        readonly property int kWaveBarWidth: 3
-        readonly property int kWaveSpacing: 5
-        readonly property int kWaveHeight: 16
-        readonly property int kWaveWidth: kWaveBars * kWaveBarWidth + (kWaveBars - 1) * kWaveSpacing
+        readonly property int kHPad: 12
+        readonly property int kGap: 10
+        readonly property real kWaveWidth: waveArea.implicitWidth
         readonly property real kIdleWidth: kHPad + kWaveWidth + kGap
                                                 + kButtonSize + kHPad
-        readonly property real kNaturalRecordingWidth: kHPad + kButtonSize
-                                                + (root.hasLiveText
-                                                   ? kGap + liveText.implicitWidth : 0)
-                                                + kGap + kWaveWidth
-                                                + kGap + kButtonSize + kHPad
-        readonly property real kMaxRecordingWidth: Screen.width / 3
-        readonly property real kRecordingWidth: Math.min(kNaturalRecordingWidth,
-                                                         kMaxRecordingWidth)
-        readonly property real kStatusWidth: statusLabel.implicitWidth + 2 * kHPad
+        readonly property real kRecordingWidth: 2 * kHPad + 2 * kButtonSize
+                                                + 3 * kGap + kWaveWidth + recordingTimer.width
+        readonly property real kStatusWidth: Math.min(statusLabel.implicitWidth + 2 * kHPad,
+                                                      Screen.width / 3)
 
         height: kHeight
         radius: kRadius
@@ -112,7 +99,7 @@ Window {
         clip: false
 
         // idle: [pad][static wave][gap][microphone][pad]
-        // recording: [pad][X][gap][live text][gap][wave][gap][✓][pad]
+        // recording: [pad][X][gap][wave][gap][timer][gap][✓][pad]
         // transcribing/cancelling: [ centered status text ]
         width: root.idle ? kIdleWidth
                          : root.recording ? kRecordingWidth : kStatusWidth
@@ -261,98 +248,36 @@ Window {
             }
         }
 
-        // ---- idle/recording: symbolic waveform ----
-        // Single Canvas draws all bars in one pass — far cheaper than a
-        // Repeater of Rectangles each with its own height animation, and it
-        // avoids per-bar NumberAnimation nodes competing for render budget.
-        Item {
+        // ---- idle/recording: current microphone waveform ----
+        AudioWaveform {
             id: waveArea
             anchors {
-                right: root.idle ? microphoneButton.left : confirmButton.left
+                right: root.idle ? microphoneButton.left : recordingTimer.left
                 rightMargin: capsule.kGap
                 verticalCenter: parent.verticalCenter
             }
-            width: capsule.kWaveWidth
-            height: capsule.kWaveHeight
+            width: implicitWidth
+            height: implicitHeight
             visible: root.idle || root.recording
-
-            Canvas {
-                id: waveCanvas
-                anchors.fill: parent
-                // symmetric, organic peak profile (center tallest)
-                readonly property var peaks: [0.34, 0.66, 1.0, 0.66, 0.34]
-                onPeaksChanged: requestPaint()
-                onWidthChanged: requestPaint()
-                onHeightChanged: requestPaint()
-                Connections {
-                    target: waveAnim
-                    function onAmplitudesChanged() { waveCanvas.requestPaint() }
-                }
-                Connections {
-                    target: root
-                    function onPhaseChanged() { waveCanvas.requestPaint() }
-                }
-                onPaint: {
-                    var ctx = getContext("2d")
-                    ctx.reset()
-                    ctx.fillStyle = root.accent
-                    var n = capsule.kWaveBars
-                    var barW = capsule.kWaveBarWidth
-                    var gap = capsule.kWaveSpacing
-                    var h = waveArea.height
-                    // Build a rounded-rect path with arcTo (Qt Quick's Context2D
-                    // has no roundedRect), then fill it once per bar.
-                    var r = barW / 2
-                    var roundBar = function(x, y, bw, bh) {
-                        ctx.beginPath()
-                        ctx.moveTo(x + r, y)
-                        ctx.lineTo(x + bw - r, y)
-                        ctx.arcTo(x + bw, y, x + bw, y + r, r)
-                        ctx.lineTo(x + bw, y + bh - r)
-                        ctx.arcTo(x + bw, y + bh, x + bw - r, y + bh, r)
-                        ctx.lineTo(x + r, y + bh)
-                        ctx.arcTo(x, y + bh, x, y + bh - r, r)
-                        ctx.lineTo(x, y + r)
-                        ctx.arcTo(x, y, x + r, y, r)
-                        ctx.closePath()
-                    }
-                    for (var i = 0; i < n; ++i) {
-                        var amp = root.recording && waveAnim.amplitudes.length === n
-                                  ? waveAnim.amplitudes[i] : 0.5
-                        var barH = waveCanvas.peaks[i] * h * (0.45 + 0.55 * amp)
-                        var x = i * (barW + gap)
-                        var y = (h - barH) / 2
-                        roundBar(x, y, barW, barH)
-                        ctx.fill()
-                    }
-                }
-            }
+            active: root.recording
+            levels: tooltipController.audioLevels
+            color: root.accent
         }
 
-        // ---- recording: clipped live ASR text (left of the waveform) ----
-        Item {
-            id: liveTextViewport
+        Label {
+            id: recordingTimer
             anchors {
-                left: root.hasLiveText ? cancelButton.right : waveArea.left
-                leftMargin: root.hasLiveText ? capsule.kGap : 0
-                right: waveArea.left
-                rightMargin: root.hasLiveText ? capsule.kGap : 0
+                right: confirmButton.left
+                rightMargin: capsule.kGap
                 verticalCenter: parent.verticalCenter
             }
-            visible: root.hasLiveText
-            height: liveText.implicitHeight
-            clip: true
-
-            Label {
-                id: liveText
-                anchors.verticalCenter: parent.verticalCenter
-                x: Math.min(0, liveTextViewport.width - implicitWidth)
-                text: root.message
-                color: root.capsuleText
-                font.pixelSize: 13
-                horizontalAlignment: Text.AlignLeft
-                Behavior on x { NumberAnimation { duration: 160 } }
-            }
+            width: Math.max(34, implicitWidth)
+            visible: root.phase === "recording"
+            text: tooltipController.recordingDuration
+            color: root.capsuleText
+            opacity: 0.7
+            font.pixelSize: 12
+            horizontalAlignment: Text.AlignHCenter
         }
 
         // ---- transcribing/cancelling: centered status ----
@@ -360,6 +285,9 @@ Window {
             id: statusLabel
             anchors.centerIn: parent
             visible: root.transcribing || root.cancelling
+            width: parent.width - 2 * capsule.kHPad
+            elide: Text.ElideLeft
+            horizontalAlignment: Text.AlignHCenter
             text: root.message
             color: root.capsuleText
             font.pixelSize: 13
@@ -421,30 +349,4 @@ Window {
         }
     }
 
-    // Drives the symbolic waveform: a small set of smoothly varying amplitudes
-    // (0..1) updated on a short cadence so the bars breathe organically rather
-    // than the old mechanical per-bar scale animation.
-    Timer {
-        id: waveTimer
-        interval: 110
-        repeat: true
-        running: root.visible && root.phase === "recording"
-        onTriggered: {
-            var next = []
-            for (var i = 0; i < capsule.kWaveBars; ++i) {
-                // ease toward a new random target to avoid jittery jumps
-                var target = 0.25 + 0.75 * Math.random()
-                var cur = waveAnim.amplitudes.length === capsule.kWaveBars
-                          ? waveAnim.amplitudes[i] : 0.5
-                next.push(cur + (target - cur) * 0.55)
-            }
-            waveAnim.amplitudes = next
-            waveCanvas.requestPaint()
-        }
-    }
-
-    QtObject {
-        id: waveAnim
-        property var amplitudes: [0.5, 0.5, 0.5, 0.5, 0.5]
-    }
 }

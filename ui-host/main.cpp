@@ -44,6 +44,7 @@
 #include <DPalette>
 
 #include "CapsuleController.h"
+#include "ProjectPaths.h"
 #include "EchoFlowSettings.h"
 #include "LongPressDetector.h"
 #include "ModelDownloadCoordinator.h"
@@ -55,6 +56,7 @@
 #include "SettingsDialog.h"
 #include "SetupCommandRunner.h"
 #include "UiActivationHost.h"
+#include "UiSocketServer.h"
 #include "X11ActiveWindow.h"
 #include "XEventMonitorSource.h"
 
@@ -84,8 +86,8 @@ bool setDtkSingleInstance(const QString &key) {
 }
 
 void logDuplicateInstanceExit() {
-    qInfo("echoflow-ui is already running; exiting duplicate instance");
-    std::fprintf(stderr, "echoflow-ui is already running; exiting duplicate instance\n");
+    qInfo("deepin-echoflow-ui is already running; exiting duplicate instance");
+    std::fprintf(stderr, "deepin-echoflow-ui is already running; exiting duplicate instance\n");
 }
 
 bool isUsableRuntimeDirectory(const std::string &path) {
@@ -108,11 +110,11 @@ std::string runtimeDir() {
 }
 
 std::string defaultUiSocketPath() {
-    return runtimeDir() + "/echoflow-ui.sock";
+    return runtimeDir() + "/deepin-echoflow-ui.sock";
 }
 
 QString defaultUiLockPath() {
-    return QString::fromStdString(runtimeDir() + "/echoflow-ui.instance");
+    return QString::fromStdString(runtimeDir() + "/deepin-echoflow-ui.instance");
 }
 
 QString defaultQmlPath() {
@@ -120,19 +122,19 @@ QString defaultQmlPath() {
 }
 
 std::string defaultControlSocketPath() {
-    return runtimeDir() + "/echoflow-control.sock";
+    return runtimeDir() + "/deepin-echoflow-control.sock";
 }
 
 std::string defaultWakeupSocketPath() {
-    return runtimeDir() + "/echoflow-wakeup.sock";
+    return runtimeDir() + "/deepin-echoflow-wakeup.sock";
 }
 
 QString defaultConfigPath() {
-    return QStandardPaths::writableLocation(QStandardPaths::ConfigLocation) +
-           QStringLiteral("/echoflow/echoflow.conf");
+    return QString::fromStdString(echoflow::projectConfigPath(
+        QStandardPaths::writableLocation(QStandardPaths::ConfigLocation).toStdString()).string());
 }
 
-// Fire-and-forget datagram to the echoflow-service control socket, mirroring the
+// Fire-and-forget datagram to the deepin-echoflow-service control socket, mirroring the
 // fcitx addon's sendControlCommand. A throwaway bound client path is used so the
 // service's reply lands on a path we unlink (-> FileNotFoundError, caught) rather
 // than an abstract autobind address (-> ECONNREFUSED, which would crash the service).
@@ -143,7 +145,7 @@ bool sendControlCommand(const QString &controlPath, std::string_view command) {
     }
 
     static std::atomic<long long> seq{0};
-    const std::string clientPath = runtimeDir() + "/echoflow-ui-ctrl-" +
+    const std::string clientPath = runtimeDir() + "/deepin-echoflow-ui-ctrl-" +
                                    std::to_string(getpid()) + "-" +
                                    std::to_string(seq.fetch_add(1)) + ".sock";
     if (clientPath.size() >= sizeof(sockaddr_un::sun_path)) {
@@ -175,11 +177,11 @@ bool sendControlCommand(const QString &controlPath, std::string_view command) {
 
 void restartServiceAfterSettingsChange() {
     const QString launcher = QDir(QCoreApplication::applicationDirPath())
-        .filePath(QStringLiteral("echoflow-session-start"));
+        .filePath(QStringLiteral("deepin-echoflow-session-start"));
     const bool started = QProcess::startDetached(
         launcher, QStringList{QStringLiteral("--restart-service-if-active")});
     if (!started) {
-        qWarning("failed to restart echoflow.service after settings change");
+        qWarning("failed to restart deepin-echoflow.service after settings change");
     }
 }
 
@@ -230,96 +232,6 @@ private:
     }
 };
 
-class UiSocketServer final : public QObject {
-    Q_OBJECT
-public:
-    UiSocketServer(QString path, CapsuleController *controller, QObject *parent = nullptr)
-        : QObject(parent), path_(std::move(path)), controller_(controller) {}
-
-    ~UiSocketServer() override {
-        notifier_.reset();
-        if (fd_ >= 0) {
-            close(fd_);
-            fd_ = -1;
-        }
-        if (!path_.isEmpty()) {
-            unlink(path_.toLocal8Bit().constData());
-        }
-    }
-
-    bool start(QString *error) {
-        QByteArray socketPath = path_.toLocal8Bit();
-        sockaddr_un addr {};
-        if (socketPath.size() >= static_cast<int>(sizeof(addr.sun_path))) {
-            *error = QStringLiteral("UI socket path is too long: %1").arg(path_);
-            return false;
-        }
-
-        fd_ = socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-        if (fd_ < 0) {
-            *error = QStringLiteral("failed to create UI socket: %1").arg(strerror(errno));
-            return false;
-        }
-
-        addr.sun_family = AF_UNIX;
-        std::strncpy(addr.sun_path, socketPath.constData(), sizeof(addr.sun_path) - 1);
-        unlink(socketPath.constData());
-        if (bind(fd_, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0) {
-            *error = QStringLiteral("failed to bind %1: %2").arg(path_, strerror(errno));
-            close(fd_);
-            fd_ = -1;
-            return false;
-        }
-        chmod(socketPath.constData(), S_IRUSR | S_IWUSR);
-
-        notifier_ = std::make_unique<QSocketNotifier>(fd_, QSocketNotifier::Read, this);
-        connect(notifier_.get(), &QSocketNotifier::activated, this, &UiSocketServer::readPending);
-        return true;
-    }
-
-private slots:
-    void readPending() {
-        while (true) {
-            char buffer[4096] = {};
-            ssize_t len = recv(fd_, buffer, sizeof(buffer) - 1, 0);
-            if (len < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    return;
-                }
-                return;
-            }
-            applyMessage(QString::fromUtf8(buffer, static_cast<qsizetype>(len)).trimmed());
-        }
-    }
-
-private:
-    void applyMessage(const QString &message) {
-        // The capsule now appears only when recording starts, so the legacy
-        // SHOW_TOOLTIP (idle hint on input focus) is intentionally ignored.
-        // Kept here so a still-running older service can't bring back the old
-        // focus-tracking capsule.
-        if (message.startsWith(QStringLiteral("SHOW_TOOLTIP"))) {
-            return;
-        }
-        const qsizetype separator = message.indexOf(QLatin1Char(' '));
-        const QString type = separator < 0 ? message : message.first(separator);
-        const qsizetype payloadCharacters =
-            message.startsWith(QStringLiteral("STREAM_TEXT "))
-                ? message.size() - 12
-                : 0;
-        const bool accepted = controller_->applyServiceMessage(message);
-        qInfo("EchoFlow UI message: type=%s, bytes=%lld, payload_chars=%lld, accepted=%s",
-              qPrintable(type),
-              static_cast<long long>(message.toUtf8().size()),
-              static_cast<long long>(payloadCharacters),
-              accepted ? "true" : "false");
-    }
-
-    QString path_;
-    CapsuleController *controller_ = nullptr;
-    int fd_ = -1;
-    std::unique_ptr<QSocketNotifier> notifier_;
-};
 
 } // namespace
 
@@ -327,16 +239,17 @@ int main(int argc, char **argv) {
     previousMessageHandler = qInstallMessageHandler(echoflowMessageHandler);
 
     Dtk::Widget::DApplication app(argc, argv);
-    app.setApplicationName(QStringLiteral("echoflow-ui"));
-    app.setOrganizationName(QStringLiteral("echoflow"));
+    app.setApplicationName(QStringLiteral("deepin-echoflow-ui"));
+    app.setOrganizationName(QStringLiteral("deepin-echoflow"));
+    app.setApplicationDisplayName(QStringLiteral("EchoFlow"));
     app.setQuitOnLastWindowClosed(false);
     app.loadTranslator();
 
-    const QIcon appIcon(QStringLiteral(":/icons/echoflow.svg"));
+    const QIcon appIcon(QStringLiteral(":/icons/deepin-echoflow.svg"));
     app.setWindowIcon(appIcon);
 
     QCommandLineParser parser;
-    parser.setApplicationDescription(QStringLiteral("EchoFlow QML tooltip host"));
+    parser.setApplicationDescription(QStringLiteral("deepin-echoflow QML tooltip host"));
     parser.addHelpOption();
 
     QCommandLineOption activateOption(
@@ -345,7 +258,7 @@ int main(int argc, char **argv) {
     QCommandLineOption qmlOption(QStringLiteral("qml"), QStringLiteral("QML file path"), QStringLiteral("path"),
                                  defaultQmlPath());
     QCommandLineOption configOption(
-        QStringLiteral("config"), QStringLiteral("Path to echoflow.conf"),
+        QStringLiteral("config"), QStringLiteral("Path to deepin-echoflow.conf"),
         QStringLiteral("path"), defaultConfigPath());
     parser.addOption(activateOption);
     parser.addOption(qmlOption);
@@ -372,14 +285,14 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (activationResult == UiActivationServer::Result::Failed) {
-        qCritical("failed to acquire EchoFlow UI activation endpoint %s: %s",
+        qCritical("failed to acquire deepin-echoflow UI activation endpoint %s: %s",
                   qPrintable(defaultUiLockPath()), qPrintable(activationError));
         return 1;
     }
 
     // UiActivationHost is the authoritative instance endpoint. Keep DTK's
     // guard as a secondary safety check only after this process is primary.
-    if (!setDtkSingleInstance(QStringLiteral("echoflow-ui"))) {
+    if (!setDtkSingleInstance(QStringLiteral("deepin-echoflow-ui"))) {
         logDuplicateInstanceExit();
         return 0;
     }
@@ -488,8 +401,6 @@ int main(int argc, char **argv) {
     applyInteractionSettings();
 
     QMenu trayMenu;
-    QAction *capsuleAction = trayMenu.addAction(QObject::tr("Show recording capsule"));
-    capsuleAction->setCheckable(true);
     QAction *guideAction = trayMenu.addAction(QObject::tr("Usage Guide"));
     QAction *settingsAction = trayMenu.addAction(QObject::tr("Settings"));
     trayMenu.addSeparator();
@@ -523,10 +434,6 @@ int main(int argc, char **argv) {
     bool shuttingDown = false;
     QPointer<echoflow::SettingsDialog> settingsDialog;
     QPointer<OnboardingDialog> onboardingDialog;
-    QObject::connect(capsuleAction, &QAction::toggled,
-                     &controller, &CapsuleController::setPersistent);
-    QObject::connect(&controller, &CapsuleController::persistentChanged,
-                     capsuleAction, &QAction::setChecked);
     auto openSettings = [&]() {
         if (!settingsDialog) {
             settingsDialog = new echoflow::SettingsDialog(

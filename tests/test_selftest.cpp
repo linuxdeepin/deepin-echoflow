@@ -34,7 +34,7 @@ void TestSelfTest::resolveModelDirIsTrivial() {
 void TestSelfTest::runtimeChecksReportsMissingSelectedVadModel() {
     Config c;
     c.vadBackend = "silero";
-    c.vadModelPath = "/tmp/echoflow-no-such-silero-model.bin";
+    c.vadModelPath = "/tmp/deepin-echoflow-no-such-silero-model.bin";
     auto checks = runtimeChecks(c);
     auto it = std::find_if(checks.begin(), checks.end(),
                            [](const RuntimeCheck& r) { return r.name == "silero VAD model available"; });
@@ -96,7 +96,7 @@ void TestSelfTest::canCreateDirectoryOnTmp() {
 
 void TestSelfTest::runtimeChecksReportsMissingCrispModel() {
     Config c;
-    c.crispModelPath = "/tmp/echoflow-no-such-crisp-model.gguf";
+    c.crispModelPath = "/tmp/deepin-echoflow-no-such-crisp-model.gguf";
     auto checks = runtimeChecks(c);
     auto it = std::find_if(checks.begin(), checks.end(),
                            [](const RuntimeCheck& r) { return r.name == "crisp model file available"; });

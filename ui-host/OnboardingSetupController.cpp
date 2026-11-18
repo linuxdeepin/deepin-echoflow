@@ -143,6 +143,16 @@ void OnboardingSetupController::launchPendingSetup()
     checkForCompletion();
 }
 
+void OnboardingSetupController::finishAndRestartFcitx()
+{
+    if (!complete_ || isRunning()) {
+        return;
+    }
+    complete_ = false;
+    finishRequested_ = true;
+    startItem(SetupItem::Fcitx);
+}
+
 void OnboardingSetupController::retryFailed()
 {
     if (isRunning()) {
@@ -194,7 +204,7 @@ void OnboardingSetupController::beginReconstruction()
     runner_->run(QStringLiteral("service-initial-check"),
                  QStringLiteral("systemctl"),
                  {QStringLiteral("--user"), QStringLiteral("is-active"),
-                  QStringLiteral("echoflow.socket")});
+                  QStringLiteral("deepin-echoflow.socket")});
 }
 
 void OnboardingSetupController::startItem(SetupItem item)
@@ -213,10 +223,10 @@ void OnboardingSetupController::startItem(SetupItem item)
         QString source = QStringLiteral(ECHOFLOW_AUTOSTART_DESKTOP_PATH);
         if (source.isEmpty()) {
             source = QDir(QCoreApplication::applicationDirPath())
-                .filePath(QStringLiteral("../share/echoflow/echoflow-autostart.desktop"));
+                .filePath(QStringLiteral("../share/deepin-echoflow/deepin-echoflow-autostart.desktop"));
         }
         const QString destination = QDir::home().filePath(
-            QStringLiteral(".config/autostart/echoflow-autostart.desktop"));
+            QStringLiteral(".config/autostart/deepin-echoflow-autostart.desktop"));
         runner_->run(QStringLiteral("ui-autostart"), QStringLiteral("install"),
                      {QStringLiteral("-D"), source, destination});
         break;
@@ -236,7 +246,7 @@ void OnboardingSetupController::startService(const QString &id)
     setItemState(SetupItem::Service, SetupItemState::Running);
     runner_->run(id,
                  QDir(QCoreApplication::applicationDirPath())
-                     .filePath(QStringLiteral("echoflow-session-start")),
+                     .filePath(QStringLiteral("deepin-echoflow-session-start")),
                  {QStringLiteral("--socket-only")});
 }
 
@@ -296,7 +306,7 @@ void OnboardingSetupController::handleCommandFinished(const QString &id,
             runner_->run(QStringLiteral("service-check"),
                          QStringLiteral("systemctl"),
                          {QStringLiteral("--user"), QStringLiteral("is-active"),
-                          QStringLiteral("echoflow.socket")});
+                          QStringLiteral("deepin-echoflow.socket")});
             return;
         }
     } else if (id == QStringLiteral("service-check")) {
@@ -332,6 +342,10 @@ void OnboardingSetupController::checkForCompletion()
     }
     complete_ = true;
     emit setupComplete();
+    if (finishRequested_) {
+        finishRequested_ = false;
+        emit readyToOpenSettings();
+    }
 }
 
 bool OnboardingSetupController::allItemsSucceeded() const

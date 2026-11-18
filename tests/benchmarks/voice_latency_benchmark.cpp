@@ -74,10 +74,10 @@ std::string jsonEscape(const std::string& value)
 fs::path defaultConfigPath()
 {
     if (const char* configHome = std::getenv("XDG_CONFIG_HOME")) {
-        return fs::path(configHome) / "echoflow" / "echoflow.conf";
+        return fs::path(configHome) / "deepin-echoflow" / "deepin-echoflow.conf";
     }
     const char* home = std::getenv("HOME");
-    return fs::path(home ? home : "/tmp") / ".config" / "echoflow" / "echoflow.conf";
+    return fs::path(home ? home : "/tmp") / ".config" / "deepin-echoflow" / "deepin-echoflow.conf";
 }
 
 echoflow::Config loadConfig(const std::optional<fs::path>& path,
@@ -102,7 +102,7 @@ class TimedRecorder : public echoflow::IRecorder {
 public:
     double startMs = 0.0;
     double stopMs = 0.0;
-    fs::path path = "/tmp/echoflow-synthetic.wav";
+    fs::path path = "/tmp/deepin-echoflow-synthetic.wav";
 
     void start() override
     {

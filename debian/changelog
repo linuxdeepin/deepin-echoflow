@@ -1,3 +1,20 @@
+deepin-echoflow (0.2.13) unstable; urgency=medium
+
+  * Show live transcription in the input field while recording, with a
+    recording indicator that follows microphone activity.
+  * Polish confirmed passages while recording so users can preview the
+    revised text before committing it.
+  * Offer microphone noise reduction and reduce repeated work during
+    streaming recognition to keep dictation responsive.
+  * Start the voice service on demand and default the recognition
+    language to the system locale.
+  * Preserve quiet speech endings after short pauses and split long
+    dictations at natural pauses when possible.
+  * Rename the Debian package and background components to
+    deepin-echoflow while keeping the EchoFlow name in the interface.
+
+ -- Wang Yu <wangyu@uniontech.com>  Wed, 18 Nov 2026 15:45:28 +0800
+
 echoflow (0.2.12) unstable; urgency=medium
 
   * Polish dictated transcripts with a local Qwen3 language model that

@@ -259,6 +259,8 @@ struct qwen3_asr_context {
     std::vector<ggml_tensor*> kv_k_l, kv_v_l;
     int kv_max_ctx = 0;
     int kv_n_used = 0;
+    uint64_t kv_revision = 0;
+    qwen3_asr_llm_metrics last_llm_metrics{};
 
     int n_threads = 4;
 
@@ -1744,6 +1746,18 @@ extern "C" float* qwen3_asr_run_conv(qwen3_asr_context* ctx, const float* mel_fe
     return result;
 }
 
+extern "C" float* qwen3_asr_run_encoder_cached(qwen3_asr_context* ctx,
+        crisp_audio_encoder_cache* cache, const float* mel, int n_mels, int T_mel,
+        int* out_n_frames, int* out_dim) {
+    if (!ctx || !cache) return nullptr;
+    auto* audio = qwen3_asr_get_audio(ctx);
+    if (!audio) {
+        crisp_audio_encoder_cache_reset(cache);
+        return qwen3_asr_run_encoder(ctx, mel, n_mels, T_mel, out_n_frames, out_dim);
+    }
+    return crisp_audio_encode_cached(audio, cache, mel, n_mels, T_mel, out_n_frames, out_dim);
+}
+
 extern "C" float* qwen3_asr_run_encoder(qwen3_asr_context* ctx, const float* mel_features, int n_mels, int T_mel,
                                         int* out_N_total, int* out_proj_dim) {
     if (!ctx || !mel_features)
@@ -2041,6 +2055,7 @@ extern "C" bool qwen3_asr_kv_init(qwen3_asr_context* ctx, int max_ctx) {
         ctx->kv_n_used = 0;
     }
 
+    ++ctx->kv_revision;
     const auto& hp = ctx->model.hparams;
     const int hd = (int)hp.llm_head_dim;
     const int n_kv = (int)hp.llm_n_kv_heads;
@@ -2105,12 +2120,23 @@ extern "C" bool qwen3_asr_kv_init(qwen3_asr_context* ctx, int max_ctx) {
 }
 
 extern "C" void qwen3_asr_kv_reset(qwen3_asr_context* ctx) {
-    if (ctx)
+    if (ctx) {
         ctx->kv_n_used = 0;
+        ++ctx->kv_revision;
+    }
+}
+
+extern "C" uint64_t qwen3_asr_kv_revision(const qwen3_asr_context* ctx) {
+    return ctx ? ctx->kv_revision : 0;
+}
+
+extern "C" qwen3_asr_llm_metrics qwen3_asr_last_llm_metrics(const qwen3_asr_context* ctx) {
+    return ctx ? ctx->last_llm_metrics : qwen3_asr_llm_metrics{};
 }
 
 extern "C" float* qwen3_asr_run_llm_kv(qwen3_asr_context* ctx, const float* inputs_embeds, int n_tokens, int n_past,
                                        int* out_n_tokens, int* out_vocab_size) {
+    if (ctx) ctx->last_llm_metrics = {};
     if (!ctx || !inputs_embeds || n_tokens <= 0)
         return nullptr;
     if (!ctx->kv_k) {
@@ -2151,13 +2177,22 @@ extern "C" float* qwen3_asr_run_llm_kv(qwen3_asr_context* ctx, const float* inpu
         }
     }
 
+    using PerfClock = std::chrono::steady_clock;
+    const auto elapsed_ms = [](PerfClock::time_point begin) {
+        return std::chrono::duration<double, std::milli>(PerfClock::now() - begin).count();
+    };
+    auto phase_started = PerfClock::now();
     ggml_cgraph* gf = qwen3_asr_build_graph_llm_kv(ctx, n_past, n_tokens);
+    ctx->last_llm_metrics.graph_ms = elapsed_ms(phase_started);
+    phase_started = PerfClock::now();
     ggml_backend_sched_reset(ctx->sched);
     if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
         fprintf(stderr, "qwen3_asr: failed to alloc llm_kv graph\n");
         return nullptr;
     }
 
+    ctx->last_llm_metrics.alloc_ms = elapsed_ms(phase_started);
+    phase_started = PerfClock::now();
     ggml_tensor* embeds_in = ggml_graph_get_tensor(gf, "inputs_embeds");
     ggml_backend_tensor_set(embeds_in, inputs_embeds, 0, (size_t)d * n_tokens * sizeof(float));
     ggml_tensor* pos_in = ggml_graph_get_tensor(gf, "positions");
@@ -2167,12 +2202,17 @@ extern "C" float* qwen3_asr_run_llm_kv(qwen3_asr_context* ctx, const float* inpu
         ggml_backend_tensor_set(mask_in, mask.data(), 0, mask.size() * sizeof(ggml_fp16_t));
     }
 
+    ctx->last_llm_metrics.transfer_ms = elapsed_ms(phase_started);
+    phase_started = PerfClock::now();
+    ++ctx->kv_revision;
     core_quant_bcast::audit(gf, "qwen3-asr");
     if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
         fprintf(stderr, "qwen3_asr: llm_kv graph compute failed\n");
         return nullptr;
     }
 
+    ctx->last_llm_metrics.compute_ms = elapsed_ms(phase_started);
+    phase_started = PerfClock::now();
     ggml_tensor* out = ggml_graph_get_tensor(gf, "logits");
     if (!out)
         return nullptr;
@@ -2187,6 +2227,7 @@ extern "C" float* qwen3_asr_run_llm_kv(qwen3_asr_context* ctx, const float* inpu
     // Raon masks <|audio_output_pad|> at every step (text-only STT output).
     if (hp.raon_speech && hp.raon_audio_output_pad_id < (uint32_t)vocab)
         result[hp.raon_audio_output_pad_id] = -INFINITY;
+    ctx->last_llm_metrics.transfer_ms += elapsed_ms(phase_started);
     return result;
 }
 

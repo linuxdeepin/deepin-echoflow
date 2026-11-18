@@ -5,35 +5,77 @@
 
 #include <chrono>
 #include <cstring>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
 
 namespace echoflow {
 
-Committer::Committer(const Config& cfg, std::filesystem::path fcitxSocket)
-    : cfg_(cfg)
-    , fcitxSocket_(std::move(fcitxSocket))
+Committer::Committer(std::filesystem::path fcitxSocket)
+    : fcitxSocket_(std::move(fcitxSocket))
 {
+}
+
+std::pair<bool, std::string> Committer::beginVoiceSession(std::uint64_t generation)
+{
+    return sendRequest("VOICE_BEGIN " + std::to_string(generation) + "\n");
+}
+
+std::pair<bool, std::string> Committer::cancelVoiceSession(std::uint64_t generation)
+{
+    return sendRequest("VOICE_CANCEL " + std::to_string(generation) + "\n");
 }
 
 std::pair<bool, std::string> Committer::commitText(const std::string& text)
 {
-    if (!cfg_.fcitxCommit) {
-        return {false, "fcitx disabled"};
-    }
+    return sendRequest("COMMIT\n" + text);
+}
 
-    int fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+std::pair<bool, std::string> Committer::commitText(
+    const std::string& text, std::uint64_t generation)
+{
+    return sendRequest("COMMIT " + std::to_string(generation) + "\n" + text);
+}
+
+std::pair<bool, std::string> Committer::setPreedit(const std::string& text)
+{
+    return sendRequest("PREEDIT\n" + text, 20);
+}
+
+std::pair<bool, std::string> Committer::setPreedit(
+    const std::string& text, std::uint64_t generation)
+{
+    return sendRequest("PREEDIT " + std::to_string(generation) + "\n" + text, 20);
+}
+
+std::pair<bool, std::string> Committer::setPreedit(
+    const std::string& text, std::uint64_t generation, std::uint64_t revision)
+{
+    return sendRequest("PREEDIT " + std::to_string(generation) + " "
+        + std::to_string(revision) + "\n" + text, 20);
+}
+
+std::pair<bool, std::string> Committer::clearPreedit()
+{
+    return sendRequest("CLEAR_PREEDIT\n");
+}
+
+std::pair<bool, std::string> Committer::clearPreedit(std::uint64_t generation)
+{
+    return sendRequest("CLEAR_PREEDIT " + std::to_string(generation) + "\n");
+}
+
+std::pair<bool, std::string> Committer::sendRequest(const std::string& payload, int timeoutMs)
+{
+    int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (fd < 0) {
         return {false, "socket"};
     }
 
-    timeval timeout {0, 500000};
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-
     sockaddr_un clientAddr {};
     clientAddr.sun_family = AF_UNIX;
-    std::string clientPath = "/tmp/echoflow-client-" + std::to_string(getpid()) + "-"
+    std::string clientPath = "/tmp/deepin-echoflow-client-" + std::to_string(getpid()) + "-"
         + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".sock";
     unlink(clientPath.c_str());
     strncpy(clientAddr.sun_path, clientPath.c_str(), sizeof(clientAddr.sun_path) - 1);
@@ -46,7 +88,6 @@ std::pair<bool, std::string> Committer::commitText(const std::string& text)
     sockaddr_un serverAddr {};
     serverAddr.sun_family = AF_UNIX;
     strncpy(serverAddr.sun_path, fcitxSocket_.c_str(), sizeof(serverAddr.sun_path) - 1);
-    std::string payload = "COMMIT\n" + text;
     if (sendto(fd, payload.data(), payload.size(), 0,
                reinterpret_cast<sockaddr*>(&serverAddr), sizeof(serverAddr))
         < 0) {
@@ -55,8 +96,13 @@ std::pair<bool, std::string> Committer::commitText(const std::string& text)
         return {false, "sendto"};
     }
 
+    pollfd replyFd {fd, POLLIN, 0};
+    int ready;
+    do {
+        ready = poll(&replyFd, 1, timeoutMs);
+    } while (ready < 0 && errno == EINTR);
     char buf[256] = {};
-    ssize_t n = recv(fd, buf, sizeof(buf) - 1, 0);
+    ssize_t n = ready > 0 ? recv(fd, buf, sizeof(buf) - 1, 0) : -1;
     close(fd);
     unlink(clientPath.c_str());
     if (n <= 0) {
