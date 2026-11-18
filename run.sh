@@ -12,18 +12,18 @@ if ! cmake --build build -j "$JOBS" 2>/dev/null; then
 fi
 
 if [ "$#" -gt 0 ]; then
-    exec ./build/service/echoflow-service "$@"
+    exec ./build/service/deepin-echoflow-service "$@"
 fi
 
 runtime_dir="/run/user/$(id -u)"
 if [ ! -d "$runtime_dir" ] || [ ! -w "$runtime_dir" ]; then
     runtime_dir="${XDG_RUNTIME_DIR:-/tmp}"
 fi
-socket_path="$runtime_dir/echoflow-wakeup.sock"
+socket_path="$runtime_dir/deepin-echoflow-wakeup.sock"
 
 if command -v systemctl >/dev/null 2>&1 \
-    && systemctl --user is-active --quiet echoflow.socket; then
-    echo "echoflow.socket is already active; use the installed service instead of run.sh." >&2
+    && systemctl --user is-active --quiet deepin-echoflow.socket; then
+    echo "deepin-echoflow.socket is already active; use the installed service instead of run.sh." >&2
     exit 1
 fi
 if ! command -v systemd-socket-activate >/dev/null 2>&1; then
@@ -33,7 +33,7 @@ fi
 
 while :; do
     if systemd-socket-activate --datagram --listen="$socket_path" \
-        ./build/service/echoflow-service; then
+        ./build/service/deepin-echoflow-service; then
         sleep 1
     fi
     sleep 1

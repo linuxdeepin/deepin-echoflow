@@ -3,11 +3,17 @@
 
 #include <QGuiApplication>
 #include <QScreen>
+#include <QQmlComponent>
+#include <QQmlContext>
+#include <QQuickItem>
+#include <QQuickView>
+#include <QImage>
 #include <QSignalSpy>
 #include <QtTest>
 
 #include "CapsuleController.h"
 
+#include <cmath>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -74,7 +80,17 @@ private slots:
     void persistentIdleMessageRemainsVisible();
     void transientRecordingAndTranscribingAreVisibleUntilIdle();
     void cancellingIsVisibleOnlyInPersistentMode();
-    void streamTextOnlyUpdatesRecording();
+    void audioLevelTracksSoundWithoutChangingCapsule();
+    void waveformReplacesOneSnapshotAndClearsAtSilence();
+    void renderedWaveformFollowsRealLevels();
+    void renderedSpectrumAnimatesAndReturnsToSilence();
+    void recordingTimerSurvivesStatusAndStopsWithRecording();
+    void silentLevelOverridesOldFullHeightBars();
+    void invalidAudioLevelsAreIgnored();
+    void audioLevelClearsAfterStopAndCancel();
+    void missingAudioLevelsReturnToSilence();
+    void streamTextDoesNotChangeCapsule();
+    void releasingShowsTranscribingUntilIdle();
     void toggleAndCancelSendCommands();
     void persistentFlagOnlySignalsActualChanges();
     void focusShowsHintBelowCaret();
@@ -227,21 +243,247 @@ void CapsuleControllerTest::cancellingIsVisibleOnlyInPersistentMode() {
     QCOMPARE(persistentState.message, QStringLiteral("Cancelling"));
 }
 
-void CapsuleControllerTest::streamTextOnlyUpdatesRecording() {
-    CapsuleController controller([](std::string_view) { return true; });
+void CapsuleControllerTest::audioLevelTracksSoundWithoutChangingCapsule()
+{
+    CapsuleController controller(ignoreCommands());
     QSignalSpy capsuleSpy(&controller, &CapsuleController::capsuleChanged);
+    QSignalSpy levelSpy(&controller, &CapsuleController::audioLevelChanged);
+    QVERIFY(!controller.applyServiceMessage(QStringLiteral("AUDIO_LEVEL 800")));
+    controller.applyServiceMessage(QStringLiteral("RECORDING"));
+    QVERIFY(controller.applyServiceMessage(QStringLiteral("AUDIO_LEVEL 600")));
+    QCOMPARE(controller.audioLevel(), 0.6);
+    QCOMPARE(levelSpy.count(), 1);
+    QVERIFY(controller.applyServiceMessage(QStringLiteral("AUDIO_LEVEL 600")));
+    QCOMPARE(levelSpy.count(), 1);
+    QVERIFY(controller.applyServiceMessage(QStringLiteral("AUDIO_LEVEL 0")));
+    QCOMPARE(controller.audioLevel(), 0.0);
+    QCOMPARE(levelSpy.count(), 2);
+    QVERIFY(controller.applyServiceMessage(QStringLiteral("AUDIO_LEVEL 0")));
+    QCOMPARE(levelSpy.count(), 2); // Silent input does not animate or repaint.
+    QCOMPARE(capsuleSpy.count(), 1); // Audio must not resize or move the capsule.
+}
 
-    QVERIFY(!controller.applyServiceMessage(QStringLiteral("STREAM_TEXT ignored")));
-    QVERIFY(controller.applyServiceMessage(QStringLiteral("RECORDING")));
-    QVERIFY(!controller.applyServiceMessage(QStringLiteral("STREAM_TEXT ")));
-    QVERIFY(controller.applyServiceMessage(QStringLiteral("STREAM_TEXT 实时文字")));
-    QVERIFY(controller.applyServiceMessage(QStringLiteral("TRANSCRIBING")));
-    QVERIFY(!controller.applyServiceMessage(QStringLiteral("STREAM_TEXT late")));
+void CapsuleControllerTest::waveformReplacesOneSnapshotAndClearsAtSilence()
+{
+    CapsuleController controller(ignoreCommands());
+    QSignalSpy spy(&controller, &CapsuleController::audioLevelsChanged);
+    controller.applyServiceMessage(QStringLiteral("RECORDING"));
+    QCOMPARE(controller.audioLevels(), (QVariantList{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}));
+    QVERIFY(controller.applyServiceMessage(QStringLiteral("AUDIO_LEVEL 600 100 800 300 1000 500")));
+    QCOMPARE(controller.audioLevel(), 0.6);
+    QCOMPARE(controller.audioLevels(), (QVariantList{0.1, 0.8, 0.3, 1.0, 0.5}));
+    QCOMPARE(spy.count(), 1); // One message supplies every bar in the frame.
+    controller.applyServiceMessage(QStringLiteral("AUDIO_LEVEL 600 100 800 300 1000 500"));
+    QCOMPARE(spy.count(), 1); // Identical samples must not create synthetic movement.
+    controller.applyServiceMessage(QStringLiteral("AUDIO_LEVEL 600 900 200 700 100 600"));
+    QCOMPARE(controller.audioLevels(), (QVariantList{0.9, 0.2, 0.7, 0.1, 0.6}));
+    QCOMPARE(spy.count(), 2); // Whole snapshot replaces the previous waveform.
+    controller.applyServiceMessage(QStringLiteral("AUDIO_LEVEL 600 100 800 300 1000 500 200 700"));
+    QCOMPARE(controller.audioLevels(), (QVariantList{0.1, 0.8, 0.3, 1.0, 0.5, 0.2, 0.7}));
+    controller.applyServiceMessage(QStringLiteral("AUDIO_LEVEL 0 0 0 0 0 0 0 0"));
+    QCOMPARE(controller.audioLevels(), (QVariantList{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}));
+    QCOMPARE(spy.count(), 4);
+    controller.applyServiceMessage(QStringLiteral("AUDIO_LEVEL 0 0 0 0 0 0 0 0"));
+    QCOMPARE(spy.count(), 4);
+    controller.applyServiceMessage(QStringLiteral("AUDIO_LEVEL 800 200 400 900 700 300"));
+    controller.applyServiceMessage(QStringLiteral("TRANSCRIBING"));
+    QCOMPARE(controller.audioLevels(), (QVariantList{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}));
+}
 
-    QCOMPARE(capsuleSpy.count(), 3);
-    QCOMPARE(stateAt(capsuleSpy, 0).message, QStringLiteral("Listening"));
-    QCOMPARE(stateAt(capsuleSpy, 1).message, QStringLiteral("实时文字"));
-    QCOMPARE(stateAt(capsuleSpy, 2).message, QStringLiteral("Transcribing"));
+void CapsuleControllerTest::renderedWaveformFollowsRealLevels()
+{
+    CapsuleController controller(ignoreCommands());
+    controller.applyServiceMessage(QStringLiteral("RECORDING"));
+    QQuickView view;
+    view.setResizeMode(QQuickView::SizeViewToRootObject);
+    view.rootContext()->setContextProperty(QStringLiteral("meterController"), &controller);
+    const auto source = QFINDTESTDATA("../qml/AudioWaveform.qml");
+    QVERIFY(!source.isEmpty());
+    QQmlComponent component(view.engine());
+    component.setData(R"QML(import QtQuick 2.15
+AudioWaveform {
+    active: true
+    animate: false
+    levels: meterController.audioLevels
+}
+)QML", QUrl::fromLocalFile(source).resolved(QUrl(QStringLiteral("WaveformTest.qml"))));
+    QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+    auto* waveform = qobject_cast<QQuickItem*>(component.create());
+    QVERIFY(waveform);
+    view.setContent(component.url(), &component, waveform);
+    view.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&view));
+    QList<QQuickItem*> bars;
+    for (int i = 0; i < 7; ++i) {
+        QQuickItem* bar = nullptr;
+        for (auto* child : waveform->childItems()) {
+            if (child->objectName() == QStringLiteral("audioBar%1").arg(i)) bar = child;
+        }
+        QVERIFY(bar);
+        QCOMPARE(bar->height(), 3.0);
+        bars.append(bar);
+    }
+    const auto quietImage = view.grabWindow();
+    QVERIFY(!quietImage.isNull());
+    controller.applyServiceMessage(QStringLiteral("AUDIO_LEVEL 600 100 800 300 1000 500 200 700"));
+    QVERIFY(bars[1]->height() > bars[0]->height());
+    QVERIFY(bars[1]->height() > bars[2]->height());
+    QCOMPARE(bars[3]->height(), 24.0);
+    QVERIFY(bars[4]->height() > 10.0);
+    // Pixel mapping preserves relative amplitudes instead of compressing them
+    // again with a square root. Changing the shape moves the tallest bar.
+    QVERIFY(std::abs((bars[0]->height() - 3.0) / (bars[3]->height() - 3.0) - 0.1) < 0.001);
+    controller.applyServiceMessage(QStringLiteral("AUDIO_LEVEL 600 1000 200 300 100 500 800 700"));
+    QCOMPARE(bars[0]->height(), 24.0);
+    QVERIFY(bars[0]->height() > bars[3]->height());
+    QTest::qWait(30);
+    const auto soundImage = view.grabWindow();
+    QVERIFY(!soundImage.isNull());
+    QVERIFY(soundImage != quietImage); // Verify actual rendered pixels change.
+    controller.applyServiceMessage(QStringLiteral("AUDIO_LEVEL 0"));
+    for (auto* bar : bars) QCOMPARE(bar->height(), 3.0);
+    QTest::qWait(30);
+    QCOMPARE(view.grabWindow(), quietImage);
+    controller.applyServiceMessage(QStringLiteral("AUDIO_LEVEL 900"));
+    controller.applyServiceMessage(QStringLiteral("TRANSCRIBING"));
+    for (auto* bar : bars) QCOMPARE(bar->height(), 3.0);
+}
+
+void CapsuleControllerTest::renderedSpectrumAnimatesAndReturnsToSilence()
+{
+    QQuickView view;
+    view.setSource(QUrl::fromLocalFile(QFINDTESTDATA("../qml/AudioWaveform.qml")));
+    QVERIFY(view.status() == QQuickView::Ready);
+    auto* waveform = view.rootObject();
+    QVERIFY(waveform);
+    waveform->setWidth(39);
+    waveform->setHeight(24);
+    waveform->setProperty("active", true);
+    view.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&view));
+    QQuickItem* first = nullptr;
+    for (auto* child : waveform->childItems()) {
+        if (child->objectName() == QStringLiteral("audioBar0")) first = child;
+    }
+    QVERIFY(first);
+    QCOMPARE(first->height(), 3.0);
+    waveform->setProperty("levels", QVariantList{1.0, 0.2, 0.1, 0.4, 0.2, 0.1, 0.05});
+    QTRY_COMPARE_WITH_TIMEOUT(first->height(), 24.0, 500);
+    waveform->setProperty("levels", QVariantList{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    QTRY_COMPARE_WITH_TIMEOUT(first->height(), 3.0, 500);
+    QTest::qWait(180);
+    QCOMPARE(first->height(), 3.0); // No perpetual activity on a silent frame.
+    waveform->setProperty("levels", QVariantList{0.9, 0.2, 0.1, 0.4, 0.2, 0.1, 0.05});
+    QTRY_VERIFY_WITH_TIMEOUT(first->height() > 20, 500);
+    waveform->setProperty("active", false);
+    QTRY_COMPARE_WITH_TIMEOUT(first->height(), 3.0, 100); // STOP cancels the release on the next UI update.
+}
+
+void CapsuleControllerTest::recordingTimerSurvivesStatusAndStopsWithRecording()
+{
+    CapsuleController controller(ignoreCommands());
+    QSignalSpy spy(&controller, &CapsuleController::recordingDurationChanged);
+    controller.applyServiceMessage(QStringLiteral("RECORDING"));
+    QCOMPARE(controller.recordingDuration(), QStringLiteral("00:00"));
+    QTRY_COMPARE(controller.recordingDuration(), QStringLiteral("00:01"));
+    QTRY_VERIFY(spy.count() >= 2);
+    controller.applyServiceMessage(QStringLiteral("RECORDING")); // STATUS must not reset time.
+    QCOMPARE(controller.recordingDuration(), QStringLiteral("00:01"));
+    controller.applyServiceMessage(QStringLiteral("TRANSCRIBING"));
+    QCOMPARE(controller.recordingDuration(), QStringLiteral("00:00"));
+    const auto count = spy.count();
+    QTest::qWait(1050);
+    QCOMPARE(spy.count(), count);
+    controller.applyServiceMessage(QStringLiteral("RECORDING"));
+    QCOMPARE(controller.recordingDuration(), QStringLiteral("00:00"));
+    controller.applyServiceMessage(QStringLiteral("CANCELLING"));
+    QCOMPARE(controller.recordingDuration(), QStringLiteral("00:00"));
+}
+
+void CapsuleControllerTest::silentLevelOverridesOldFullHeightBars()
+{
+    CapsuleController controller(ignoreCommands());
+    controller.applyServiceMessage(QStringLiteral("RECORDING"));
+    controller.applyServiceMessage(QStringLiteral("AUDIO_LEVEL 900 900 900 900 900 900 900 900"));
+    QVERIFY(controller.audioLevel() > 0);
+    controller.applyServiceMessage(QStringLiteral("AUDIO_LEVEL 0 1000 1000 1000 1000 1000 1000 1000"));
+    QCOMPARE(controller.audioLevel(), 0.0);
+    QCOMPARE(controller.audioLevels(), (QVariantList{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}));
+}
+
+void CapsuleControllerTest::invalidAudioLevelsAreIgnored()
+{
+    CapsuleController controller(ignoreCommands());
+    controller.applyServiceMessage(QStringLiteral("RECORDING"));
+    controller.applyServiceMessage(QStringLiteral("AUDIO_LEVEL 500"));
+    for (const auto& message : {QStringLiteral("AUDIO_LEVEL"), QStringLiteral("AUDIO_LEVEL "),
+                               QStringLiteral("AUDIO_LEVEL nan"), QStringLiteral("AUDIO_LEVEL -1"),
+                               QStringLiteral("AUDIO_LEVEL 1001"), QStringLiteral("AUDIO_LEVEL 1 2"),
+                               QStringLiteral("AUDIO_LEVEL 500 100 200 300 400"),
+                               QStringLiteral("AUDIO_LEVEL 500 100 200 300 400 1001"),
+                               QStringLiteral("AUDIO_LEVEL 500 100 200 300 400 nan"),
+                               QStringLiteral("AUDIO_LEVEL 500 100 200 300 400 500 600")}) {
+        QVERIFY(!controller.applyServiceMessage(message));
+        QCOMPARE(controller.audioLevel(), 0.5);
+    }
+}
+
+void CapsuleControllerTest::audioLevelClearsAfterStopAndCancel()
+{
+    CapsuleController controller(ignoreCommands());
+    for (const auto& phase : {QStringLiteral("TRANSCRIBING"), QStringLiteral("CANCELLING"),
+                             QStringLiteral("IDLE"), QStringLiteral("HIDE_TOOLTIP")}) {
+        controller.applyServiceMessage(QStringLiteral("RECORDING"));
+        controller.applyServiceMessage(QStringLiteral("AUDIO_LEVEL 1000"));
+        controller.applyServiceMessage(phase);
+        QCOMPARE(controller.audioLevel(), 0.0);
+        QVERIFY(!controller.applyServiceMessage(QStringLiteral("AUDIO_LEVEL 900")));
+    }
+}
+
+void CapsuleControllerTest::missingAudioLevelsReturnToSilence()
+{
+    CapsuleController controller(ignoreCommands());
+    controller.applyServiceMessage(QStringLiteral("RECORDING"));
+    controller.applyServiceMessage(QStringLiteral("AUDIO_LEVEL 700"));
+    QTest::qWait(CapsuleController::kAudioLevelTimeoutMs * 3 / 5);
+    controller.applyServiceMessage(QStringLiteral("AUDIO_LEVEL 700"));
+    QTest::qWait(CapsuleController::kAudioLevelTimeoutMs * 3 / 5);
+    QCOMPARE(controller.audioLevel(), 0.7); // Equal levels still refresh the watchdog.
+    QTRY_COMPARE(controller.audioLevel(), 0.0);
+}
+
+void CapsuleControllerTest::streamTextDoesNotChangeCapsule() {
+    CapsuleController controller([](std::string_view) { return true; });
+    QSignalSpy spy(&controller, &CapsuleController::capsuleChanged);
+
+    for (const auto& phase : {QStringLiteral("IDLE"), QStringLiteral("RECORDING"),
+                             QStringLiteral("TRANSCRIBING"), QStringLiteral("CANCELLING")}) {
+        QVERIFY(controller.applyServiceMessage(phase));
+        const auto count = spy.count();
+        QVERIFY(!controller.applyServiceMessage(QStringLiteral("STREAM_TEXT 实时文字")));
+        QVERIFY(!controller.applyServiceMessage(QStringLiteral("STREAM_TEXT ")));
+        QVERIFY(!controller.applyServiceMessage(QStringLiteral("STREAM_TEXT")));
+        QCOMPARE(spy.count(), count);
+    }
+}
+
+void CapsuleControllerTest::releasingShowsTranscribingUntilIdle()
+{
+    CapsuleController controller([](std::string_view) { return true; });
+    QSignalSpy spy(&controller, &CapsuleController::capsuleChanged);
+    controller.applyServiceMessage(QStringLiteral("RECORDING"));
+    controller.applyServiceMessage(QStringLiteral("STREAM_TEXT 识别预览只在输入框显示"));
+    QCOMPARE(stateAt(spy, 0).message, QStringLiteral("Listening"));
+    controller.applyServiceMessage(QStringLiteral("TRANSCRIBING"));
+    QCOMPARE(stateAt(spy, 1).phase, QStringLiteral("transcribing"));
+    QCOMPARE(stateAt(spy, 1).message, QStringLiteral("Transcribing"));
+    QVERIFY(stateAt(spy, 1).visible);
+    controller.applyServiceMessage(QStringLiteral("STREAM_TEXT 尾音和润色更新"));
+    controller.applyServiceMessage(QStringLiteral("TRANSCRIBING")); // STATUS refresh.
+    QCOMPARE(stateAt(spy, 2).message, QStringLiteral("Transcribing"));
+    controller.applyServiceMessage(QStringLiteral("IDLE"));
+    QVERIFY(!stateAt(spy, 3).visible);
 }
 
 void CapsuleControllerTest::toggleAndCancelSendCommands() {

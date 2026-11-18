@@ -23,6 +23,8 @@ void generateSettingsTranslate() {
     use(QObject::tr("Recognition Options"));
     use(QObject::tr("Recognition Language"));
     use(QObject::tr("Enable streaming transcription"));
+    use(QObject::tr("Reduce microphone noise"));
+    use(QObject::tr("Transcription update interval (ms)"));
     use(QObject::tr("Polish Model"));
     use(QObject::tr("Refine recognition results with a local language model "
                     "before committing (removes filler words and "
@@ -39,8 +41,6 @@ void generateSettingsTranslate() {
     use(QObject::tr("Advanced Settings"));
     use(QObject::tr("Runtime"));
     use(QObject::tr("Recognition timeout (s)"));
-    use(QObject::tr("Fcitx"));
-    use(QObject::tr("Commit text through Fcitx"));
     use(QObject::tr("Storage"));
     use(QObject::tr("Recordings directory"));
     use(QObject::tr("Save streaming debug recordings"));

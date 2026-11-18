@@ -90,6 +90,30 @@ float* crisp_audio_compute_mel(struct crisp_audio_context* ctx, const float* sam
 float* crisp_audio_encode(struct crisp_audio_context* ctx, const float* mel, int n_mels, int T_mel, int* out_n_frames,
                           int* out_dim);
 
+// An encoder cache belongs to one live stream. It retains CPU snapshots,
+// never graph tensors/backend handles. Destroy before its model context.
+struct crisp_audio_encoder_cache;
+struct crisp_audio_encoder_cache_stats {
+    int total_chunks;
+    int reused_stem_chunks;
+    int computed_stem_chunks;
+    int reused_encoder_regions;
+    int computed_encoder_regions;
+    int window_chunks; // 0: dense bidirectional, positive: independent windows
+    size_t cached_bytes;
+};
+struct crisp_audio_encoder_cache* crisp_audio_encoder_cache_new(void);
+void crisp_audio_encoder_cache_free(struct crisp_audio_encoder_cache* cache);
+void crisp_audio_encoder_cache_reset(struct crisp_audio_encoder_cache* cache);
+struct crisp_audio_encoder_cache_stats crisp_audio_encoder_cache_get_stats(
+    const struct crisp_audio_encoder_cache* cache);
+// Same attention semantics as crisp_audio_encode. Reuse requires identical
+// normalized Mel inputs. Dense attention invalidates the whole encoder region
+// on append; window attention invalidates only affected independent windows.
+float* crisp_audio_encode_cached(struct crisp_audio_context* ctx,
+    struct crisp_audio_encoder_cache* cache, const float* mel, int n_mels, int T_mel,
+    int* out_n_frames, int* out_dim);
+
 // Read scalar hparams of the loaded model. Useful for caller sanity
 // checks. Returns 0 if the field is not meaningful for the dialect.
 int crisp_audio_d_model(struct crisp_audio_context* ctx);

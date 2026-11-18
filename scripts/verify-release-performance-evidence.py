@@ -13,7 +13,7 @@ from scripts.release_evidence import verify_release  # noqa: E402
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Verify EchoFlow release performance evidence")
+    parser = argparse.ArgumentParser(description="Verify deepin-echoflow release performance evidence")
     parser.add_argument("--commit", default="HEAD")
     parser.add_argument("--tag")
     args = parser.parse_args()

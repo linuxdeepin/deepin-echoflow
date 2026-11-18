@@ -2,12 +2,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 [Unit]
-Description=EchoFlow recording activation socket
+Description=deepin-echoflow recording activation socket
 
 [Socket]
-ListenDatagram=%t/echoflow-wakeup.sock
+ListenDatagram=%t/deepin-echoflow-wakeup.sock
 SocketMode=0600
-Service=echoflow.service
+Service=deepin-echoflow.service
 
 [Install]
 WantedBy=default.target

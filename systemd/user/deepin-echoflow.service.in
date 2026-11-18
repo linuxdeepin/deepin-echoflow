@@ -2,11 +2,11 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 [Unit]
-Description=EchoFlow offline voice input service
+Description=deepin-echoflow offline voice input service
 
 [Service]
 Type=simple
 Environment=PATH=@CMAKE_INSTALL_FULL_BINDIR@:/usr/bin:/bin
-ExecStart=@CMAKE_INSTALL_FULL_BINDIR@/echoflow-service
+ExecStart=@CMAKE_INSTALL_FULL_BINDIR@/deepin-echoflow-service
 TimeoutStopSec=30
 Restart=on-failure

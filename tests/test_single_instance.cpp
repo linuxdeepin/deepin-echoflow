@@ -51,7 +51,7 @@ void TestSingleInstance::refusesSecondLiveServiceInstance()
 {
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
-    const auto socketPath = testSocketPath(dir, "echoflow-control.sock");
+    const auto socketPath = testSocketPath(dir, "deepin-echoflow-control.sock");
 
     SingleInstanceGuard first;
     std::string firstError;
@@ -70,7 +70,7 @@ void TestSingleInstance::replacesStaleServiceSocket()
 {
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
-    const auto socketPath = testSocketPath(dir, "echoflow-control.sock");
+    const auto socketPath = testSocketPath(dir, "deepin-echoflow-control.sock");
 
     int staleFd = bindDatagramSocket(socketPath);
     QVERIFY(staleFd >= 0);

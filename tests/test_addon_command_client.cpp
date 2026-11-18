@@ -41,8 +41,8 @@ private slots:
     void focusWithoutService() {
         QTemporaryDir runtime;
         QVERIFY(runtime.isValid());
-        DatagramReceiver ui(runtime.filePath("echoflow-ui.sock"));
-        DatagramReceiver wakeup(runtime.filePath("echoflow-wakeup.sock"));
+        DatagramReceiver ui(runtime.filePath("deepin-echoflow-ui.sock"));
+        DatagramReceiver wakeup(runtime.filePath("deepin-echoflow-wakeup.sock"));
         QVERIFY(ui.valid());
         QVERIFY(wakeup.valid());
         for (const auto &message : {"FOCUS 10 20 1 18", "CARET 20 20 1 18", "TYPED", "REFOCUS 30 20 1 18"}) {
@@ -56,8 +56,8 @@ private slots:
     }
     void blurCancelsRunningServiceWithoutRelayingFocus() {
         QTemporaryDir runtime;
-        DatagramReceiver ui(runtime.filePath("echoflow-ui.sock"));
-        DatagramReceiver control(runtime.filePath("echoflow-control.sock"));
+        DatagramReceiver ui(runtime.filePath("deepin-echoflow-ui.sock"));
+        DatagramReceiver control(runtime.filePath("deepin-echoflow-control.sock"));
         QVERIFY(ui.valid());
         QVERIFY(control.valid());
         QVERIFY(echoflow::sendAddonBlur(runtime.path().toStdString()));
@@ -70,7 +70,7 @@ private slots:
     }
     void recordingCommandsUseWakeupSocket() {
         QTemporaryDir runtime;
-        DatagramReceiver wakeup(runtime.filePath("echoflow-wakeup.sock"));
+        DatagramReceiver wakeup(runtime.filePath("deepin-echoflow-wakeup.sock"));
         QVERIFY(wakeup.valid());
         for (const auto &message : {"START", "STOP"}) {
             QVERIFY(echoflow::sendAddonCommand(runtime.path().toStdString(),
@@ -82,7 +82,7 @@ private slots:
         QTemporaryDir runtime;
         QVERIFY(!echoflow::sendAddonCommand(runtime.path().toStdString(),
             echoflow::CommandChannel::Ui, "FOCUS"));
-        DatagramReceiver ui(runtime.filePath("echoflow-ui.sock"));
+        DatagramReceiver ui(runtime.filePath("deepin-echoflow-ui.sock"));
         QVERIFY(ui.valid());
         bool full = false;
         for (int i = 0; i < 1024; ++i) {

@@ -4,6 +4,7 @@
 #include <QtTest/QtTest>
 
 #include "Config.h"
+#include "ProjectPaths.h"
 
 #include <stdexcept>
 #include <vector>
@@ -14,6 +15,7 @@ class TestConfig : public QObject {
     Q_OBJECT
 
 private slots:
+    void projectNamePathsReuseLegacyModels();
     void defaultConfigHasExpectedFields();
     void crispThreadsFollowPhysicalCores();
     void expandPathResolvesHome();
@@ -23,6 +25,9 @@ private slots:
     void loadDtkConfIgnoresModelDirKey();
     void loadDtkConfReadsLiveDebugAudioFlag();
     void loadDtkConfReadsStreamTranscriptionFlag();
+    void loadDtkConfReadsNoiseSuppressionFlag();
+    void loadDtkConfReadsStreamStep();
+    void loadDtkConfRejectsInvalidStreamStep();
     void loadDtkConfReadsVadSettings();
     void loadDtkConfReadsPolishSettings();
     void loadDtkConfDropsUnknownPolishModel();
@@ -32,17 +37,42 @@ private slots:
     void stripPunctuationTrimsWholeCodePoints();
 };
 
+void TestConfig::projectNamePathsReuseLegacyModels()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const std::filesystem::path root = directory.path().toStdString();
+    const auto current = root / "deepin-echoflow" / "deepin-echoflow.conf";
+    const auto legacy = root / "echoflow" / "echoflow.conf";
+    QCOMPARE(projectConfigPath(root), current);
+    std::filesystem::create_directories(legacy.parent_path() / "qwen3-asr-0.6b");
+    QFile config(QString::fromStdString(legacy.string()));
+    QVERIFY(config.open(QIODevice::WriteOnly));
+    config.write("[basic.model.model_name]\nvalue=qwen3-asr-0.6b\n");
+    config.close();
+    QCOMPARE(projectConfigPath(root), legacy);
+    const auto loaded = loadDtkConf(projectConfigPath(root));
+    QCOMPARE(loaded.modelDir, (legacy.parent_path() / "qwen3-asr-0.6b").string());
+    std::filesystem::create_directories(current.parent_path());
+    QFile preferred(QString::fromStdString(current.string()));
+    QVERIFY(preferred.open(QIODevice::WriteOnly));
+    preferred.close();
+    QCOMPARE(projectConfigPath(root), current);
+    QVERIFY(std::filesystem::exists(legacy));
+    QVERIFY(std::filesystem::exists(legacy.parent_path() / "qwen3-asr-0.6b"));
+}
+
 void TestConfig::defaultConfigHasExpectedFields() {
     Config c = Config::defaultConfig();
     QCOMPARE(QString::fromStdString(c.modelName), QStringLiteral("qwen3-asr-0.6b"));
     QCOMPARE(c.pwRecord.rate, 16000);
     QCOMPARE(QString::fromStdString(c.pwRecord.format), QStringLiteral("s16"));
     QVERIFY(c.pwRecord.source.empty());
-    QCOMPARE(c.fcitxCommit, true);
     QVERIFY(!c.language.has_value());
     QVERIFY(c.modelDir.empty());
     QVERIFY(!c.skipSilence);
     QVERIFY(c.streamTranscription);
+    QCOMPARE(c.streamStepMs, 500);
     QVERIFY(!c.saveLiveDebugAudio);
     QCOMPARE(c.openBlasThreads, 4);
     QCOMPARE(c.crispThreads, defaultCrispThreads());
@@ -53,7 +83,7 @@ void TestConfig::defaultConfigHasExpectedFields() {
     QCOMPARE(c.vadThreshold, 0.15f);
     QCOMPARE(c.vadEndThreshold, 0.10f);
     QCOMPARE(c.vadMinSpeechMs, 100);
-    QCOMPARE(c.vadMinSilenceMs, 300);
+    QCOMPARE(c.vadMinSilenceMs, 500);
     QVERIFY(!c.polishEnabled);
     QCOMPARE(QString::fromStdString(c.polishModelName), QStringLiteral("qwen3-0.6b"));
 }
@@ -148,13 +178,23 @@ void TestConfig::loadDtkConfRejectsInvalidVadSettings() {
     }
 }
 
+void TestConfig::loadDtkConfReadsNoiseSuppressionFlag()
+{
+    QVERIFY(!Config::defaultConfig().noiseSuppression);
+    QTemporaryFile file;
+    QVERIFY(file.open());
+    file.write("[basic.recognition.noise_suppression]\nvalue=true\n");
+    file.close();
+    QVERIFY(loadDtkConf(file.fileName().toStdString()).noiseSuppression);
+}
+
 void TestConfig::expandPathResolvesHome() {
     setenv("HOME", "/tmp/fakehome", 1);
-    std::filesystem::path base("/home/u/.config/echoflow");
-    QCOMPARE(QString::fromStdString(expandPath("$HOME/.local/share/echoflow/recordings", base)),
-             QStringLiteral("/tmp/fakehome/.local/share/echoflow/recordings"));
+    std::filesystem::path base("/home/u/.config/deepin-echoflow");
+    QCOMPARE(QString::fromStdString(expandPath("$HOME/.local/share/deepin-echoflow/recordings", base)),
+             QStringLiteral("/tmp/fakehome/.local/share/deepin-echoflow/recordings"));
     QCOMPARE(QString::fromStdString(expandPath("recordings", base)),
-             QStringLiteral("/home/u/.config/echoflow/recordings"));
+             QStringLiteral("/home/u/.config/deepin-echoflow/recordings"));
 }
 
 void TestConfig::normalizeModelNameMapsVariants() {
@@ -194,7 +234,6 @@ void TestConfig::loadDtkConfDerivesModelDirFromName() {
     QVERIFY(!c.saveLiveDebugAudio);
     QCOMPARE(c.openBlasThreads, 2);
     QCOMPARE(c.crispMaxNewTokens, 128);
-    QCOMPARE(c.fcitxCommit, false);
     QCOMPARE(QString::fromStdString(c.modelDir),
              QString::fromStdString((std::filesystem::path(f.fileName().toStdString()).parent_path()
                                      / "qwen3-asr-1.7b").string()));
@@ -220,6 +259,28 @@ void TestConfig::loadDtkConfReadsStreamTranscriptionFlag() {
     QCOMPARE(c.streamTranscription, false);
 }
 
+void TestConfig::loadDtkConfReadsStreamStep() {
+    for (int interval : {100, 160, 500, 1000, 2000, 4000}) {
+        QTemporaryFile f;
+        QVERIFY(f.open());
+        f.write("[basic.recognition.stream_step_ms]\nvalue="
+                + QByteArray::number(interval) + "\n");
+        f.close();
+        const Config c = loadDtkConf(f.fileName().toStdString());
+        QCOMPARE(c.streamStepMs, interval);
+    }
+}
+
+void TestConfig::loadDtkConfRejectsInvalidStreamStep() {
+    for (const QByteArray value : {"0", "-1", "99", "4001", "500ms", "1.5", "abc", ""}) {
+        QTemporaryFile f;
+        QVERIFY(f.open());
+        f.write("[basic.recognition.stream_step_ms]\nvalue=" + value + "\n");
+        f.close();
+        QVERIFY_EXCEPTION_THROWN(loadDtkConf(f.fileName().toStdString()), std::invalid_argument);
+    }
+}
+
 void TestConfig::loadDtkConfNormalizesLegacyModelName() {
     QTemporaryFile f;
     QVERIFY(f.open());
@@ -236,7 +297,7 @@ void TestConfig::loadDtkConfIgnoresModelDirKey() {
     QTemporaryFile f;
     QVERIFY(f.open());
     f.write("[basic.model.model_name]\nvalue=qwen3-asr-0.6b\n"
-            "[advanced.runtime.model_dir]\nvalue=$HOME/.local/share/echoflow/should-be-ignored\n");
+            "[advanced.runtime.model_dir]\nvalue=$HOME/.local/share/deepin-echoflow/should-be-ignored\n");
     f.close();
 
     Config c = loadDtkConf(f.fileName().toStdString());

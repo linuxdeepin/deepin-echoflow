@@ -13,6 +13,7 @@ class Server {
 public:
     Server(Config cfg, VoiceSession& session);
     int run();
+    int run(int activationFd, const std::filesystem::path& serverPath);
 
 private:
     Config cfg_;

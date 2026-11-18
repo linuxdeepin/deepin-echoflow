@@ -4,7 +4,7 @@
 set -euo pipefail
 
 if [[ $# -gt 1 ]]; then
-    echo "Usage: echoflow-session-stop [bin-directory]" >&2
+    echo "Usage: deepin-echoflow-session-stop [bin-directory]" >&2
     exit 2
 fi
 bindir="${1:-$(dirname -- "$0")}"
@@ -37,12 +37,17 @@ for proc_dir in /proc/[0-9]*; do
     executable="${executable% (deleted)}"
     args=()
     mapfile -d '' -t args 2>/dev/null < "$proc_dir/cmdline" || continue
-    if matches_command "${args[0]:-}" echoflow-session-start \
+    if matches_command "${args[0]:-}" deepin-echoflow-session-start \
+        || matches_command "${args[1]:-}" deepin-echoflow-session-start \
+        || matches_command "${args[0]:-}" echoflow-session-start \
         || matches_command "${args[1]:-}" echoflow-session-start; then
         identity="$(process_identity "$pid")" || continue
         processes[$pid]="$identity"
         supervisors+=("$pid")
-    elif [[ "$executable" == "$bindir/echoflow-ui" ]] \
+    elif [[ "$executable" == "$bindir/deepin-echoflow-ui" ]] \
+        || matches_command "${args[0]:-}" deepin-echoflow-ui \
+        || matches_command "${args[1]:-}" deepin-echoflow-ui \
+        || [[ "$executable" == "$bindir/echoflow-ui" ]] \
         || matches_command "${args[0]:-}" echoflow-ui \
         || matches_command "${args[1]:-}" echoflow-ui; then
         identity="$(process_identity "$pid")" || continue
@@ -66,5 +71,5 @@ for ((attempt = 0; attempt < 50; ++attempt)); do
     [[ ${#processes[@]} -gt 0 ]] || exit 0
     sleep 0.1
 done
-echo "EchoFlow UI did not stop; refusing to replace or remove running files." >&2
+echo "deepin-echoflow UI did not stop; refusing to replace or remove running files." >&2
 exit 1

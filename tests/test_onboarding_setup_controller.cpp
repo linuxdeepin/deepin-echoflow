@@ -73,6 +73,7 @@ private slots:
     void duplicateStartIsIgnoredWhileRunning();
     void reconstructsPresentAndRunningModel();
     void completedStateStartsReadyWithoutWork();
+    void finishRestartsFcitxAndWaitsForSuccess();
     void reconstructionPreservesReadyItemsWithoutMutation();
     void reconstructionLeavesNotReadyItemsPending();
     void startRunsOnlyMissingReconstructedItems();
@@ -238,6 +239,37 @@ void TestOnboardingSetupController::completedStateStartsReadyWithoutWork()
     controller.start();
     QCOMPARE(model.starts, 0);
     QVERIFY(runner.calls.isEmpty());
+}
+
+void TestOnboardingSetupController::finishRestartsFcitxAndWaitsForSuccess()
+{
+    QTemporaryDir dir;
+    OnboardingState state(dir.filePath(QStringLiteral("ui-state.ini")));
+    QVERIFY(state.markComplete());
+    FakeModelSource model;
+    FakeCommandRunner runner;
+    OnboardingSetupController controller(&model, &runner, &state);
+    QSignalSpy readySpy(&controller, &OnboardingSetupController::readyToOpenSettings);
+
+    controller.finishAndRestartFcitx();
+    controller.finishAndRestartFcitx();
+    QVERIFY(!controller.isComplete());
+    QVERIFY(controller.isRunning());
+    QCOMPARE(runner.calls.size(), 1);
+    QCOMPARE(runner.calls.last().program, QStringLiteral("fcitx5"));
+    QCOMPARE(runner.calls.last().arguments, QStringList({QStringLiteral("-rd")}));
+    QCOMPARE(readySpy.count(), 0);
+
+    runner.finish(QStringLiteral("fcitx"), false, QStringLiteral("restart failed"));
+    QVERIFY(!controller.isComplete());
+    QCOMPARE(controller.itemState(SetupItem::Fcitx), SetupItemState::Failed);
+    QCOMPARE(readySpy.count(), 0);
+    controller.retryFailed();
+    QCOMPARE(runner.calls.size(), 2);
+    runner.finish(QStringLiteral("fcitx"), true);
+    QVERIFY(controller.isComplete());
+    QCOMPARE(readySpy.count(), 1);
+    QCOMPARE(model.starts, 0);
 }
 
 void TestOnboardingSetupController::reconstructionPreservesReadyItemsWithoutMutation()
@@ -426,7 +458,7 @@ void TestOnboardingSetupController::commandsAndProbesAreExact()
     model.finish(true);
     QCOMPARE(runner.calls.size(), 3);
     QCOMPARE(runner.calls.at(2).id, QStringLiteral("service-after-model"));
-    QVERIFY(runner.calls.at(2).program.endsWith(QStringLiteral("/echoflow-session-start")));
+    QVERIFY(runner.calls.at(2).program.endsWith(QStringLiteral("/deepin-echoflow-session-start")));
     QCOMPARE(runner.calls.at(2).arguments, QStringList({QStringLiteral("--socket-only")}));
     runner.finish(QStringLiteral("service-after-model"), true);
     QCOMPARE(controller.itemState(SetupItem::UiAutostart), SetupItemState::Succeeded);
@@ -434,7 +466,7 @@ void TestOnboardingSetupController::commandsAndProbesAreExact()
     QCOMPARE(runner.calls.at(3).id, QStringLiteral("service-check"));
     QCOMPARE(runner.calls.at(3).arguments,
              QStringList({QStringLiteral("--user"), QStringLiteral("is-active"),
-                          QStringLiteral("echoflow.socket")}));
+                          QStringLiteral("deepin-echoflow.socket")}));
     runner.finish(QStringLiteral("service-check"), true);
     QCOMPARE(controller.itemState(SetupItem::Service), SetupItemState::Succeeded);
 }
@@ -495,7 +527,7 @@ void TestOnboardingSetupController::processRunnerReportsFailedStart()
     QProcessSetupCommandRunner runner;
     QSignalSpy spy(&runner, &SetupCommandRunner::finished);
     runner.run(QStringLiteral("missing"),
-               QStringLiteral("/definitely/not/an/echoflow-command"), {});
+               QStringLiteral("/definitely/not/an/deepin-echoflow-command"), {});
     QTRY_COMPARE_WITH_TIMEOUT(spy.count(), 1, 2000);
     QCOMPARE(spy.first().at(1).toBool(), false);
     QVERIFY(!spy.first().at(2).toString().isEmpty());

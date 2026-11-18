@@ -100,9 +100,9 @@ void TestOnboardingState::defaultPathUsesConfigLocation()
         QStandardPaths::writableLocation(QStandardPaths::ConfigLocation);
 
     QCOMPARE(OnboardingState::defaultPath(),
-             configLocation + QStringLiteral("/echoflow/ui-state.ini"));
+             configLocation + QStringLiteral("/deepin-echoflow/ui-state.ini"));
     QVERIFY(OnboardingState::defaultPath().endsWith(
-        QStringLiteral("/echoflow/ui-state.ini")));
+        QStringLiteral("/deepin-echoflow/ui-state.ini")));
     QStandardPaths::setTestModeEnabled(false);
 }
 

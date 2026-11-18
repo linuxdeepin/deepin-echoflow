@@ -3,7 +3,7 @@
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     cmake_minimum_required(VERSION 3.16)
-    project(echoflow-focused-tests LANGUAGES CXX)
+    project(deepin-echoflow-focused-tests LANGUAGES CXX)
 
     set(CMAKE_CXX_STANDARD 17)
     set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -73,6 +73,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     set_tests_properties(test_onboarding_dialog PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+    find_package(Qt6 REQUIRED COMPONENTS Qml Quick)
     add_executable(test_capsule_controller
         test_capsule_controller.cpp
         ../ui-host/CapsuleController.cpp
@@ -80,10 +81,10 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     target_include_directories(test_capsule_controller PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/../ui-host)
     target_link_libraries(test_capsule_controller PRIVATE
-        Qt6::Core Qt6::Gui Qt6::Test)
+        Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::Test)
     add_test(NAME test_capsule_controller COMMAND test_capsule_controller)
     set_tests_properties(test_capsule_controller PROPERTIES
-        ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
     add_executable(test_long_press_detector
         test_long_press_detector.cpp
         ../ui-host/LongPressDetector.cpp)
@@ -108,11 +109,17 @@ endfunction()
 add_test(NAME session_lifecycle_tests
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_session_lifecycle.py)
 
+add_test(NAME compare_denoise_tests
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_compare_denoise.py)
+
 set(ECHOFLOW_TESTS
     test_addon_command_client
     test_audio_segmenter
+    test_audio_level_meter
     test_config
     test_crispasr_engine
+    test_qwen_stream
+    test_encoder_cache
     test_voice_session
     test_committer
     test_selftest
@@ -121,12 +128,19 @@ set(ECHOFLOW_TESTS
     test_segment_asr_worker
     test_silero_live_segmenter
     test_live_segmenter_factory
+    test_live_stream_transcriber
+    test_live_audio_queue
+    test_live_stream_endpoint
+    test_ui_notifier
     test_text_joiner
     test_polish_prompt
+    test_streaming_denoiser
+    test_streaming_text_polisher
     test_vad_metrics
     test_vad_backend
     test_single_instance
-    test_benchmark_manifest)
+    test_benchmark_manifest
+    test_transcription_quality)
 
 foreach(test_target ${ECHOFLOW_TESTS})
     add_executable(${test_target} ${test_target}.cpp)
@@ -134,6 +148,20 @@ foreach(test_target ${ECHOFLOW_TESTS})
     echoflow_enable_dead_strip(${test_target})
     add_test(NAME ${test_target} COMMAND ${test_target})
 endforeach()
+
+target_sources(test_ui_notifier PRIVATE
+    ../ui-host/UiSocketServer.cpp
+    ../ui-host/CapsuleController.cpp
+    ../ui-host/ScreenGeometry.cpp)
+target_include_directories(test_ui_notifier PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../ui-host)
+target_link_libraries(test_ui_notifier PRIVATE Qt6::Gui)
+set_tests_properties(test_ui_notifier PROPERTIES
+    TIMEOUT 15 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+find_package(Fcitx5Core REQUIRED)
+add_executable(test_voice_preedit test_voice_preedit.cpp)
+target_link_libraries(test_voice_preedit PRIVATE Qt6::Test Fcitx5::Core)
+add_test(NAME test_voice_preedit COMMAND test_voice_preedit)
 
 add_executable(test_onboarding_state
     test_onboarding_state.cpp
@@ -200,6 +228,7 @@ add_test(NAME test_onboarding_dialog COMMAND test_onboarding_dialog)
 set_tests_properties(test_onboarding_dialog PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+find_package(Qt6 REQUIRED COMPONENTS Qml Quick)
 add_executable(test_capsule_controller
     test_capsule_controller.cpp
     ../ui-host/CapsuleController.cpp
@@ -207,11 +236,11 @@ add_executable(test_capsule_controller
 target_include_directories(test_capsule_controller PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../ui-host)
 target_link_libraries(test_capsule_controller PRIVATE
-    Qt6::Core Qt6::Gui Qt6::Test)
+    Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::Test)
 echoflow_enable_dead_strip(test_capsule_controller)
 add_test(NAME test_capsule_controller COMMAND test_capsule_controller)
 set_tests_properties(test_capsule_controller PROPERTIES
-    ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
 
 add_executable(test_long_press_detector
     test_long_press_detector.cpp
@@ -230,9 +259,16 @@ add_test(NAME spec_tests
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 add_test(NAME performance_gate_tests
-    COMMAND ${Python3_EXECUTABLE} -m unittest -v tests.test_performance_gate)
+    COMMAND ${Python3_EXECUTABLE} -m unittest -v tests.test_performance_gate
+        tests.test_release_evidence tests.test_release_performance_driver)
 set_tests_properties(performance_gate_tests PROPERTIES
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+add_executable(test_server_shutdown test_server_shutdown.cpp)
+target_link_libraries(test_server_shutdown PRIVATE echoflow_service Qt6::Core Qt6::Test)
+echoflow_enable_dead_strip(test_server_shutdown)
+add_test(NAME test_server_shutdown COMMAND test_server_shutdown)
+set_tests_properties(test_server_shutdown PROPERTIES TIMEOUT 10)
 
 add_executable(voice_latency_benchmark benchmarks/voice_latency_benchmark.cpp)
 target_link_libraries(voice_latency_benchmark PRIVATE echoflow_service pthread)
@@ -243,3 +279,15 @@ target_sources(vad_replay_benchmark PRIVATE benchmarks/BenchmarkManifest.cpp)
 target_include_directories(vad_replay_benchmark PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks)
 target_link_libraries(vad_replay_benchmark PRIVATE echoflow_service Qt6::Core pthread)
 echoflow_enable_dead_strip(vad_replay_benchmark)
+
+add_executable(stream_profile_benchmark benchmarks/stream_profile_benchmark.cpp)
+target_link_libraries(stream_profile_benchmark PRIVATE echoflow_service Qt6::Core pthread)
+echoflow_enable_dead_strip(stream_profile_benchmark)
+
+add_executable(transcription_quality_benchmark benchmarks/transcription_quality_benchmark.cpp)
+target_link_libraries(transcription_quality_benchmark PRIVATE echoflow_service Qt6::Core pthread)
+echoflow_enable_dead_strip(transcription_quality_benchmark)
+
+add_executable(live_replay_benchmark benchmarks/live_replay_benchmark.cpp)
+target_link_libraries(live_replay_benchmark PRIVATE echoflow_service Qt6::Core pthread)
+echoflow_enable_dead_strip(live_replay_benchmark)

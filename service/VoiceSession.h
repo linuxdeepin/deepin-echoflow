@@ -18,6 +18,8 @@
 
 namespace echoflow {
 
+class StreamingTextPolisher;
+
 enum class SessionState {
     Idle,
     Recording,
@@ -35,8 +37,9 @@ public:
         ICommitter& committer, IUiNotifier& ui, ThreadLauncher threadLauncher = {});
     ~VoiceSession();
 
-    // Optional; must be set before the first command. The polisher rewrites
-    // the final transcript and falls back to the raw text on any failure.
+    // Optional; must be set before the first command and outlive this session.
+    // Confirmed segments are polished in the background; pending work has a
+    // bounded wait at finish, then falls back to its raw text.
     void setTextPolisher(ITextPolisher* polisher);
 
     std::string handleCommand(const std::string& command);
@@ -44,6 +47,27 @@ public:
 
 private:
     struct PartialCallbackState {
+        std::mutex mutex;
+        std::mutex deliveryMutex;
+        std::condition_variable condition;
+        IUiNotifier* ui = nullptr;
+        ICommitter* committer = nullptr;
+        std::uint64_t generation = 0;
+        std::uint64_t revision = 0;
+        std::uint64_t polishSession = 0;
+        std::string rawText;
+        std::string confirmedRaw;
+        std::string polishedConfirmed;
+        std::string pendingConfirmedRaw;
+        std::string pendingPolished;
+        std::string lastPublished;
+        bool published = false;
+        bool accepting = false;
+        bool preeditAccepting = false;
+        std::size_t active = 0;
+    };
+
+    struct AudioLevelCallbackState {
         std::mutex mutex;
         std::condition_variable condition;
         IUiNotifier* ui = nullptr;
@@ -57,12 +81,16 @@ private:
         bool suppressIfStale;
     };
 
+    void setupAudioLevelCallback();
+    void setAudioLevelAccepting(bool accepting);
+    void shutdownAudioLevelCallback();
+    static void publishPartial(const std::shared_ptr<PartialCallbackState>& state);
     std::string startRecording();
     std::string startFinalization();
     void finalize(std::uint64_t generation);
     std::string polishText(const std::string& text);
     void joinCompletedWorker();
-    void setPartialTextAccepting(bool accepting);
+    void setPartialTextAccepting(bool accepting, bool keepPreedit = false);
     void shutdownPartialTextCallback();
     // Discard any in-flight recording and return to Idle, emitting IDLE so the
     // UI hides the capsule. Shared by BLUR (focus lost) and CANCEL (X button).
@@ -77,11 +105,12 @@ private:
     IRecorder* recorder_ = nullptr;
     IAsrEngine* asr_ = nullptr;
     ILiveVoicePipeline* livePipeline_ = nullptr;
-    ITextPolisher* polisher_ = nullptr;
+    std::shared_ptr<StreamingTextPolisher> streamingPolisher_;
     ICommitter& committer_;
     IUiNotifier& ui_;
     ThreadLauncher threadLauncher_;
     std::shared_ptr<PartialCallbackState> partialCallbackState_;
+    std::shared_ptr<AudioLevelCallbackState> audioLevelCallbackState_;
 
     mutable std::mutex mutex_;
     std::condition_variable condition_;

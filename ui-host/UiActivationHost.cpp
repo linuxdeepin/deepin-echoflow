@@ -13,7 +13,7 @@ UiActivationHost::UiActivationHost(QString socketPath, QObject *parent)
     , socketPath_(std::move(socketPath))
     , workerContext_(new QObject)
 {
-    workerThread_.setObjectName(QStringLiteral("echoflow-ui-activation"));
+    workerThread_.setObjectName(QStringLiteral("deepin-echoflow-ui-activation"));
     workerContext_->moveToThread(&workerThread_);
     connect(&workerThread_, &QThread::finished,
             workerContext_, &QObject::deleteLater);

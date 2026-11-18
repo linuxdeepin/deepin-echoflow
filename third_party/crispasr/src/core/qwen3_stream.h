@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Hualet Wang
+// SPDX-License-Identifier: MIT
+
 // core/qwen3_stream.h — Qwen3-ASR / Confucius4-R2T2 prefix-rollback streaming.
 //
 // A line-by-line port of R2T2ASRModel.streaming_transcribe /
@@ -25,6 +28,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <functional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -394,6 +398,7 @@ struct Config {
     int unfixed_chunk_num = 0;
     int unfixed_token_num = 1;
     bool rollback_punctuation = false;
+    bool use_transcript_prefix = true;
     bool stock_qwen = false;       // Qwen3-ASR SDK, without R2T2 normalisation
     std::u32string force_language; // canonical name, empty = auto
 };
@@ -442,7 +447,7 @@ struct StepResult {
 // pipes and CJK spacing, and advances the chunk even without an ASR tag.
 inline StepResult stock_decode(State& st, const Hooks& h, int max_new_tokens, bool final) {
     StepResult r;
-    if (st.chunk_id >= st.cfg.unfixed_chunk_num) {
+    if (st.cfg.use_transcript_prefix && st.chunk_id >= st.cfg.unfixed_chunk_num) {
         const auto ids = h.encode(utf8_encode(st.raw_decoded));
         if (final) {
             const int end = std::max(1, (int)ids.size() - st.cfg.unfixed_token_num);
@@ -471,7 +476,7 @@ inline StepResult step(State& st, const Hooks& h, const float* chunk, size_t n, 
         return stock_decode(st, h, max_new_tokens, false);
 
     std::u32string prefix;
-    if (st.chunk_id >= st.cfg.unfixed_chunk_num) {
+    if (st.cfg.use_transcript_prefix && st.chunk_id >= st.cfg.unfixed_chunk_num) {
         st.raw_decoded = py_split0(st.raw_decoded, U'|');
         const auto ids = h.encode(utf8_encode(st.raw_decoded));
         const int k = rollback_k(st.cfg, st.raw_decoded, U"\uFF0C\u3002\uFF01\uFF1F\u3001\uFF1B\uFF1A.!?;:");
@@ -531,15 +536,16 @@ inline StepResult step(State& st, const Hooks& h, const float* chunk, size_t n, 
 
 // finish_streaming_transcribe: decode the tail once. Note its rollback keeps
 // at least one token (max(1, ...)) and has no U+FFFD loop, unlike step().
-inline StepResult finish(State& st, const Hooks& h, const float* tail, size_t n, int max_new_tokens) {
+inline StepResult finish(State& st, const Hooks& h, const float* tail, size_t n, int max_new_tokens,
+                          bool force_decode = false) {
     StepResult r;
-    if (n == 0)
+    if (n == 0 && (!force_decode || st.audio_accum.empty()))
         return r;
-    st.audio_accum.insert(st.audio_accum.end(), tail, tail + n);
+    if (n) st.audio_accum.insert(st.audio_accum.end(), tail, tail + n);
     if (st.cfg.stock_qwen)
         return stock_decode(st, h, max_new_tokens, true);
     std::u32string prefix;
-    if (st.chunk_id >= st.cfg.unfixed_chunk_num) {
+    if (st.cfg.use_transcript_prefix && st.chunk_id >= st.cfg.unfixed_chunk_num) {
         const auto ids = h.encode(utf8_encode(st.raw_decoded));
         const int end_idx = std::max(1, (int)ids.size() - st.cfg.unfixed_token_num);
         prefix = utf8_decode_replace(
@@ -593,6 +599,114 @@ struct Schedule {
             max_new = max_new + 1;
         }
         max_new = std::min(floor_cap, max_new);
+    }
+};
+
+// Buffer capture packets independently of decode boundaries. Both Qwen recipes
+// use the requested audio-time interval; R2T2 retains its initial lookahead.
+struct BufferedStream {
+    State algorithm;
+    Hooks hooks;
+    Schedule schedule;
+    std::vector<float> pending;
+    bool r2t2;
+    int chunk;
+    int max_new = 256;
+    int max_new_limit = 0;
+    int64_t inference_count = 0;
+    bool live_decode = true;
+    bool coalesce_next = false;
+    bool full_segment_decode = false;
+
+    void set_full_segment_decode(bool enabled) {
+        full_segment_decode = enabled;
+        algorithm.cfg.use_transcript_prefix = !enabled;
+    }
+
+    void set_live_decode(bool enabled) {
+        live_decode = enabled;
+        if (!enabled) coalesce_next = true;
+    }
+
+    int token_budget(int requested) const {
+        return max_new_limit > 0 ? std::min(requested, max_new_limit) : requested;
+    }
+
+    static bool valid_step_ms(int step_ms) {
+        return step_ms == 0 || (step_ms >= 100 && step_ms <= 4000);
+    }
+
+    explicit BufferedStream(bool use_r2t2, int step_ms = 0, int token_limit = 0) : r2t2(use_r2t2) {
+        if (!valid_step_ms(step_ms))
+            throw std::invalid_argument("Qwen stream step must be 0 or 100-4000 ms");
+        if (token_limit < 0)
+            throw std::invalid_argument("Qwen stream token limit must be non-negative");
+        max_new_limit = token_limit;
+        if (token_limit > 0) max_new = token_limit;
+        const int interval_ms = step_ms ? step_ms : (r2t2 ? 160 : 2000);
+        chunk = interval_ms * 16;
+        schedule.init(chunk, 2560);
+        algorithm.cfg.stock_qwen = !r2t2;
+        algorithm.cfg.unfixed_chunk_num = r2t2 ? 0 : 2;
+        algorithm.cfg.unfixed_token_num = r2t2 ? 1 : 5;
+    }
+
+    void append(const float* pcm, size_t n, bool flush,
+                const std::function<void(const std::string&)>& publish) {
+        if (n)
+            pending.insert(pending.end(), pcm, pcm + n);
+        if (!live_decode && !flush) return;
+        if (full_segment_decode) {
+            const int threshold = r2t2 ? schedule.next_chunk_samples() : chunk;
+            if (!flush && pending.size() < static_cast<size_t>(threshold)) return;
+            if (pending.empty() && algorithm.audio_accum.empty()) return;
+            // Full-segment generation needs a full transcript token budget,
+            // including R2T2; its small incremental budgets only cover a tail.
+            const auto result = flush
+                ? finish(algorithm, hooks, pending.data(), pending.size(), token_budget(max_new), true)
+                : step(algorithm, hooks, pending.data(), pending.size(), token_budget(max_new));
+            ++inference_count;
+            pending.clear();
+            coalesce_next = false;
+            if (r2t2) schedule.update(result.fixed_text);
+            publish(utf8_encode(algorithm.text));
+            return;
+        }
+        // Catch up at the newest audio position rather than replaying every
+        // preview missed while inference was slower than capture. A final
+        // flush also consumes the deferred tail in one generation.
+        if (flush && coalesce_next) {
+            const int budget = r2t2
+                ? std::max(schedule.first_max_new, static_cast<int>((pending.size() + 1279) / 1280))
+                : max_new;
+            finish(algorithm, hooks, pending.data(), pending.size(), token_budget(budget));
+            if (!pending.empty()) ++inference_count;
+            pending.clear();
+            coalesce_next = false;
+            publish(utf8_encode(algorithm.text));
+            return;
+        }
+        auto next_chunk = [&]() { return r2t2 ? schedule.next_chunk_samples() : chunk; };
+        while (pending.size() >= static_cast<size_t>(next_chunk())) {
+            const int count = coalesce_next ? static_cast<int>(pending.size()) : next_chunk();
+            const int budget = r2t2 && coalesce_next
+                ? std::max(schedule.max_new, (count + 1279) / 1280)
+                : (r2t2 ? schedule.max_new : max_new);
+            const auto result = step(algorithm, hooks, pending.data(), count, token_budget(budget));
+            ++inference_count;
+            coalesce_next = false;
+            pending.erase(pending.begin(), pending.begin() + count);
+            if (r2t2)
+                schedule.update(result.fixed_text);
+            publish(utf8_encode(algorithm.text));
+        }
+        if (flush) {
+            finish(algorithm, hooks, pending.data(), pending.size(),
+                   token_budget(r2t2 ? schedule.first_max_new : max_new));
+            if (!pending.empty()) ++inference_count;
+            pending.clear();
+            publish(utf8_encode(algorithm.text));
+        }
     }
 };
 

@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-EchoFlow is an offline voice input method for deepin/Fcitx5. The top-level
+deepin-echoflow is an offline voice input method for deepin/Fcitx5. The top-level
 `CMakeLists.txt` builds native components. `service/` contains the daemon,
 recording lifecycle, ASR integration, sockets, commit client, UI notifications,
 and self-test logic. `fcitx-addon/` captures right `Ctrl`, tracks input-context
@@ -25,8 +25,8 @@ ctest --test-dir build --output-on-failure
 Sanity checks:
 
 ```bash
-./build/service/echoflow-service --print-default-config
-./build/service/echoflow-service --self-test
+./build/service/deepin-echoflow-service --print-default-config
+./build/service/deepin-echoflow-service --self-test
 bash -n install-user.sh uninstall-user.sh tests/spec/*.sh
 sh -n run.sh
 ```
@@ -48,7 +48,7 @@ cmake --build build --target update_translations
 ```
 
 then fill the new `<translation>` entries in
-`ui-host/translations/echoflow_<lang>.ts` (zh_CN, es, fr, it, pt). The
+`ui-host/translations/deepin-echoflow_<lang>.ts` (zh_CN, es, fr, it, pt). The
 `.qm` files are rebuilt automatically and embedded at `:/i18n` via
 `qt_add_translations`; `main.cpp` loads them from there by locale.
 
@@ -85,7 +85,7 @@ addon changes.
 
 ## Version Bumping
 
-EchoFlow ships as a **native** Debian package
+deepin-echoflow ships as a **native** Debian package
 (`debian/source/format` is `3.0 (native)`), so `debian/changelog` is the
 single source of truth and the version carries no Debian revision suffix
 (e.g. `0.1.0`, not `0.1.0-1`). When bumping the version
@@ -130,13 +130,13 @@ four-segment form (e.g. `0.1.1.0`).
 
 ## Configuration & Runtime Notes
 
-Runtime sockets live under `/run/user/$UID/`: `echoflow-control.sock`,
-`echoflow-fcitx.sock`, and `echoflow-ui.sock`. Config lives at
-`~/.config/echoflow/echoflow.conf`; `Config::modelDir` is derived from the
+Runtime sockets live under `/run/user/$UID/`: `deepin-echoflow-control.sock`,
+`deepin-echoflow-fcitx.sock`, and `deepin-echoflow-ui.sock`. Config lives at
+`~/.config/deepin-echoflow/deepin-echoflow.conf`; `Config::modelDir` is derived from the
 selected model and config directory. `service/ModelCatalog.h` is the single
 source of truth for model IDs, display names, Hugging Face repos, and file
 lists, for both ASR models and the separate polish models
 (`polishModelCatalog()`). Check polish output from the build tree with
-`./build/service/echoflow-service --polish-text "..."` (or `-` for one
+`./build/service/deepin-echoflow-service --polish-text "..."` (or `-` for one
 transcript per stdin line). The service must not perform HTTP downloads; model download belongs in
 `ui-host`.

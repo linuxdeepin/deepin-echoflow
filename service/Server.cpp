@@ -8,8 +8,10 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <cerrno>
+#include <csignal>
 #include <cstring>
 #include <chrono>
 #include <cstdlib>
@@ -22,6 +24,14 @@
 namespace echoflow {
 
 namespace {
+
+std::atomic<bool> shutdownRequested{false};
+static_assert(std::atomic<bool>::is_always_lock_free);
+
+void requestShutdown(int)
+{
+    shutdownRequested.store(true, std::memory_order_relaxed);
+}
 
 constexpr std::array<const char*, 10> kAllowedCommands = {
     "FOCUS", "REFOCUS", "CARET", "BLUR", "CTRL_DOWN", "TYPED", "CANCEL", "STATUS", "START", "STOP"};
@@ -110,10 +120,21 @@ int Server::run()
 {
     const int activationFd = systemdActivationSocket();
     if (activationFd < 0) {
-        log("service must be started by echoflow.socket activation");
+        log("service must be started by deepin-echoflow.socket activation");
         return 1;
     }
-    auto serverPath = controlSocketPath(cfg_);
+    return run(activationFd, controlSocketPath(cfg_));
+}
+
+int Server::run(int activationFd, const std::filesystem::path& serverPath)
+{
+    struct sigaction action {};
+    action.sa_handler = requestShutdown;
+    sigemptyset(&action.sa_mask);
+    if (sigaction(SIGTERM, &action, nullptr) != 0 || sigaction(SIGINT, &action, nullptr) != 0) {
+        log(std::string("install shutdown handler failed: ") + std::strerror(errno));
+        return 1;
+    }
     SingleInstanceGuard instance;
     std::string error;
     if (!instance.acquire(serverPath, &error)) {
@@ -121,14 +142,14 @@ int Server::run()
         return 1;
     }
     const int fd = instance.fd();
-    log("EchoFlow service listening on " + serverPath.string());
+    log("deepin-echoflow service listening on " + serverPath.string());
 
     using Clock = std::chrono::steady_clock;
     const auto timeout = idleTimeout();
     auto lastActivity = Clock::now();
     auto lastState = session_.state();
     char buf[4096];
-    for (;;) {
+    while (!shutdownRequested.load(std::memory_order_relaxed)) {
         const auto now = Clock::now();
         const auto state = session_.state();
         if (state != lastState) {
@@ -163,6 +184,7 @@ int Server::run()
         }
 
         for (const auto& source : watched) {
+            if (shutdownRequested.load(std::memory_order_relaxed)) break;
             if (!(source.revents & POLLIN)) {
                 continue;
             }
@@ -197,6 +219,8 @@ int Server::run()
             }
         }
     }
+    log("service shutdown requested; cleaning up voice session");
+    return 0;
 }
 
 }  // namespace echoflow

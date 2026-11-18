@@ -20,6 +20,19 @@ extern "C" {
 
 struct qwen3_asr_context;
 
+// Last KV forward call, queried on the context's owning thread. Failed calls
+// may contain partial timings. All values are milliseconds.
+struct qwen3_asr_llm_metrics {
+    double graph_ms;
+    double alloc_ms;
+    double compute_ms;
+    double transfer_ms;
+};
+struct qwen3_asr_llm_metrics qwen3_asr_last_llm_metrics(const struct qwen3_asr_context* ctx);
+// Changes whenever KV storage is replaced, reset, or written. Prefix-cache
+// owners can detect intervening inference without retaining another KV copy.
+uint64_t qwen3_asr_kv_revision(const struct qwen3_asr_context* ctx);
+
 struct qwen3_asr_context_params {
     int n_threads;
     int verbosity;   // 0=silent 1=normal 2=verbose
@@ -39,6 +52,14 @@ void qwen3_asr_free(struct qwen3_asr_context* ctx);
 
 // Transcribe raw 16 kHz mono PCM. Returns malloc'd UTF-8 string (caller owns).
 char* qwen3_asr_transcribe(struct qwen3_asr_context* ctx, const float* samples, int n_samples);
+
+// Dependency-aware encoder cache for a single stream. Dense bidirectional
+// attention reuses only unchanged stems and identical complete outputs;
+// existing window attention additionally reuses independent complete windows.
+struct crisp_audio_encoder_cache;
+float* qwen3_asr_run_encoder_cached(struct qwen3_asr_context* ctx,
+    struct crisp_audio_encoder_cache* cache, const float* mel, int n_mels, int T_mel,
+    int* out_n_frames, int* out_dim);
 
 // ---- Stage-1 helpers exposed for differential testing ----------------------
 //

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Hualet Wang
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Release benchmark orchestration for EchoFlow."""
+"""Release benchmark orchestration for deepin-echoflow."""
 
 import hashlib
 import json
@@ -15,7 +15,9 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from scripts.performance_gate import compare_results, identities_match
+from scripts.performance_gate import (
+    LIVE_BENCHMARK_SCHEMA, LIVE_BENCHMARK_SOURCE, compare_release_results, identities_match,
+)
 
 
 @dataclass(frozen=True)
@@ -96,11 +98,12 @@ def verify_noop_build_output(output):
         raise RuntimeError("incremental build compiled C/C++ source")
 
 
-def _run(command, *, cwd, capture=True):
+def _run(command, *, cwd, capture=True, env=None):
     command = [str(item) for item in command]
     result = subprocess.run(
         command,
         cwd=cwd,
+        env=env,
         check=False,
         text=True,
         stdout=subprocess.PIPE if capture else None,
@@ -146,7 +149,7 @@ def clone_local_submodule(source, destination, commit):
     alternates = destination / ".git" / "objects" / "info" / "alternates"
     alternates.write_text(str(common_dir / "objects") + "\n", encoding="utf-8")
     _run(["git", "cat-file", "-e", f"{commit}^{{tree}}"], cwd=destination)
-    _run(["git", "update-ref", "refs/echoflow/historical-baseline", commit],
+    _run(["git", "update-ref", "refs/deepin-echoflow/historical-baseline", commit],
          cwd=destination)
     _run(["git", "checkout", "--detach", commit], cwd=destination)
     # Nested submodules (CrispASR vendors ggml) come from the source's own
@@ -222,7 +225,7 @@ def make_identity(*, model, config, manifest, threads, openblas_threads):
         "architecture": platform.machine(),
         "cpu_flags": cpu_flags,
         "build_profile": "x86-64-v3",
-        "benchmark_schema": 1,
+        "benchmark_schema": LIVE_BENCHMARK_SCHEMA,
         "model_sha256": sha256_path(model),
         "manifest_sha256": sha256_file(manifest),
         "config_sha256": sha256_file(config),
@@ -269,30 +272,60 @@ def _configure_and_build(tree, build):
     ]
     _run(["cmake", "-S", ".", "-B", str(build), *cmake_options], cwd=tree)
     targets = ["voice_latency_benchmark", "vad_replay_benchmark"]
+    if (tree / LIVE_BENCHMARK_SOURCE).is_file():
+        targets.append("live_replay_benchmark")
     _run(["cmake", "--build", str(build), "--parallel", str(os.cpu_count() or 1),
           "--target", *targets], cwd=tree)
     second = _run(["cmake", "--build", str(build), "--target", *targets], cwd=tree)
     verify_noop_build_output(second)
 
 
-def _benchmark_build(build, *, config, manifest_path, entries, iterations, threads,
+def _live_results(executable, *, config, model, entries, iterations, threads, env):
+    samples = []
+    errors = reference_chars = 0
+    for entry in entries:
+        rows = [row for row in _json_lines(_run([
+            str(executable), "--config", str(config), "--audio", entry["audio"],
+            "--threads", str(threads), "--iterations", str(iterations + 1),
+        ], cwd=executable.parent, env=env)) if row.get("mode") == "live-replay"]
+        if len(rows) != iterations + 1:
+            raise RuntimeError(f"unexpected live replay iteration count: {entry['id']}")
+        for row in rows:
+            actual_model = Path(row["model"]).resolve()
+            if actual_model != model and not (model.is_dir() and actual_model.is_relative_to(model)):
+                raise RuntimeError(f"live replay used a model outside --model: {actual_model}")
+        measured = rows[1:]
+        reference = entry.get("reference", "")
+        transcript = measured[-1]["transcript"]
+        errors += _edit_distance(reference, transcript) if reference else 0
+        reference_chars += len(reference)
+        samples.append({
+            "id": entry["id"], "sha256": entry["sha256"],
+            "required": entry.get("required", True), "reference": reference,
+            "transcript": transcript,
+            "latency_ms": [row["stop_to_final_ms"] for row in measured],
+            "first_preview_ms": [row["first_preview_ms"] for row in measured],
+        })
+    return {"samples": samples, "aggregate_cer": errors / reference_chars if reference_chars else 0.0}
+
+
+def _benchmark_build(build, *, config, model, manifest_path, entries, iterations, threads,
                      openblas_threads):
     voice = build / "tests" / "voice_latency_benchmark"
     vad = build / "tests" / "vad_replay_benchmark"
+    env = {**os.environ, "OPENBLAS_NUM_THREADS": str(openblas_threads)}
     samples = []
-    voice_transcripts = {}
     for entry in entries:
         output = _run([
             str(voice), "--transcribe-file", entry["audio"], "--config", str(config),
             "--threads", str(threads), "--openblas-threads", str(openblas_threads),
             "--iterations", str(iterations + 1),
-        ], cwd=build)
+        ], cwd=build, env=env)
         rows = [row for row in _json_lines(output) if row.get("mode") == "transcribe-file"]
         if len(rows) != iterations + 1:
             raise RuntimeError(f"unexpected ASR iteration count: {entry['id']}")
         measured = rows[1:]
         transcript = measured[-1].get("transcript", "")
-        voice_transcripts[entry["id"]] = transcript
         samples.append({
             "id": entry["id"],
             "sha256": entry["sha256"],
@@ -306,7 +339,7 @@ def _benchmark_build(build, *, config, manifest_path, entries, iterations, threa
     vad_rows = _json_lines(_run([
         str(vad), "--manifest", str(manifest_path), "--backend", "energy",
         "--config", str(config),
-    ], cwd=build))
+    ], cwd=build, env=env))
     clips = [row for row in vad_rows if row.get("type") == "clip"]
     clips_by_id = {row.get("id"): row for row in clips if row.get("id")}
     clips_by_audio = {str(Path(row["audio"]).resolve()): row for row in clips}
@@ -321,11 +354,16 @@ def _benchmark_build(build, *, config, manifest_path, entries, iterations, threa
         sample["cer"] = errors / len(reference) if reference else 0.0
         total_errors += errors
         total_reference += len(reference)
-    return {
+    result = {
         "samples": samples,
         "aggregate_cer": total_errors / total_reference if total_reference else 0.0,
         "vad": vad_rows,
     }
+    live = build / "tests" / "live_replay_benchmark"
+    if live.is_file():
+        result["live"] = _live_results(live, config=config, model=model, entries=entries,
+                                       iterations=iterations, threads=threads, env=env)
+    return result
 
 
 def _previous_baseline(path, baseline_ref, current_identity):
@@ -368,8 +406,12 @@ def run_release_check(args):
         "baseline": _git_resolve(root, args.baseline_ref),
         "candidate": _git_resolve(root, args.candidate_ref),
     }
+    has_live = {role: bool(_run(["git", "ls-tree", commit, "--", LIVE_BENCHMARK_SOURCE], cwd=root).strip())
+                for role, commit in commits.items()}
+    if not has_live["candidate"]:
+        raise RuntimeError("candidate must include the live replay benchmark")
     results = {"baseline": reused_result} if reused_result is not None else {}
-    temporary_root = Path(tempfile.mkdtemp(prefix="echoflow-release-performance-"))
+    temporary_root = Path(tempfile.mkdtemp(prefix="deepin-echoflow-release-performance-"))
     worktrees = []
     try:
         for item in plan:
@@ -382,6 +424,7 @@ def run_release_check(args):
             result = _benchmark_build(
                 build,
                 config=Path(args.config).resolve(),
+                model=Path(args.model).resolve(),
                 manifest_path=Path(args.manifest).resolve(),
                 entries=entries,
                 iterations=iterations,
@@ -393,9 +436,10 @@ def run_release_check(args):
             results[item.role] = result
         if results.get("baseline") is None:
             raise RuntimeError("baseline result is unavailable")
-        comparison = compare_results(results["baseline"], results["candidate"])
+        comparison = compare_release_results(results["baseline"], results["candidate"],
+                                             live_candidate=True, live_baseline=has_live["baseline"])
         evidence = {
-            "schema_version": 1,
+            "schema_version": LIVE_BENCHMARK_SCHEMA,
             "status": "pass" if comparison["passed"] else "fail",
             "version": args.version,
             "baseline": {

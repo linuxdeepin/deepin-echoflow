@@ -2,12 +2,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "CommandClient.h"
+#include "VoiceInputPolicy.h"
+#include "VoicePreedit.h"
 
 #include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <string>
@@ -36,9 +39,8 @@
 
 namespace {
 
-constexpr const char *kCommitSocketName = "echoflow-fcitx.sock";
+constexpr const char *kCommitSocketName = "deepin-echoflow-fcitx.sock";
 constexpr size_t kMaxMessageSize = 65536;
-constexpr std::string_view kCommitCommand = "COMMIT\n";
 // Chromium blurs and refocuses its input context several times right after a
 // click; focus reports within this window of a program's first focus still
 // count as that first focus, so the one-per-program hint is not lost to churn.
@@ -80,24 +82,62 @@ bool sendFocusCommand(std::string_view command) {
 }
 
 struct Request {
-    enum class Type {
-        Commit,
-        Ping,
-    };
-
+    enum class Type { Commit, Preedit, ClearPreedit, BeginVoice, CancelVoice, Ping };
     Type type = Type::Commit;
+    std::uint64_t generation = 0;
+    std::uint64_t revision = 0;
     std::string text;
 };
 
+bool parseGeneration(const std::string& value, std::uint64_t* generation)
+{
+    if (value.empty()) return false;
+    try {
+        size_t consumed = 0;
+        const auto parsed = std::stoull(value, &consumed);
+        if (consumed != value.size() || parsed == 0) return false;
+        *generation = parsed;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 Request parseRequest(const std::string &message) {
     if (message.empty() || message == "PING" || message == "PING\n") {
-        return {Request::Type::Ping, {}};
+        return {Request::Type::Ping, 0, 0, {}};
     }
-    if (message.rfind(kCommitCommand, 0) == 0) {
-        return {Request::Type::Commit,
-                message.substr(kCommitCommand.size())};
+    const auto newline = message.find('\n');
+    const std::string header = message.substr(0, newline);
+    const std::string payload = newline == std::string::npos
+        ? std::string() : message.substr(newline + 1);
+    const auto space = header.find(' ');
+    const std::string verb = header.substr(0, space);
+    if (verb == "COMMIT" || verb == "PREEDIT" || verb == "CLEAR_PREEDIT"
+        || verb == "VOICE_BEGIN" || verb == "VOICE_CANCEL") {
+        Request request;
+        request.type = verb == "COMMIT" ? Request::Type::Commit
+            : verb == "PREEDIT" ? Request::Type::Preedit
+            : verb == "CLEAR_PREEDIT" ? Request::Type::ClearPreedit
+            : verb == "VOICE_BEGIN" ? Request::Type::BeginVoice
+            : Request::Type::CancelVoice;
+        if (space != std::string::npos) {
+            const std::string arguments = header.substr(space + 1);
+            const auto secondSpace = arguments.find(' ');
+            const std::string generation = arguments.substr(0, secondSpace);
+            if (!parseGeneration(generation, &request.generation)) return {};
+            if (secondSpace != std::string::npos) {
+                if (verb != "PREEDIT" || !parseGeneration(
+                        arguments.substr(secondSpace + 1), &request.revision)) return {};
+            }
+        }
+        if (verb == "VOICE_BEGIN" || verb == "VOICE_CANCEL") {
+            if (space == std::string::npos || newline == std::string::npos) return {};
+        }
+        request.text = payload;
+        return request;
     }
-    return {Request::Type::Commit, message};
+    return {Request::Type::Commit, 0, 0, message};
 }
 
 class EchoFlow final : public fcitx::AddonInstance {
@@ -117,6 +157,7 @@ public:
 
     ~EchoFlow() override {
         ioEvent_.reset();
+        clearVoicePreedit();
         unlinkOwnedCommitSocket();
         if (fd_ >= 0) {
             close(fd_);
@@ -145,14 +186,14 @@ private:
         commitSocketPath_ = commitSocketPath();
         sockaddr_un addr {};
         if (commitSocketPath_.size() >= sizeof(addr.sun_path)) {
-            FCITX_ERROR() << "EchoFlow socket path too long: "
+            FCITX_ERROR() << "deepin-echoflow socket path too long: "
                           << commitSocketPath_;
             return;
         }
 
         fd_ = socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
         if (fd_ < 0) {
-            FCITX_ERROR() << "EchoFlow failed to create socket: "
+            FCITX_ERROR() << "deepin-echoflow failed to create socket: "
                           << strerror(errno);
             return;
         }
@@ -162,7 +203,7 @@ private:
                      sizeof(addr.sun_path) - 1);
         unlink(commitSocketPath_.c_str());
         if (bind(fd_, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0) {
-            FCITX_ERROR() << "EchoFlow failed to bind " << commitSocketPath_
+            FCITX_ERROR() << "deepin-echoflow failed to bind " << commitSocketPath_
                           << ": " << strerror(errno);
             close(fd_);
             fd_ = -1;
@@ -176,7 +217,7 @@ private:
             [this](fcitx::EventSourceIO *, int fd, fcitx::IOEventFlags flags) {
                 return handleReadable(fd, flags);
             });
-        FCITX_INFO() << "EchoFlow commit socket listening on "
+        FCITX_INFO() << "deepin-echoflow commit socket listening on "
                      << commitSocketPath_;
     }
 
@@ -215,6 +256,9 @@ private:
         auto *icEvent = static_cast<fcitx::InputContextEvent *>(&event);
         fcitx::InputContext *ic = icEvent->inputContext();
         if (focused && ic) {
+            if (voicePreeditInputContext_ && voicePreeditInputContext_ != ic) {
+                cancelBoundVoiceSession();
+            }
             focusedInputContext_ = ic;
             if (blurPending_ && ic->program() != pendingBlurProgram_) {
                 // Another program took the focus: a real switch, so the
@@ -247,6 +291,7 @@ private:
         }
         cancelPendingBlur();
         rightCtrlDown_ = false;
+        cancelBoundVoiceSession();
         echoflow::sendAddonBlur(runtimeDir());
     }
 
@@ -274,7 +319,17 @@ private:
 
     void handleInputContextLifetime(fcitx::Event &event, bool created) {
         auto *icEvent = static_cast<fcitx::InputContextEvent *>(&event);
-        const std::string program = icEvent->inputContext()->program();
+        fcitx::InputContext *ic = icEvent->inputContext();
+        const std::string program = ic->program();
+        if (!created && voicePreeditInputContext_ == ic) {
+            voicePreeditInputContext_ = nullptr;
+            voicePreedit_.reset();
+            const auto generation = activeVoiceGeneration_ != 0
+                ? activeVoiceGeneration_ : clearedVoiceGeneration_;
+            clearedVoiceGeneration_ = generation;
+            activeVoiceGeneration_ = 0;
+            if (generation != 0) sendControlCommand("CANCEL", true);
+        }
         if (created) {
             ++liveInputContexts_[program];
             return;
@@ -338,6 +393,9 @@ private:
         // capsule. Observer only: we never consume the event (no accept/filter).
         if (!keyEvent->isRelease() && !key.isModifier()) {
             sendFocusCommand("TYPED");
+            if (hasBoundVoiceSession()) {
+                cancelBoundVoiceSession();
+            }
         }
     }
 
@@ -348,7 +406,7 @@ private:
     bool handleReadable(int fd, fcitx::IOEventFlags flags) {
         if (flags.testAny(fcitx::IOEventFlag::Err) ||
             flags.testAny(fcitx::IOEventFlag::Hup)) {
-            FCITX_WARN() << "EchoFlow socket event error/hangup";
+            FCITX_WARN() << "deepin-echoflow socket event error/hangup";
         }
 
         while (true) {
@@ -362,7 +420,7 @@ private:
                 if (errno == EAGAIN || errno == EWOULDBLOCK) {
                     return true;
                 }
-                FCITX_WARN() << "EchoFlow recvfrom failed: "
+                FCITX_WARN() << "deepin-echoflow recvfrom failed: "
                              << strerror(errno);
                 return true;
             }
@@ -378,7 +436,47 @@ private:
             reply(peer, peerLen, "PONG");
             return;
         }
-        if (request.text.empty()) {
+        if (request.type == Request::Type::BeginVoice) {
+            if (!voiceGenerations_.canBegin(request.generation)) {
+                reply(peer, peerLen, "ERR stale-generation");
+                return;
+            }
+            auto *ic = focusedInputContext_;
+            if (!ic || !ic->hasFocus() ||
+                !echoflow::isVoiceInputAllowed(ic->capabilityFlags())) {
+                reply(peer, peerLen, "ERR no-eligible-input-context");
+                return;
+            }
+            // One service owns the control socket. A newer BEGIN can replace
+            // a binding left behind when that service died without cancelling.
+            clearVoicePreedit();
+            voiceGenerations_.begin(request.generation);
+            activeVoiceGeneration_ = request.generation;
+            clearedVoiceGeneration_ = 0;
+            lastPreeditRevision_ = 0;
+            voiceCommitAllowed_ = false;
+            voicePreeditInputContext_ = ic;
+            voicePreedit_.begin(ic->inputPanel());
+            reply(peer, peerLen, "OK");
+            return;
+        }
+        if (request.type == Request::Type::CancelVoice) {
+            const bool activeMatch = request.generation == activeVoiceGeneration_;
+            const bool justFinalizedMatch = request.generation == clearedVoiceGeneration_;
+            if (!activeMatch && !justFinalizedMatch) {
+                reply(peer, peerLen, "ERR stale-generation");
+                return;
+            }
+            clearVoicePreedit();
+            activeVoiceGeneration_ = 0;
+            clearedVoiceGeneration_ = request.generation;
+            voiceCommitAllowed_ = false;
+            voicePreeditInputContext_ = nullptr;
+            reply(peer, peerLen, "OK");
+            return;
+        }
+        if (request.type != Request::Type::ClearPreedit
+            && request.type != Request::Type::Preedit && request.text.empty()) {
             reply(peer, peerLen, "ERR empty-text");
             return;
         }
@@ -388,14 +486,71 @@ private:
             return;
         }
 
-        fcitx::InputContext *ic =
-            focusedInputContext_ ? focusedInputContext_
-                                 : instance_->lastFocusedInputContext();
+        if (request.type == Request::Type::ClearPreedit) {
+            if (request.generation != activeVoiceGeneration_) {
+                reply(peer, peerLen, "ERR stale-generation");
+                return;
+            }
+            clearVoicePreedit(false);
+            activeVoiceGeneration_ = 0;
+            clearedVoiceGeneration_ = request.generation;
+            voiceCommitAllowed_ = true;
+            reply(peer, peerLen, "OK");
+            return;
+        }
+
+        if (request.type == Request::Type::Preedit) {
+            fcitx::InputContext *ic = voicePreeditInputContext_;
+            if (request.generation == 0 || request.generation != activeVoiceGeneration_
+                || request.generation <= clearedVoiceGeneration_ || request.revision == 0
+                || request.revision <= lastPreeditRevision_ || !ic) {
+                reply(peer, peerLen, "ERR stale-generation");
+                return;
+            }
+            if (ic != focusedInputContext_ || !ic->hasFocus() ||
+                !echoflow::isVoiceInputAllowed(ic->capabilityFlags())) {
+                reply(peer, peerLen, "ERR input-context-changed");
+                return;
+            }
+            const bool inlinePreedit = ic->isPreeditEnabled()
+                && ic->capabilityFlags().test(fcitx::CapabilityFlag::Preedit);
+            voicePreedit_.update(ic->inputPanel(), request.text, inlinePreedit);
+            lastPreeditRevision_ = request.revision;
+            ic->updatePreedit();
+            ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+            reply(peer, peerLen, "OK");
+            return;
+        }
+
+        fcitx::InputContext *ic = voicePreeditInputContext_;
+        if (request.generation != 0) {
+            const bool activeMatch = request.generation == activeVoiceGeneration_;
+            // Accept legacy CLEAR_PREEDIT -> COMMIT clients too. New clients
+            // commit directly so composition and final text change in one event.
+            const bool clearedMatch = activeVoiceGeneration_ == 0 && voiceCommitAllowed_
+                && request.generation == clearedVoiceGeneration_;
+            if ((!activeMatch && !clearedMatch) || !ic || !ic->hasFocus()
+                || ic != focusedInputContext_
+                || !echoflow::isVoiceInputAllowed(ic->capabilityFlags())) {
+                reply(peer, peerLen, "ERR stale-generation");
+                return;
+            }
+        } else if (!ic) {
+            ic = focusedInputContext_ ? focusedInputContext_
+                                      : instance_->lastFocusedInputContext();
+        }
         if (!ic) {
             reply(peer, peerLen, "ERR no-focused-input-context");
             return;
         }
 
+        clearVoicePreedit();
+        if (request.generation != 0) {
+            activeVoiceGeneration_ = 0;
+            clearedVoiceGeneration_ = request.generation;
+            voiceCommitAllowed_ = false;
+        }
+        voicePreeditInputContext_ = nullptr;
         if (ic->capabilityFlags() &
             fcitx::CapabilityFlag::CommitStringWithCursor) {
             ic->commitStringWithCursor(request.text,
@@ -406,6 +561,38 @@ private:
         reply(peer, peerLen, "OK");
     }
 
+    bool hasBoundVoiceSession() const {
+        return activeVoiceGeneration_ != 0
+            || (voicePreeditInputContext_ && clearedVoiceGeneration_ != 0);
+    }
+
+    void cancelBoundVoiceSession() {
+        const auto generation = activeVoiceGeneration_ != 0
+            ? activeVoiceGeneration_ : clearedVoiceGeneration_;
+        clearVoicePreedit();
+        activeVoiceGeneration_ = 0;
+        clearedVoiceGeneration_ = generation;
+        voiceCommitAllowed_ = false;
+        voicePreeditInputContext_ = nullptr;
+        if (generation != 0) {
+            sendControlCommand("CANCEL", true);
+        }
+    }
+
+    void clearVoicePreedit(bool releaseTarget = true) {
+        if (!voicePreeditInputContext_) {
+            return;
+        }
+        auto *ic = voicePreeditInputContext_;
+        if (voicePreedit_.restore(ic->inputPanel())) {
+            ic->updatePreedit();
+            ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+        }
+        if (releaseTarget) {
+            voicePreeditInputContext_ = nullptr;
+        }
+    }
+
     void reply(const sockaddr_un &peer, socklen_t peerLen,
                const char *message) {
         if (peerLen == 0 || peer.sun_path[0] == '\0') {
@@ -413,7 +600,7 @@ private:
         }
         if (sendto(fd_, message, strlen(message), 0,
                    reinterpret_cast<const sockaddr *>(&peer), peerLen) < 0) {
-            FCITX_WARN() << "EchoFlow reply failed: " << strerror(errno);
+            FCITX_WARN() << "deepin-echoflow reply failed: " << strerror(errno);
         }
     }
 
@@ -434,6 +621,13 @@ private:
     std::vector<std::unique_ptr<fcitx::HandlerTableEntry<fcitx::EventHandler>>>
         eventWatchers_;
     fcitx::InputContext *focusedInputContext_ = nullptr;
+    fcitx::InputContext *voicePreeditInputContext_ = nullptr;
+    echoflow::VoiceGenerations voiceGenerations_;
+    std::uint64_t activeVoiceGeneration_ = 0;
+    std::uint64_t clearedVoiceGeneration_ = 0;
+    bool voiceCommitAllowed_ = false;
+    std::uint64_t lastPreeditRevision_ = 0;
+    echoflow::VoicePreedit voicePreedit_;
 };
 
 class EchoFlowFactory final : public fcitx::AddonFactory {

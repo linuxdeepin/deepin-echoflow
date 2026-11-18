@@ -17,7 +17,7 @@ namespace echoflow {
 
 namespace {
 
-// Config dir = parent of echoflow.conf.
+// Config dir = parent of deepin-echoflow.conf.
 QString configDir() {
     const QString conf = EchoFlowSettings::instance()->configPath();
     const int slash = conf.lastIndexOf(QLatin1Char('/'));

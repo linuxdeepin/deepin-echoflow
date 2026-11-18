@@ -63,7 +63,7 @@ __pycache__/
 .ruff_cache/
 *.egg-info/
 
-# EchoFlow — user config, recordings, and model artifacts
+# deepin-echoflow — user config, recordings, and model artifacts
 *.wav
 /model/
 /model-0.6B/

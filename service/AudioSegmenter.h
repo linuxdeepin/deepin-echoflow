@@ -47,6 +47,9 @@ public:
     std::string name() const override;
     std::string diagnosticSummary() const override;
     AudioSegmenterDiagnostics diagnostics() const;
+    bool hasActiveSpeech() const { return active_; }
+    size_t trailingSilenceSamples() const { return trailingSilenceSamples_; }
+    bool hasEnoughSpeech() const { return active_ && speechSamples_ >= minSegmentSamples_; }
 
 private:
     size_t samplesForMs(int milliseconds) const;

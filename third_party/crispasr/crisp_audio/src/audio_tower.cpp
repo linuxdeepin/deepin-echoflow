@@ -21,6 +21,7 @@
 
 #include "core/gguf_loader.h"
 #include "core/mel.h"
+#include "core/audio_encoder_cache.h"
 
 #include "ggml.h"
 #include "ggml-alloc.h"
@@ -151,6 +152,15 @@ struct crisp_audio_context {
     int n_threads = 4;
     int verbosity = 1;
 };
+
+struct crisp_audio_encoder_cache {
+    crisp_audio_context* owner = nullptr;
+    core_audio_encoder_cache::State state;
+    crisp_audio_encoder_cache_stats stats{};
+    bool keep_pad = false;
+    bool windowed = false;
+};
+
 
 // ---------------------------------------------------------------------------
 // FFT — same Cooley-Tukey routine qwen3_asr.cpp uses, lifted unchanged.
@@ -450,7 +460,8 @@ static ggml_tensor* windowed_self_attn(ggml_context* g, ggml_tensor* Q, ggml_ten
 }
 
 ggml_cgraph* build_graph_qwen_omni(crisp_audio_context& ctx, int T_chunk, int num_chunks, int T_chunk_out_expected,
-                                   int N_keep, int window_frames = 0) {
+                                   int N_keep, int window_frames = 0,
+                                   bool cached_stem = false, bool stem_only = false, bool expose_stem = false) {
     const auto& hp = ctx.hp;
     const auto& w = ctx.w;
     const int n_mels = (int)hp.n_mels;
@@ -465,14 +476,6 @@ ggml_cgraph* build_graph_qwen_omni(crisp_audio_context& ctx, int T_chunk, int nu
     };
     ggml_context* g = ggml_init(ip);
     ggml_cgraph* gf = ggml_new_graph_custom(g, 16384, false);
-
-    ggml_tensor* mel = ggml_new_tensor_4d(g, GGML_TYPE_F32, T_chunk, n_mels, 1, num_chunks);
-    ggml_set_name(mel, "mel_batched");
-    ggml_set_input(mel);
-
-    ggml_tensor* pe_in = ggml_new_tensor_3d(g, GGML_TYPE_F32, d, T_chunk_out_expected, 1);
-    ggml_set_name(pe_in, "pe_input");
-    ggml_set_input(pe_in);
 
     const int N_padded = T_chunk_out_expected * num_chunks;
     // Reference contract (modeling_qwen3_asr.py: `padded_embed[padded_mask_after_cnn]`):
@@ -489,45 +492,75 @@ ggml_cgraph* build_graph_qwen_omni(crisp_audio_context& ctx, int T_chunk, int nu
         ggml_set_input(mask_in);
     }
 
-    auto bias_4d = [&](ggml_tensor* b) {
-        return ggml_cast(g, ggml_reshape_4d(g, b, 1, 1, b->ne[0], 1), GGML_TYPE_F32);
-    };
+    ggml_tensor* cur = nullptr;
+    if (cached_stem) {
+        cur = ggml_new_tensor_3d(g, GGML_TYPE_F32, d, T_chunk_out_expected, num_chunks);
+        ggml_set_name(cur, "stem_input");
+        ggml_set_input(cur);
+    } else {
+        ggml_tensor* mel = ggml_new_tensor_4d(g, GGML_TYPE_F32, T_chunk, n_mels, 1, num_chunks);
+        ggml_set_name(mel, "mel_batched");
+        ggml_set_input(mel);
 
-    ggml_tensor* cur = ggml_conv_2d(g, w.conv1_w, mel, 2, 2, 1, 1, 1, 1);
-    cur = ggml_add(g, cur, bias_4d(w.conv1_b));
-    cur = ggml_gelu_erf(g, cur);
-    if (getenv("CRISP_AUDIO_DUMP_STAGES")) {
-        ggml_set_name(cur, "conv1_out");
-        ggml_set_output(cur);
+        ggml_tensor* pe_in = ggml_new_tensor_3d(g, GGML_TYPE_F32, d, T_chunk_out_expected, 1);
+        ggml_set_name(pe_in, "pe_input");
+        ggml_set_input(pe_in);
+
+        auto bias_4d = [&](ggml_tensor* b) {
+            return ggml_cast(g, ggml_reshape_4d(g, b, 1, 1, b->ne[0], 1), GGML_TYPE_F32);
+        };
+
+        cur = ggml_conv_2d(g, w.conv1_w, mel, 2, 2, 1, 1, 1, 1);
+        cur = ggml_add(g, cur, bias_4d(w.conv1_b));
+        cur = ggml_gelu_erf(g, cur);
+        if (getenv("CRISP_AUDIO_DUMP_STAGES")) {
+            ggml_set_name(cur, "conv1_out");
+            ggml_set_output(cur);
+        }
+        cur = ggml_conv_2d(g, w.conv2_w, cur, 2, 2, 1, 1, 1, 1);
+        cur = ggml_add(g, cur, bias_4d(w.conv2_b));
+        cur = ggml_gelu_erf(g, cur);
+        if (getenv("CRISP_AUDIO_DUMP_STAGES")) {
+            ggml_set_name(cur, "conv2_out");
+            ggml_set_output(cur);
+        }
+        cur = ggml_conv_2d(g, w.conv3_w, cur, 2, 2, 1, 1, 1, 1);
+        cur = ggml_add(g, cur, bias_4d(w.conv3_b));
+        cur = ggml_gelu_erf(g, cur);
+        if (getenv("CRISP_AUDIO_DUMP_STAGES")) {
+            ggml_set_name(cur, "conv3_out");
+            ggml_set_output(cur);
+        }
+
+        const int T_out = (int)cur->ne[0];
+        const int F_out = (int)cur->ne[1];
+        const int C_out = (int)cur->ne[2];
+        GGML_ASSERT(T_out == T_chunk_out_expected);
+        GGML_ASSERT(C_out == (int)hp.conv_ch);
+
+        cur = ggml_cont(g, ggml_permute(g, cur, 2, 0, 1, 3));
+        cur = ggml_reshape_3d(g, cur, F_out * C_out, T_out, num_chunks);
+        cur = ggml_mul_mat(g, w.conv_out_w, cur);
+        if (w.conv_out_b)
+            cur = ggml_add(g, cur, w.conv_out_b);
+
+        cur = ggml_add(g, cur, pe_in);
     }
-    cur = ggml_conv_2d(g, w.conv2_w, cur, 2, 2, 1, 1, 1, 1);
-    cur = ggml_add(g, cur, bias_4d(w.conv2_b));
-    cur = ggml_gelu_erf(g, cur);
-    if (getenv("CRISP_AUDIO_DUMP_STAGES")) {
-        ggml_set_name(cur, "conv2_out");
-        ggml_set_output(cur);
+    if (expose_stem) {
+        // Keep a separate output branch; attention's in-place kernels must
+        // never overwrite the snapshot retained for the next update.
+        auto* snapshot = ggml_dup(g, cur);
+        ggml_set_name(snapshot, "stem_out");
+        ggml_set_output(snapshot);
+        ggml_build_forward_expand(gf, snapshot);
     }
-    cur = ggml_conv_2d(g, w.conv3_w, cur, 2, 2, 1, 1, 1, 1);
-    cur = ggml_add(g, cur, bias_4d(w.conv3_b));
-    cur = ggml_gelu_erf(g, cur);
-    if (getenv("CRISP_AUDIO_DUMP_STAGES")) {
-        ggml_set_name(cur, "conv3_out");
-        ggml_set_output(cur);
+    if (stem_only) {
+        cur = ggml_cont(g, cur);
+        ggml_set_name(cur, "stem_out");
+        ggml_build_forward_expand(gf, cur);
+        ggml_free(g);
+        return gf;
     }
-
-    const int T_out = (int)cur->ne[0];
-    const int F_out = (int)cur->ne[1];
-    const int C_out = (int)cur->ne[2];
-    GGML_ASSERT(T_out == T_chunk_out_expected);
-    GGML_ASSERT(C_out == (int)hp.conv_ch);
-
-    cur = ggml_cont(g, ggml_permute(g, cur, 2, 0, 1, 3));
-    cur = ggml_reshape_3d(g, cur, F_out * C_out, T_out, num_chunks);
-    cur = ggml_mul_mat(g, w.conv_out_w, cur);
-    if (w.conv_out_b)
-        cur = ggml_add(g, cur, w.conv_out_b);
-
-    cur = ggml_add(g, cur, pe_in);
 
     cur = ggml_cont(g, cur);
     cur = ggml_reshape_2d(g, cur, d, N_padded);
@@ -800,9 +833,10 @@ float* crisp_audio_compute_mel(struct crisp_audio_context* ctx, const float* sam
     return result;
 }
 
-float* crisp_audio_encode(struct crisp_audio_context* ctx, const float* mel_features, int n_mels, int T_mel,
-                          int* out_n_frames, int* out_dim) {
-    if (!ctx || !mel_features)
+static float* encode_impl(struct crisp_audio_context* ctx, const float* mel_features, int n_mels, int T_mel,
+                          int* out_n_frames, int* out_dim, const float* cached_stem = nullptr,
+                          std::vector<float>* captured_stem = nullptr) {
+    if (!ctx || !mel_features || T_mel <= 0 || n_mels <= 0)
         return nullptr;
     const auto& hp = ctx->hp;
     if (n_mels != (int)hp.n_mels) {
@@ -816,15 +850,18 @@ float* crisp_audio_encode(struct crisp_audio_context* ctx, const float* mel_feat
     const int T_chunk_out = conv_out_len(conv_out_len(conv_out_len(chunk_T)));
     const int N_padded = T_chunk_out * num_chunks;
 
-    std::vector<float> mel_padded((size_t)chunk_T * n_mels * num_chunks, 0.0f);
-    for (int chunk = 0; chunk < num_chunks; chunk++) {
-        const int t_start = chunk * chunk_T;
-        const int t_end = std::min(t_start + chunk_T, T_mel);
-        const int t_len = t_end - t_start;
-        for (int f = 0; f < n_mels; f++) {
-            for (int t = 0; t < t_len; t++) {
-                mel_padded[(size_t)t + chunk_T * ((size_t)f + n_mels * (size_t)chunk)] =
-                    mel_features[(size_t)f * T_mel + (size_t)(t_start + t)];
+    std::vector<float> mel_padded;
+    if (!cached_stem) {
+        mel_padded.assign((size_t)chunk_T * n_mels * num_chunks, 0.0f);
+        for (int chunk = 0; chunk < num_chunks; chunk++) {
+            const int t_start = chunk * chunk_T;
+            const int t_end = std::min(t_start + chunk_T, T_mel);
+            const int t_len = t_end - t_start;
+            for (int f = 0; f < n_mels; f++) {
+                for (int t = 0; t < t_len; t++) {
+                    mel_padded[(size_t)t + chunk_T * ((size_t)f + n_mels * (size_t)chunk)] =
+                        mel_features[(size_t)f * T_mel + (size_t)(t_start + t)];
+                }
             }
         }
     }
@@ -895,21 +932,27 @@ float* crisp_audio_encode(struct crisp_audio_context* ctx, const float* mel_feat
         }
     }
 
-    ggml_cgraph* gf = build_graph_qwen_omni(*ctx, chunk_T, num_chunks, T_chunk_out, N_seq, window_frames);
+    ggml_cgraph* gf = build_graph_qwen_omni(*ctx, chunk_T, num_chunks, T_chunk_out, N_seq, window_frames,
+                                                cached_stem != nullptr, false, captured_stem != nullptr);
     ggml_backend_sched_reset(ctx->sched);
     if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) {
         fprintf(stderr, "crisp_audio: failed to alloc encoder graph\n");
         return nullptr;
     }
 
-    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "mel_batched"), mel_padded.data(), 0,
-                            mel_padded.size() * sizeof(float));
+    if (cached_stem) {
+        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "stem_input"), cached_stem, 0,
+                                static_cast<size_t>(hp.d_model) * N_padded * sizeof(float));
+    } else {
+        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "mel_batched"), mel_padded.data(), 0,
+                                mel_padded.size() * sizeof(float));
 
-    {
-        const int d = (int)hp.d_model;
-        std::vector<float> pe_buf((size_t)d * T_chunk_out);
-        std::memcpy(pe_buf.data(), ctx->sin_pe.data(), pe_buf.size() * sizeof(float));
-        ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "pe_input"), pe_buf.data(), 0, pe_buf.size() * sizeof(float));
+        {
+            const int d = (int)hp.d_model;
+            std::vector<float> pe_buf((size_t)d * T_chunk_out);
+            std::memcpy(pe_buf.data(), ctx->sin_pe.data(), pe_buf.size() * sizeof(float));
+            ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "pe_input"), pe_buf.data(), 0, pe_buf.size() * sizeof(float));
+        }
     }
 
     if (!valid_idx.empty()) {
@@ -923,6 +966,14 @@ float* crisp_audio_encode(struct crisp_audio_context* ctx, const float* mel_feat
     if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) {
         fprintf(stderr, "crisp_audio: graph compute failed\n");
         return nullptr;
+    }
+
+    if (captured_stem) {
+        auto* stem_out = ggml_graph_get_tensor(gf, "stem_out");
+        if (!stem_out) return nullptr;
+        captured_stem->resize(ggml_nelements(stem_out));
+        ggml_backend_tensor_get(stem_out, captured_stem->data(), 0,
+                                captured_stem->size() * sizeof(float));
     }
 
     // Diff-harness stage dump: write every captured intermediate as raw F32
@@ -961,8 +1012,203 @@ float* crisp_audio_encode(struct crisp_audio_context* ctx, const float* mel_feat
 
     const size_t total = (size_t)pdim * N;
     float* result = (float*)std::malloc(total * sizeof(float));
+    if (!result) return nullptr;
     ggml_backend_tensor_get(out, result, 0, total * sizeof(float));
     return result;
+}
+
+float* crisp_audio_encode(struct crisp_audio_context* ctx, const float* mel_features, int n_mels, int T_mel,
+                          int* out_n_frames, int* out_dim) {
+    return encode_impl(ctx, mel_features, n_mels, T_mel, out_n_frames, out_dim);
+}
+
+struct crisp_audio_encoder_cache* crisp_audio_encoder_cache_new(void) {
+    try { return new crisp_audio_encoder_cache(); }
+    catch (...) { return nullptr; }
+}
+
+void crisp_audio_encoder_cache_free(struct crisp_audio_encoder_cache* cache) { delete cache; }
+
+void crisp_audio_encoder_cache_reset(struct crisp_audio_encoder_cache* cache) {
+    if (!cache) return;
+    cache->owner = nullptr;
+    cache->state.clear();
+    cache->stats = {};
+}
+
+struct crisp_audio_encoder_cache_stats crisp_audio_encoder_cache_get_stats(
+        const struct crisp_audio_encoder_cache* cache) {
+    return cache ? cache->stats : crisp_audio_encoder_cache_stats{};
+}
+
+static bool compute_stems(crisp_audio_context* ctx, crisp_audio_encoder_cache* cache,
+                          int chunk_T, int T_out) {
+    const size_t stem_size = static_cast<size_t>(ctx->hp.d_model) * T_out;
+    std::vector<size_t> missing;
+    std::vector<float> batch;
+    for (size_t index = 0; index < cache->state.blocks.size(); ++index) {
+        const auto& block = cache->state.blocks[index];
+        if (!block.stem.empty()) {
+            ++cache->stats.reused_stem_chunks;
+            continue;
+        }
+        missing.push_back(index);
+        batch.insert(batch.end(), block.mel.begin(), block.mel.end());
+    }
+    if (missing.empty()) return true;
+    auto* gf = build_graph_qwen_omni(*ctx, chunk_T, static_cast<int>(missing.size()),
+                                     T_out, 0, 0, false, true);
+    ggml_backend_sched_reset(ctx->sched);
+    if (!ggml_backend_sched_alloc_graph(ctx->sched, gf)) return false;
+    auto* mel = ggml_graph_get_tensor(gf, "mel_batched");
+    auto* pe = ggml_graph_get_tensor(gf, "pe_input");
+    auto* out = ggml_graph_get_tensor(gf, "stem_out");
+    if (!mel || !pe || !out) return false;
+    ggml_backend_tensor_set(mel, batch.data(), 0, batch.size() * sizeof(float));
+    ggml_backend_tensor_set(pe, ctx->sin_pe.data(), 0, stem_size * sizeof(float));
+    if (ggml_backend_sched_graph_compute(ctx->sched, gf) != GGML_STATUS_SUCCESS) return false;
+    std::vector<float> stems(missing.size() * stem_size);
+    ggml_backend_tensor_get(out, stems.data(), 0, stems.size() * sizeof(float));
+    for (size_t index = 0; index < missing.size(); ++index) {
+        cache->state.blocks[missing[index]].stem.assign(stems.begin() + index * stem_size,
+                                                        stems.begin() + (index + 1) * stem_size);
+    }
+    cache->stats.computed_stem_chunks = static_cast<int>(missing.size());
+    return true;
+}
+
+float* crisp_audio_encode_cached(struct crisp_audio_context* ctx, struct crisp_audio_encoder_cache* cache,
+        const float* mel, int n_mels, int T_mel, int* out_n_frames, int* out_dim) {
+    if (out_n_frames) *out_n_frames = 0;
+    if (out_dim) *out_dim = 0;
+    if (cache) cache->stats = {};
+    if (!ctx || !cache || !mel || n_mels != static_cast<int>(ctx->hp.n_mels) || T_mel <= 0) return nullptr;
+    try {
+        const auto& hp = ctx->hp;
+        const int chunk_T = static_cast<int>(hp.n_window) * 2;
+        if (chunk_T <= 0) return nullptr;
+        const auto flag = [](const char* name) {
+            const char* value = std::getenv(name);
+            return value && std::atoi(value) != 0;
+        };
+        const bool keep_pad = flag("CRISP_AUDIO_KEEP_PAD_FRAMES") && hp.attn_window_mode == 0;
+        const bool windowed = flag("CRISP_AUDIO_WINDOWED_ATTN") && hp.attn_window_mode == 0;
+        // Preserve stage dumps exactly by running the original full graph.
+        if (std::getenv("CRISP_AUDIO_DUMP_STAGES")) {
+            crisp_audio_encoder_cache_reset(cache);
+            return encode_impl(ctx, mel, n_mels, T_mel, out_n_frames, out_dim);
+        }
+        if (cache->owner != ctx || cache->keep_pad != keep_pad || cache->windowed != windowed) {
+            crisp_audio_encoder_cache_reset(cache);
+            cache->owner = ctx;
+            cache->keep_pad = keep_pad;
+            cache->windowed = windowed;
+        }
+        const int window_chunks = hp.attn_window_mode == 1 || windowed
+            ? std::max(1, static_cast<int>(hp.n_window_infer / (hp.n_window * 2))) : 0;
+        cache->stats.window_chunks = window_chunks;
+        cache->state.prepare(mel, n_mels, T_mel, chunk_T, window_chunks);
+        const auto conv_len = [](int n) { return (n + 1) / 2; };
+        const int T_out = conv_len(conv_len(conv_len(chunk_T)));
+        cache->stats.total_chunks = static_cast<int>(cache->state.blocks.size());
+        // No cache hits: execute the original fused graph once and retain
+        // its stem output. Splitting a cold pass into two graphs only adds
+        // allocation/transfers and cannot save any convolution work.
+        const bool cold = std::all_of(cache->state.blocks.begin(), cache->state.blocks.end(),
+            [](const core_audio_encoder_cache::Block& block) { return block.stem.empty(); });
+        if (cold) {
+            int frames = 0, dim = 0;
+            std::vector<float> stems;
+            std::unique_ptr<float, decltype(&std::free)> result(
+                encode_impl(ctx, mel, n_mels, T_mel, &frames, &dim, nullptr, &stems), &std::free);
+            const size_t stem_size = static_cast<size_t>(hp.d_model) * T_out;
+            if (!result || stems.size() != cache->state.blocks.size() * stem_size) {
+                crisp_audio_encoder_cache_reset(cache);
+                return nullptr;
+            }
+            for (size_t index = 0; index < cache->state.blocks.size(); ++index) {
+                cache->state.blocks[index].stem.assign(stems.begin() + index * stem_size,
+                                                        stems.begin() + (index + 1) * stem_size);
+            }
+            size_t offset = 0;
+            for (auto& region : cache->state.regions) {
+                const int tail = region.mel_frames - (region.chunks - 1) * chunk_T;
+                region.frames = (region.chunks - 1) * T_out
+                    + (keep_pad ? T_out : conv_len(conv_len(conv_len(tail))));
+                region.dim = dim;
+                const size_t count = static_cast<size_t>(region.frames) * dim;
+                if (offset + count > static_cast<size_t>(frames) * dim) {
+                    crisp_audio_encoder_cache_reset(cache);
+                    return nullptr;
+                }
+                region.output.assign(result.get() + offset, result.get() + offset + count);
+                offset += count;
+            }
+            if (offset != static_cast<size_t>(frames) * dim) {
+                crisp_audio_encoder_cache_reset(cache);
+                return nullptr;
+            }
+            cache->stats.computed_stem_chunks = cache->stats.total_chunks;
+            cache->stats.computed_encoder_regions = static_cast<int>(cache->state.regions.size());
+            cache->stats.cached_bytes = cache->state.bytes();
+            if (out_n_frames) *out_n_frames = frames;
+            if (out_dim) *out_dim = dim;
+            return result.release();
+        }
+        if (!compute_stems(ctx, cache, chunk_T, T_out)) {
+            crisp_audio_encoder_cache_reset(cache);
+            return nullptr;
+        }
+        std::vector<float> combined;
+        int total_frames = 0;
+        int dim = 0;
+        for (auto& region : cache->state.regions) {
+            if (region.output.empty()) {
+                std::vector<float> region_mel(static_cast<size_t>(n_mels) * region.mel_frames);
+                for (int feature = 0; feature < n_mels; ++feature) {
+                    std::memcpy(region_mel.data() + static_cast<size_t>(feature) * region.mel_frames,
+                        mel + static_cast<size_t>(feature) * T_mel + region.first_chunk * chunk_T,
+                        static_cast<size_t>(region.mel_frames) * sizeof(float));
+                }
+                std::vector<float> stem;
+                for (int index = region.first_chunk; index < region.first_chunk + region.chunks; ++index) {
+                    const auto& block = cache->state.blocks[index];
+                    stem.insert(stem.end(), block.stem.begin(), block.stem.end());
+                }
+                std::unique_ptr<float, decltype(&std::free)> result(
+                    encode_impl(ctx, region_mel.data(), n_mels, region.mel_frames,
+                                &region.frames, &region.dim, stem.data()), &std::free);
+                if (!result || region.frames <= 0 || region.dim <= 0) {
+                    crisp_audio_encoder_cache_reset(cache);
+                    return nullptr;
+                }
+                region.output.assign(result.get(), result.get() + static_cast<size_t>(region.frames) * region.dim);
+                ++cache->stats.computed_encoder_regions;
+            } else {
+                ++cache->stats.reused_encoder_regions;
+            }
+            if (dim && dim != region.dim) {
+                crisp_audio_encoder_cache_reset(cache);
+                return nullptr;
+            }
+            dim = region.dim;
+            total_frames += region.frames;
+            combined.insert(combined.end(), region.output.begin(), region.output.end());
+        }
+        auto* result = static_cast<float*>(std::malloc(combined.size() * sizeof(float)));
+        if (!result) {
+            crisp_audio_encoder_cache_reset(cache);
+            return nullptr;
+        }
+        std::memcpy(result, combined.data(), combined.size() * sizeof(float));
+        cache->stats.cached_bytes = cache->state.bytes();
+        if (out_n_frames) *out_n_frames = total_frames;
+        if (out_dim) *out_dim = dim;
+        return result;
+    } catch (...) {
+        crisp_audio_encoder_cache_reset(cache);
+        return nullptr;
+    }
 }
 
 int crisp_audio_d_model(struct crisp_audio_context* ctx) {

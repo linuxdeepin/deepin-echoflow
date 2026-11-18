@@ -32,9 +32,21 @@ struct ScopeExit {
 
 struct FakeRecorder : IRecorder {
     mutable std::mutex mutex;
+    std::function<void(const AudioLevelFrame&)> audioLevelCallback;
+    void setAudioLevelCallback(std::function<void(const AudioLevelFrame&)> callback) override
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        audioLevelCallback = std::move(callback);
+    }
+    std::function<void(const AudioLevelFrame&)> levelCallback() const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return audioLevelCallback;
+    }
+
     int starts_ = 0;
     int stops_ = 0;
-    std::filesystem::path path = "/tmp/echoflow-test.wav";
+    std::filesystem::path path = "/tmp/deepin-echoflow-test.wav";
 
     void start() override
     {
@@ -91,6 +103,18 @@ struct FakeAsr : IAsrEngine {
 
 struct FakeLivePipeline : ILiveVoicePipeline {
     mutable std::mutex mutex;
+    std::function<void(const AudioLevelFrame&)> audioLevelCallback;
+    void setAudioLevelCallback(std::function<void(const AudioLevelFrame&)> callback) override
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        audioLevelCallback = std::move(callback);
+    }
+    std::function<void(const AudioLevelFrame&)> levelCallback() const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return audioLevelCallback;
+    }
+
     int starts_ = 0;
     int finishes_ = 0;
     int cancels_ = 0;
@@ -99,6 +123,38 @@ struct FakeLivePipeline : ILiveVoicePipeline {
     bool throwOnFinish = false;
     bool throwOnCancel = false;
     std::function<void(const std::string&)> partialTextCallback;
+    std::function<void(const std::string&)> confirmedTextCallback;
+    std::function<void(bool)> recognitionBusyCallback;
+    void setRecognitionBusyCallback(std::function<void(bool)> callback) override
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        recognitionBusyCallback = std::move(callback);
+    }
+    void busy(bool value)
+    {
+        std::function<void(bool)> callback;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            callback = recognitionBusyCallback;
+        }
+        if (callback) callback(value);
+    }
+
+    void setConfirmedTextCallback(std::function<void(const std::string&)> callback) override
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        confirmedTextCallback = std::move(callback);
+    }
+
+    void confirm(const std::string& text)
+    {
+        std::function<void(const std::string&)> callback;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            callback = confirmedTextCallback;
+        }
+        if (callback) callback(text);
+    }
 
     void start() override
     {
@@ -235,7 +291,51 @@ struct FakeCommitter : ICommitter {
     mutable std::mutex mutex;
     std::condition_variable condition;
     std::vector<std::string> texts_;
+    std::vector<std::string> preedits_;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> preeditVersions_;
+    int clearPreeditCount_ = 0;
     std::pair<bool, std::string> ret = { true, "OK" };
+
+    std::pair<bool, std::string> setPreedit(const std::string& text) override
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        preedits_.push_back(text);
+        return ret;
+    }
+
+    std::pair<bool, std::string> setPreedit(const std::string& text,
+        std::uint64_t generation, std::uint64_t revision) override
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        preedits_.push_back(text);
+        preeditVersions_.push_back({generation, revision});
+        return ret;
+    }
+
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> preeditVersions() const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return preeditVersions_;
+    }
+
+    std::pair<bool, std::string> clearPreedit() override
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        ++clearPreeditCount_;
+        return ret;
+    }
+
+    std::vector<std::string> preedits() const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return preedits_;
+    }
+
+    int clearPreeditCount() const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return clearPreeditCount_;
+    }
 
     std::pair<bool, std::string> commitText(const std::string& text) override
     {
@@ -249,6 +349,29 @@ struct FakeCommitter : ICommitter {
     {
         std::lock_guard<std::mutex> lock(mutex);
         return texts_;
+    }
+};
+
+struct ScriptedPreeditCommitter : FakeCommitter {
+    std::vector<std::pair<bool, std::string>> replies;
+
+    std::pair<bool, std::string> setPreedit(const std::string& text,
+        std::uint64_t generation, std::uint64_t revision) override
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        const auto index = preedits_.size();
+        preedits_.push_back(text);
+        preeditVersions_.push_back({generation, revision});
+        condition.notify_all();
+        const auto result = index < replies.size() ? replies[index] : ret;
+        if (result.second == "throw") throw std::runtime_error("temporary delivery failure");
+        return result;
+    }
+
+    bool waitForAttempt()
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        return condition.wait_for(lock, 1000ms, [this] { return !preedits_.empty(); });
     }
 };
 
@@ -333,6 +456,25 @@ struct FakePolisher : ITextPolisher {
     {
         std::lock_guard<std::mutex> lock(mutex);
         return sawAbort_;
+    }
+};
+
+struct GatedPolisher : FakePolisher {
+    bool released = false;
+    std::string polish(const std::string& text, const std::function<bool()>&) override
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        inputs_.push_back(text);
+        entered_ = true;
+        condition.notify_all();
+        condition.wait(lock, [this] { return released; });
+        return "polished:" + text;
+    }
+    void release()
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        released = true;
+        condition.notify_all();
     }
 };
 
@@ -628,17 +770,43 @@ private slots:
     void transcribeExceptionReturnsToIdle();
     void polisherRewritesTextBeforeCommit();
     void polisherFailureCommitsRawText();
+    void liveConfirmedSegmentsPolishDuringRecording();
+    void polishedPreviewPreservesLatestActiveTail();
+    void latePolishDoesNotCrossRecordingSessions();
+    void futureConfirmationDoesNotRevertPolishedPrefix();
+    void livePolishTimeoutCommitsRawWithoutWaitingForModel();
     void cancelDuringPolishAbortsAndDiscards();
     void tooShortAudioIsCancelled();
     void cancelDiscardsRecording();
     void blurWhileRecordingCancelsAndDiscards();
     void liveCtrlStartsPipeline();
+    void livePipelineStartFailureRollsBack();
+    void beginFailureCancelsAcceptedGeneration_data();
+    void beginFailureCancelsAcceptedGeneration();
+    void preeditRetriesTransientFailures_data();
+    void preeditRetriesTransientFailures();
+    void preeditRetryLimitAllowsLaterUpdates();
+    void failedPreeditDoesNotSuppressReturningToEarlierText();
+    void preeditDoesNotRetryRejectedSession_data();
+    void preeditDoesNotRetryRejectedSession();
+    void emptyPreeditIsRetried();
+    void cancellationStopsPreeditRetries();
+    void emptyPartialRetractsPreedit();
     void liveSecondCtrlFinishesAndCommits();
+    void previewRemainsUntilCommitWithoutClearRoundTrip();
+    void cancelledFinalizationDoesNotCommit();
     void liveEmptyResultDoesNotCommit();
     void liveFinishExceptionReturnsToIdle();
+    void liveFinishFailurePreservesRecognizedPreview();
+    void liveFinishFailureAfterRetractionDoesNotCommit();
+    void cancelledFailedFinalizationDoesNotCommit();
     void liveCancelDiscardsRecording();
     void liveCancelExceptionStillReturnsToIdleAndHidesTooltip();
     void liveBlurCancelsAndDiscards();
+    void liveAudioLevelsOnlyFlowDuringRecording();
+    void fileRecorderAudioLevelsFlowDuringRecording();
+    void copiedAudioLevelCallbackIsSafeAfterDestruction();
+    void audioLevelsDoNotWaitForPreedit();
     void livePartialTextUpdatesTooltip();
     void livePreviewDoesNotAffectCommittedText();
     void liveStartExceptionReturnsToIdle();
@@ -661,7 +829,7 @@ private slots:
     void queuedCancellationStillPrecedesFinalIdle();
     void blurDuringTranscribingDiscardsFinishedText();
     void destructorWaitsForFinalization();
-    void latePartialAfterStopIsIgnored();
+    void partialAfterStopUpdatesPreeditUntilCancelled();
     void unknownCommandReturnsError();
 };
 
@@ -873,6 +1041,175 @@ void TestVoiceSession::polisherFailureCommitsRawText()
     QCOMPARE(committer.texts(), std::vector<std::string> { "离线语音输入" });
 }
 
+void TestVoiceSession::liveConfirmedSegmentsPolishDuringRecording()
+{
+    FakeLivePipeline pipeline;
+    FakeCommitter committer;
+    FakeUi ui;
+    FakePolisher polisher;
+    auto session = makeLiveSession(pipeline, committer, ui);
+    session.setTextPolisher(&polisher);
+    session.handleCommand("START");
+    pipeline.busy(true);
+    pipeline.confirm("first");
+    QTest::qWait(30);
+    QVERIFY(polisher.inputs().empty());
+    pipeline.busy(false);
+    QVERIFY(polisher.waitForEntered());
+    QCOMPARE(session.state(), SessionState::Recording);
+    pipeline.confirm("first second");
+    QTRY_COMPARE(polisher.inputs().size(), size_t(2));
+    pipeline.result = "first second tail";
+    session.handleCommand("STOP");
+    QTRY_COMPARE(session.state(), SessionState::Idle);
+    QVERIFY(ui.waitForMessage("IDLE"));
+    QCOMPARE(polisher.inputs(), (std::vector<std::string>{"first", "second", "tail"}));
+    QCOMPARE(committer.texts(), (std::vector<std::string>{"polished:first polished:second polished:tail"}));
+}
+
+void TestVoiceSession::polishedPreviewPreservesLatestActiveTail()
+{
+    FakeLivePipeline pipeline;
+    FakeCommitter committer;
+    FakeUi ui;
+    GatedPolisher polisher;
+    auto session = makeLiveSession(pipeline, committer, ui);
+    ScopeExit release{[&] { polisher.release(); }};
+    session.setTextPolisher(&polisher);
+    session.handleCommand("START");
+    const auto callback = pipeline.callback();
+    callback("first tail1");
+    pipeline.confirm("first");
+    QVERIFY(polisher.waitForEntered());
+    callback("first tail2");
+    polisher.release();
+    QTRY_VERIFY(committer.preedits().back() == "polished:first tail2");
+    QVERIFY(ui.waitForMessage("STREAM_TEXT polished:first tail2"));
+    callback("first tail3");
+    QCOMPARE(committer.preedits().back(), std::string("polished:first tail3"));
+    pipeline.result = "first tail3";
+    session.handleCommand("STOP");
+    QTRY_COMPARE(session.state(), SessionState::Idle);
+    QVERIFY(ui.waitForMessage("IDLE"));
+    QCOMPARE(committer.texts(), (std::vector<std::string>{"polished:first polished:tail3"}));
+    const auto versions = committer.preeditVersions();
+    QVERIFY(!versions.empty());
+    for (size_t i = 1; i < versions.size(); ++i) {
+        QCOMPARE(versions[i].first, versions.front().first);
+        QVERIFY(versions[i].second > versions[i - 1].second);
+    }
+    const size_t updates = committer.preedits().size();
+    callback("late preview");
+    QCOMPARE(committer.preedits().size(), updates);
+}
+
+void TestVoiceSession::latePolishDoesNotCrossRecordingSessions()
+{
+    FakeLivePipeline pipeline;
+    FakeCommitter committer;
+    FakeUi ui;
+    GatedPolisher polisher;
+    auto session = makeLiveSession(pipeline, committer, ui);
+    ScopeExit release{[&] { polisher.release(); }};
+    session.setTextPolisher(&polisher);
+    session.handleCommand("START");
+    pipeline.callback()("old tail");
+    pipeline.confirm("old");
+    QVERIFY(polisher.waitForEntered());
+    session.handleCommand("CANCEL");
+    const size_t beforeNewSession = committer.preedits().size();
+    session.handleCommand("START");
+    pipeline.callback()("new active");
+    pipeline.confirm("new");
+    polisher.release();
+    QTRY_VERIFY(committer.preedits().back() == "polished:new active");
+    const auto previews = committer.preedits();
+    for (size_t i = beforeNewSession; i < previews.size(); ++i) {
+        QVERIFY(previews[i].find("old") == std::string::npos);
+    }
+    pipeline.result = "new active";
+    session.handleCommand("STOP");
+    QTRY_COMPARE(session.state(), SessionState::Idle);
+    QVERIFY(ui.waitForMessage("IDLE"));
+    QCOMPARE(committer.texts(), (std::vector<std::string>{"polished:new polished:active"}));
+}
+
+void TestVoiceSession::futureConfirmationDoesNotRevertPolishedPrefix()
+{
+    FakeLivePipeline pipeline;
+    FakeCommitter committer;
+    FakeUi ui;
+    FakePolisher polisher;
+    auto session = makeLiveSession(pipeline, committer, ui);
+    session.setTextPolisher(&polisher);
+    session.handleCommand("START");
+    const auto callback = pipeline.callback();
+    callback("first mid");
+    pipeline.confirm("first");
+    QTRY_VERIFY(committer.preedits().back() == "polished:first mid");
+    pipeline.confirm("first second");
+    pipeline.confirm("first second third");
+    // The single polish worker delivers the second snapshot before starting
+    // the third job. ASR's displayed tail still precedes both confirmations.
+    QTRY_COMPARE(polisher.inputs().size(), size_t(3));
+    QCOMPARE(committer.preedits().back(), std::string("polished:first mid"));
+    callback("first second third tail");
+    QTRY_VERIFY(committer.preedits().back() == "polished:first polished:second polished:third tail");
+    session.handleCommand("CANCEL");
+}
+
+void TestVoiceSession::livePolishTimeoutCommitsRawWithoutWaitingForModel()
+{
+    struct SlowPolisher : ITextPolisher {
+        std::mutex mutex;
+        std::condition_variable condition;
+        bool entered = false;
+        bool released = false;
+        std::string polish(const std::string& text, const std::function<bool()>&) override
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            entered = true;
+            condition.notify_all();
+            condition.wait(lock, [&] { return released; });
+            return "late:" + text;
+        }
+        void release()
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            released = true;
+            condition.notify_all();
+        }
+        bool waitForEntered()
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            return condition.wait_for(lock, 1s, [&] { return entered; });
+        }
+    } polisher;
+    FakeLivePipeline pipeline;
+    pipeline.result = "blocked";
+    FakeCommitter committer;
+    FakeUi ui;
+    auto session = makeLiveSession(pipeline, committer, ui);
+    ScopeExit release{[&] { polisher.release(); }};
+    session.setTextPolisher(&polisher);
+    session.handleCommand("START");
+    pipeline.confirm("blocked");
+    QVERIFY(polisher.waitForEntered());
+    const auto started = std::chrono::steady_clock::now();
+    session.handleCommand("STOP");
+    QTRY_COMPARE_WITH_TIMEOUT(session.state(), SessionState::Idle, 2500);
+    QVERIFY(std::chrono::steady_clock::now() - started < 2500ms);
+    QVERIFY(ui.waitForMessage("IDLE"));
+    QCOMPARE(committer.texts(), (std::vector<std::string>{"blocked"}));
+    polisher.release();
+    pipeline.result = "next";
+    session.handleCommand("START");
+    session.handleCommand("STOP");
+    QTRY_COMPARE(session.state(), SessionState::Idle);
+    QVERIFY(ui.waitForMessage("IDLE"));
+    QCOMPARE(committer.texts(), (std::vector<std::string>{"blocked", "late:next"}));
+}
+
 void TestVoiceSession::cancelDuringPolishAbortsAndDiscards()
 {
     FakeRecorder recorder;
@@ -892,7 +1229,7 @@ void TestVoiceSession::cancelDuringPolishAbortsAndDiscards()
         QStringLiteral("CANCELLED"));
     QTRY_COMPARE(session.state(), SessionState::Idle);
     QVERIFY(ui.waitForMessage("IDLE"));
-    QVERIFY(polisher.sawAbort());
+    QTRY_VERIFY(polisher.sawAbort());
     QVERIFY(committer.texts().empty());
 }
 
@@ -987,6 +1324,212 @@ void TestVoiceSession::liveCtrlStartsPipeline()
     QCOMPARE(QString::fromStdString(ui.messages().back()), QStringLiteral("RECORDING"));
 }
 
+void TestVoiceSession::livePipelineStartFailureRollsBack()
+{
+    FakeLivePipeline pipeline;
+    pipeline.throwOnStart = true;
+    FakeCommitter committer;
+    FakeUi ui;
+    auto session = makeLiveSession(pipeline, committer, ui);
+
+    QVERIFY(session.handleCommand("CTRL_DOWN").rfind("ERR ", 0) == 0);
+    QCOMPARE(session.state(), SessionState::Idle);
+    QCOMPARE(pipeline.starts(), 1);
+    QCOMPARE(pipeline.cancels(), 1);
+}
+
+void TestVoiceSession::beginFailureCancelsAcceptedGeneration_data()
+{
+    QTest::addColumn<bool>("throws");
+    QTest::addColumn<QString>("failure");
+    QTest::newRow("ack-timeout") << false << QStringLiteral("timeout");
+    QTest::newRow("exception-after-binding") << true << QStringLiteral("begin transport failed");
+    QTest::newRow("empty-error") << false << QString();
+}
+
+void TestVoiceSession::beginFailureCancelsAcceptedGeneration()
+{
+    QFETCH(bool, throws);
+    QFETCH(QString, failure);
+    struct BoundCommitter : FakeCommitter {
+        std::uint64_t bound = 0;
+        std::uint64_t failedGeneration = 0;
+        std::vector<std::uint64_t> cancellations;
+        bool failFirst = true;
+        bool throws = false;
+        std::string failure;
+        std::pair<bool, std::string> beginVoiceSession(std::uint64_t generation) override
+        {
+            if (bound) return {false, "voice-session-active"};
+            bound = generation;
+            if (failFirst) {
+                failFirst = false;
+                failedGeneration = generation;
+                if (throws) throw std::runtime_error(failure);
+                return {false, failure};
+            }
+            return {true, "OK"};
+        }
+        std::pair<bool, std::string> cancelVoiceSession(std::uint64_t generation) override
+        {
+            cancellations.push_back(generation);
+            if (bound == generation) bound = 0;
+            return {true, "OK"};
+        }
+    } committer;
+    committer.throws = throws;
+    committer.failure = failure.toStdString();
+    FakeLivePipeline pipeline;
+    FakeUi ui;
+    auto session = makeLiveSession(pipeline, committer, ui);
+    QVERIFY(session.handleCommand("START").rfind("ERR ", 0) == 0);
+    QCOMPARE(session.state(), SessionState::Idle);
+    QCOMPARE(committer.cancellations.size(), size_t(1));
+    QCOMPARE(committer.cancellations.front(), committer.failedGeneration);
+    QCOMPARE(committer.bound, std::uint64_t(0));
+    QCOMPARE(pipeline.cancels(), 1);
+    QCOMPARE(session.handleCommand("START"), std::string("RECORDING"));
+    QVERIFY(committer.bound != 0);
+    QVERIFY(committer.bound != committer.failedGeneration);
+    session.handleCommand("CANCEL");
+}
+
+void TestVoiceSession::preeditRetriesTransientFailures_data()
+{
+    QTest::addColumn<QString>("error");
+    for (const auto* error : {"sendto", "timeout", "socket", "bind", "throw"}) {
+        QTest::newRow(error) << QString::fromLatin1(error);
+    }
+}
+
+void TestVoiceSession::preeditRetriesTransientFailures()
+{
+    QFETCH(QString, error);
+    FakeLivePipeline pipeline;
+    ScriptedPreeditCommitter committer;
+    committer.replies = {{false, error.toStdString()}};
+    FakeUi ui;
+    auto session = makeLiveSession(pipeline, committer, ui);
+    session.handleCommand("START");
+    const auto callback = pipeline.callback();
+    callback("hello");
+    QCOMPARE(committer.preedits(), (std::vector<std::string>{"hello", "hello"}));
+    const auto versions = committer.preeditVersions();
+    QCOMPARE(versions[0].first, versions[1].first);
+    QVERIFY(versions[1].second > versions[0].second);
+    callback("hello");
+    QCOMPARE(committer.preedits().size(), size_t(2));
+}
+
+void TestVoiceSession::preeditRetryLimitAllowsLaterUpdates()
+{
+    FakeLivePipeline pipeline;
+    ScriptedPreeditCommitter committer;
+    committer.replies.assign(3, {false, "sendto"});
+    FakeUi ui;
+    auto session = makeLiveSession(pipeline, committer, ui);
+    session.handleCommand("START");
+    const auto callback = pipeline.callback();
+    callback("hello");
+    QCOMPARE(committer.preedits().size(), size_t(3));
+    callback("hello");
+    QCOMPARE(committer.preedits().size(), size_t(4));
+    callback("hello");
+    QCOMPARE(committer.preedits().size(), size_t(4));
+    callback("hello again");
+    QCOMPARE(committer.preedits().back(), std::string("hello again"));
+}
+
+void TestVoiceSession::failedPreeditDoesNotSuppressReturningToEarlierText()
+{
+    FakeLivePipeline pipeline;
+    ScriptedPreeditCommitter committer;
+    committer.replies = {{true, "OK"}, {false, "timeout"}, {false, "timeout"}, {false, "timeout"}};
+    FakeUi ui;
+    auto session = makeLiveSession(pipeline, committer, ui);
+    session.handleCommand("START");
+    const auto callback = pipeline.callback();
+    callback("old");
+    callback("new");
+    // A timed-out send may already have changed the client's composition.
+    callback("old");
+    QCOMPARE(committer.preedits(), (std::vector<std::string>{"old", "new", "new", "new", "old"}));
+}
+
+void TestVoiceSession::preeditDoesNotRetryRejectedSession_data()
+{
+    QTest::addColumn<QString>("error");
+    for (const auto* error : {"preedit unsupported", "ERR stale-generation", "ERR input-context-changed"}) {
+        QTest::newRow(error) << QString::fromLatin1(error);
+    }
+}
+
+void TestVoiceSession::preeditDoesNotRetryRejectedSession()
+{
+    QFETCH(QString, error);
+    FakeLivePipeline pipeline;
+    ScriptedPreeditCommitter committer;
+    committer.replies = {{false, error.toStdString()}};
+    FakeUi ui;
+    auto session = makeLiveSession(pipeline, committer, ui);
+    session.handleCommand("START");
+    pipeline.callback()("hello");
+    QCOMPARE(committer.preedits().size(), size_t(1));
+}
+
+void TestVoiceSession::emptyPreeditIsRetried()
+{
+    FakeLivePipeline pipeline;
+    ScriptedPreeditCommitter committer;
+    committer.replies = {{true, "OK"}, {false, "timeout"}, {true, "OK"}};
+    FakeUi ui;
+    auto session = makeLiveSession(pipeline, committer, ui);
+    session.handleCommand("START");
+    const auto callback = pipeline.callback();
+    callback("hello");
+    callback("");
+    QCOMPARE(committer.preedits(), (std::vector<std::string>{"hello", "", ""}));
+    callback("");
+    QCOMPARE(committer.preedits().size(), size_t(3));
+}
+
+void TestVoiceSession::cancellationStopsPreeditRetries()
+{
+    FakeLivePipeline pipeline;
+    ScriptedPreeditCommitter committer;
+    committer.ret = {false, "sendto"};
+    FakeUi ui;
+    auto session = makeLiveSession(pipeline, committer, ui);
+    session.handleCommand("START");
+    const auto callback = pipeline.callback();
+    auto delivery = std::async(std::launch::async, [&] { callback("hello"); });
+    const bool attempted = committer.waitForAttempt();
+    session.handleCommand("CANCEL");
+    delivery.get();
+    QVERIFY(attempted);
+    const auto attempts = committer.preedits().size();
+    QVERIFY(attempts >= 1 && attempts <= 3);
+    callback("hello");
+    QCOMPARE(committer.preedits().size(), attempts);
+}
+
+void TestVoiceSession::emptyPartialRetractsPreedit()
+{
+    FakeLivePipeline pipeline;
+    FakeCommitter committer;
+    FakeUi ui;
+    auto session = makeLiveSession(pipeline, committer, ui);
+    session.handleCommand("START");
+    const auto callback = pipeline.callback();
+    callback("false preview");
+    callback("");
+    QCOMPARE(committer.preedits(), (std::vector<std::string>{"false preview", ""}));
+    QCOMPARE(ui.messages().back(), std::string("STREAM_TEXT "));
+    session.handleCommand("CANCEL");
+    callback("");
+    QCOMPARE(committer.preedits().size(), size_t(2));
+}
+
 void TestVoiceSession::liveSecondCtrlFinishesAndCommits()
 {
     FakeLivePipeline pipeline;
@@ -1011,6 +1554,60 @@ void TestVoiceSession::liveSecondCtrlFinishesAndCommits()
     QCOMPARE(QString::fromStdString(messages.back()), QStringLiteral("IDLE"));
 }
 
+void TestVoiceSession::previewRemainsUntilCommitWithoutClearRoundTrip()
+{
+    struct RetainingCommitter : BlockingCommitter {
+        std::vector<std::string> visibleAtCommit;
+        std::pair<bool, std::string> commitText(const std::string& text) override
+        {
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                if (!preedits_.empty()) visibleAtCommit.push_back(preedits_.back());
+            }
+            return BlockingCommitter::commitText(text);
+        }
+    } committer;
+    FakeLivePipeline pipeline;
+    pipeline.result = "前文和尾音";
+    FakeUi ui;
+    auto session = makeLiveSession(pipeline, committer, ui);
+    ScopeExit release{[&] { committer.releaseCommit(); }};
+    session.handleCommand("START");
+    pipeline.callback()("前文");
+    session.handleCommand("STOP");
+    const bool entered = committer.waitForCommitEntered();
+    const auto clears = committer.clearPreeditCount();
+    const auto preview = committer.preedits();
+    committer.releaseCommit();
+    QVERIFY(entered);
+    QCOMPARE(clears, 0);
+    QCOMPARE(preview.back(), std::string("前文"));
+    QCOMPARE(committer.visibleAtCommit, (std::vector<std::string>{"前文"}));
+    QTRY_COMPARE(session.state(), SessionState::Idle);
+    QVERIFY(ui.waitForMessage("IDLE"));
+    QCOMPARE(committer.texts(), (std::vector<std::string>{"前文和尾音"}));
+}
+
+void TestVoiceSession::cancelledFinalizationDoesNotCommit()
+{
+    BlockingLivePipeline pipeline;
+    pipeline.result = "前文和尾音";
+    FakeCommitter committer;
+    FakeUi ui;
+    auto session = makeLiveSession(pipeline, committer, ui);
+    ScopeExit release{[&] { pipeline.releaseFinish(); }};
+    session.handleCommand("START");
+    pipeline.callback()("前文");
+    session.handleCommand("STOP");
+    const bool entered = pipeline.waitForFinishEntered();
+    session.handleCommand("CANCEL");
+    pipeline.releaseFinish();
+    QVERIFY(entered);
+    QTRY_COMPARE(session.state(), SessionState::Idle);
+    QVERIFY(committer.texts().empty());
+    QVERIFY(committer.clearPreeditCount() >= 1); // Cancellation still clears the composition.
+}
+
 void TestVoiceSession::liveEmptyResultDoesNotCommit()
 {
     FakeLivePipeline pipeline;
@@ -1031,6 +1628,57 @@ void TestVoiceSession::liveEmptyResultDoesNotCommit()
     QCOMPARE(
         QString::fromStdString(messages.at(messages.size() - 2)), QStringLiteral("TRANSCRIBING"));
     QCOMPARE(QString::fromStdString(messages.back()), QStringLiteral("IDLE"));
+}
+
+void TestVoiceSession::liveFinishFailurePreservesRecognizedPreview()
+{
+    FakeLivePipeline pipeline;
+    pipeline.throwOnFinish = true;
+    FakeCommitter committer;
+    FakeUi ui;
+    auto session = makeLiveSession(pipeline, committer, ui);
+    session.handleCommand("START");
+    pipeline.callback()("前面已经识别的文字");
+    session.handleCommand("STOP");
+    QTRY_COMPARE(session.state(), SessionState::Idle);
+    QVERIFY(ui.waitForMessage("IDLE"));
+    QCOMPARE(committer.texts(), (std::vector<std::string>{"前面已经识别的文字"}));
+    QCOMPARE(committer.clearPreeditCount(), 0);
+}
+
+void TestVoiceSession::liveFinishFailureAfterRetractionDoesNotCommit()
+{
+    FakeLivePipeline pipeline;
+    pipeline.throwOnFinish = true;
+    FakeCommitter committer;
+    FakeUi ui;
+    auto session = makeLiveSession(pipeline, committer, ui);
+    session.handleCommand("START");
+    pipeline.callback()("noise");
+    pipeline.callback()("");
+    session.handleCommand("STOP");
+    QTRY_COMPARE(session.state(), SessionState::Idle);
+    QVERIFY(ui.waitForMessage("IDLE"));
+    QVERIFY(committer.texts().empty());
+}
+
+void TestVoiceSession::cancelledFailedFinalizationDoesNotCommit()
+{
+    BlockingLivePipeline pipeline;
+    pipeline.throwOnFinish = true;
+    FakeCommitter committer;
+    FakeUi ui;
+    auto session = makeLiveSession(pipeline, committer, ui);
+    ScopeExit release{[&] { pipeline.releaseFinish(); }};
+    session.handleCommand("START");
+    pipeline.callback()("前文");
+    session.handleCommand("STOP");
+    QVERIFY(pipeline.waitForFinishEntered());
+    session.handleCommand("CANCEL");
+    pipeline.releaseFinish();
+    QTRY_COMPARE(session.state(), SessionState::Idle);
+    QVERIFY(ui.waitForMessage("IDLE"));
+    QVERIFY(committer.texts().empty());
 }
 
 void TestVoiceSession::liveFinishExceptionReturnsToIdle()
@@ -1108,6 +1756,90 @@ void TestVoiceSession::liveCancelExceptionStillReturnsToIdleAndHidesTooltip()
     QCOMPARE(QString::fromStdString(ui.messages().back()), QStringLiteral("IDLE"));
 }
 
+void TestVoiceSession::liveAudioLevelsOnlyFlowDuringRecording()
+{
+    BlockingLivePipeline pipeline;
+    FakeCommitter committer;
+    FakeUi ui;
+    auto session = makeLiveSession(pipeline, committer, ui);
+    ScopeExit release{[&] { pipeline.releaseFinish(); }};
+    const auto callback = pipeline.levelCallback();
+    QVERIFY(callback);
+    callback(AudioLevelFrame{0.9});
+    QVERIFY(ui.messages().empty());
+    session.handleCommand("START");
+    ui.clear();
+    callback(AudioLevelFrame{0.75, {0.1, 0.3, 0.9, 0.4, 0.0}});
+    callback(AudioLevelFrame{0});
+    QCOMPARE(ui.messages(), (std::vector<std::string>{"AUDIO_LEVEL 750 100 300 900 400 0 0 0", "AUDIO_LEVEL 0 0 0 0 0 0 0 0"}));
+    session.handleCommand("STOP");
+    QVERIFY(pipeline.waitForFinishEntered());
+    ui.clear();
+    callback(AudioLevelFrame{0.9});
+    QVERIFY(ui.messages().empty());
+    session.handleCommand("CANCEL");
+    ui.clear();
+    callback(AudioLevelFrame{0.9});
+    QVERIFY(ui.messages().empty());
+    pipeline.releaseFinish();
+    QTRY_COMPARE(session.state(), SessionState::Idle);
+}
+
+void TestVoiceSession::fileRecorderAudioLevelsFlowDuringRecording()
+{
+    FakeRecorder recorder;
+    FakeAsr asr;
+    FakeCommitter committer;
+    FakeUi ui;
+    auto session = makeSession(recorder, asr, committer, ui);
+    session.handleCommand("START");
+    ui.clear();
+    const auto callback = recorder.levelCallback();
+    QVERIFY(callback);
+    callback(AudioLevelFrame{0.4});
+    QCOMPARE(ui.messages().back(), std::string("AUDIO_LEVEL 400 0 0 0 0 0 0 0"));
+    session.handleCommand("CANCEL");
+    ui.clear();
+    callback(AudioLevelFrame{1});
+    QVERIFY(ui.messages().empty());
+}
+
+void TestVoiceSession::copiedAudioLevelCallbackIsSafeAfterDestruction()
+{
+    FakeLivePipeline pipeline;
+    FakeCommitter committer;
+    FakeUi ui;
+    std::function<void(const AudioLevelFrame&)> callback;
+    {
+        auto session = makeLiveSession(pipeline, committer, ui);
+        session.handleCommand("START");
+        callback = pipeline.levelCallback();
+    }
+    QVERIFY(callback);
+    QVERIFY(!pipeline.levelCallback());
+    ui.clear();
+    callback(AudioLevelFrame{1});
+    QVERIFY(ui.messages().empty());
+}
+
+void TestVoiceSession::audioLevelsDoNotWaitForPreedit()
+{
+    FakeLivePipeline pipeline;
+    FakeCommitter committer;
+    BlockingPartialUi ui;
+    VoiceSession session(Config::defaultConfig(), pipeline, committer, ui);
+    session.handleCommand("START");
+    const auto callback = pipeline.callback();
+    auto partial = std::async(std::launch::async, [callback] { callback("pending preview"); });
+    ScopeExit release{[&] { ui.releasePartial(); }};
+    QVERIFY(ui.waitForPartialEntered());
+    pipeline.levelCallback()(AudioLevelFrame{0.5});
+    QVERIFY(ui.waitForMessage("AUDIO_LEVEL 500 0 0 0 0 0 0 0"));
+    ui.releasePartial();
+    partial.get();
+    session.handleCommand("CANCEL");
+}
+
 void TestVoiceSession::livePartialTextUpdatesTooltip()
 {
     FakeLivePipeline pipeline;
@@ -1123,9 +1855,11 @@ void TestVoiceSession::livePartialTextUpdatesTooltip()
     callback("实时文本");
 
     QCOMPARE(QString::fromStdString(ui.messages().back()), QStringLiteral("STREAM_TEXT 实时文本"));
+    QCOMPARE(committer.preedits(), std::vector<std::string>{"实时文本"});
 
     // After CANCEL, late partials are dropped (the session the user closed).
     session.handleCommand("CANCEL");
+    QCOMPARE(committer.clearPreeditCount(), 1);
     ui.clear();
     callback("迟到文本");
     QVERIFY(ui.messages().empty());
@@ -1387,6 +2121,7 @@ void TestVoiceSession::partialCompletesBeforeTranscribingNotification()
     auto partial = std::async(std::launch::async, [callback] { callback("blocked partial"); });
     ScopeExit releasePartial { [&ui] { ui.releasePartial(); } };
     const bool partialEntered = ui.waitForPartialEntered();
+    const auto preeditsBeforeUiReleased = committer.preedits();
     auto stopResult
         = std::async(std::launch::async, [&session] { return session.handleCommand("CTRL_DOWN"); });
     const bool transcribingPublishedWhilePartialBlocked
@@ -1403,6 +2138,7 @@ void TestVoiceSession::partialCompletesBeforeTranscribingNotification()
         = std::find(messages.begin(), messages.end(), "TRANSCRIBING");
 
     QVERIFY(partialEntered);
+    QCOMPARE(preeditsBeforeUiReleased, std::vector<std::string>{"blocked partial"});
     QVERIFY2(!transcribingPublishedWhilePartialBlocked,
         "TRANSCRIBING overtook an admitted partial notification");
     QCOMPARE(QString::fromStdString(result), QStringLiteral("TRANSCRIBING"));
@@ -1705,7 +2441,7 @@ void TestVoiceSession::destructorWaitsForFinalization()
     QVERIFY(!pipeline.callback());
 }
 
-void TestVoiceSession::latePartialAfterStopIsIgnored()
+void TestVoiceSession::partialAfterStopUpdatesPreeditUntilCancelled()
 {
     BlockingLivePipeline pipeline;
     FakeCommitter committer;
@@ -1721,7 +2457,11 @@ void TestVoiceSession::latePartialAfterStopIsIgnored()
     ui.clear();
 
     callback("late text");
-    QVERIFY(ui.messages().empty());
+    QCOMPARE(ui.messages().back(), std::string("STREAM_TEXT late text"));
+    QCOMPARE(committer.preedits(), std::vector<std::string>{"late text"});
+    session.handleCommand("CANCEL");
+    callback("cancelled text");
+    QCOMPARE(committer.preedits(), std::vector<std::string>{"late text"});
 
     pipeline.releaseFinish();
     QTRY_COMPARE(session.state(), SessionState::Idle);

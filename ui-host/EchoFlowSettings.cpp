@@ -160,6 +160,8 @@ bool EchoFlowSettings::init(const QString &configPath) {
             QStringLiteral("basic.model.model_name"),
             QStringLiteral("basic.recognition.language"),
             QStringLiteral("basic.recognition.stream_transcription"),
+            QStringLiteral("basic.recognition.noise_suppression"),
+            QStringLiteral("basic.recognition.stream_step_ms"),
             QStringLiteral("basic.polish.enabled"),
             QStringLiteral("basic.polish.model_name"),
             QStringLiteral("basic.recording.min_record_seconds"),
@@ -170,7 +172,6 @@ bool EchoFlowSettings::init(const QString &configPath) {
             QStringLiteral("basic.interaction.focus_hint"),
             QStringLiteral("basic.model.mirror"),
             QStringLiteral("advanced.runtime.asr_timeout_seconds"),
-            QStringLiteral("advanced.fcitx.fcitx_commit"),
             QStringLiteral("advanced.storage.recordings_dir"),
             QStringLiteral("advanced.storage.save_live_debug_audio"),
         };

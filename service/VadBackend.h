@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -15,6 +16,8 @@ struct SpeechInterval {
     size_t beginSample = 0;
     size_t endSample = 0;
     float confidence = 0.0f;
+    // Known quiet tail of a still-open interval; absent for older backends.
+    std::optional<size_t> trailingSilenceSamples;
 };
 
 class IVadBackend {

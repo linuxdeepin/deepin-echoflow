@@ -49,7 +49,7 @@ bool XEventMonitorSource::start() {
         return true;
     }
     if (!platformSupported()) {
-        qInfo("EchoFlow long-press: unsupported platform %s",
+        qInfo("deepin-echoflow long-press: unsupported platform %s",
               qPrintable(QGuiApplication::platformName()));
         return false;
     }
@@ -81,7 +81,7 @@ bool XEventMonitorSource::start() {
             return true;
         }
     }
-    qWarning("EchoFlow long-press: XEventMonitor service is unavailable");
+    qWarning("deepin-echoflow long-press: XEventMonitor service is unavailable");
     return false;
 }
 
@@ -98,7 +98,7 @@ bool XEventMonitorSource::registerWith(const Endpoint &endpoint) {
         service, path, interface, QStringLiteral("RegisterFullScreen"));
     const QDBusReply<QString> reply = bus.call(call, QDBus::Block, 2000);
     if (!reply.isValid() || reply.value().isEmpty()) {
-        qWarning("EchoFlow long-press: RegisterFullScreen failed on %s: %s",
+        qWarning("deepin-echoflow long-press: RegisterFullScreen failed on %s: %s",
                  endpoint.service, qPrintable(reply.error().message()));
         return false;
     }
@@ -110,13 +110,13 @@ bool XEventMonitorSource::registerWith(const Endpoint &endpoint) {
         service, path, interface, QStringLiteral("ButtonRelease"), this,
         SLOT(handleButtonRelease(int,int,int,QString)));
     if (!pressConnected || !releaseConnected) {
-        qWarning("EchoFlow long-press: cannot subscribe to %s button signals",
+        qWarning("deepin-echoflow long-press: cannot subscribe to %s button signals",
                  endpoint.service);
         return false;
     }
 
     setRegistration(&endpoint, reply.value());
-    qInfo("EchoFlow long-press: listening for buttons via %s", endpoint.service);
+    qInfo("deepin-echoflow long-press: listening for buttons via %s", endpoint.service);
     return true;
 }
 

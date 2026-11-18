@@ -837,6 +837,11 @@ void TestOnboardingDialog::successChangesPrimaryActionToFinish()
     QCOMPARE(next->text(), QStringLiteral("Finish and Open Settings"));
     QVERIFY(next->isEnabled());
     QTest::mouseClick(next, Qt::LeftButton);
+    QCOMPARE(finishedSpy.count(), 0);
+    QVERIFY(!next->isEnabled());
+    QCOMPARE(runner.calls.last().program, QStringLiteral("fcitx5"));
+    QCOMPARE(runner.calls.last().arguments, QStringList({QStringLiteral("-rd")}));
+    runner.finish(QStringLiteral("fcitx"), true);
     QCOMPARE(finishedSpy.count(), 1);
 }
 
@@ -959,9 +964,20 @@ void TestOnboardingDialog::replayStartsAtFirstPageAndCompletedSetupDoesNotRerun(
         QTest::mouseClick(next, Qt::LeftButton);
     }
     QCOMPARE(next->text(), QStringLiteral("Finish and Open Settings"));
+    QSignalSpy finishedSpy(&dialog, &OnboardingDialog::finishedAndSettingsRequested);
     QTest::mouseClick(next, Qt::LeftButton);
     QCOMPARE(model.starts, 0);
-    QVERIFY(runner.calls.isEmpty());
+    QCOMPARE(runner.calls.size(), 1);
+    QCOMPARE(runner.calls.last().program, QStringLiteral("fcitx5"));
+    QVERIFY(!next->isEnabled());
+    QCOMPARE(finishedSpy.count(), 0);
+    runner.finish(QStringLiteral("fcitx"), false, QStringLiteral("restart failed"));
+    QCOMPARE(next->text(), QStringLiteral("Retry"));
+    QCOMPARE(finishedSpy.count(), 0);
+    QTest::mouseClick(next, Qt::LeftButton);
+    QCOMPARE(runner.calls.size(), 2);
+    runner.finish(QStringLiteral("fcitx"), true);
+    QCOMPARE(finishedSpy.count(), 1);
 }
 
 QTEST_MAIN(TestOnboardingDialog)

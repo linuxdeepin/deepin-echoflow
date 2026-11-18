@@ -59,14 +59,22 @@ SileroVadBackend::SileroVadBackend(std::filesystem::path modelPath, float startT
         throw std::runtime_error("failed to load Silero VAD model: " + modelPath_.string());
     }
 
-    // Recover the model's per-window sample count without a public getter. The
-    // identity ceil(N / ceil(N / W)) == W holds for N >= W, so one inference
-    // pass over a full second of audio pins nWindow_ exactly.
     std::vector<float> probe(static_cast<size_t>(kSampleRate), 0.0f);
     if (whisper_vad_detect_speech(context_, probe.data(), kSampleRate)) {
         const int nProbs = whisper_vad_n_probs(context_);
         if (nProbs >= 2) {
-            nWindow_ = ceilDiv(kSampleRate, nProbs);
+            int lower = ceilDiv(kSampleRate, nProbs);
+            int upper = (kSampleRate - 1) / (nProbs - 1);
+            while (lower < upper) {
+                const int length = lower + (upper - lower + 1) / 2;
+                if (!whisper_vad_detect_speech(context_, probe.data(), length)) {
+                    lower = 0;
+                    break;
+                }
+                if (whisper_vad_n_probs(context_) == 1) lower = length;
+                else upper = length - 1;
+            }
+            nWindow_ = lower;
         }
     }
     if (nWindow_ <= 0) {
@@ -189,7 +197,8 @@ std::vector<SpeechInterval> segmentByDualThreshold(const float* probs, int nProb
     }
 
     if (inSpeech) {
-        segments.push_back({speechStart, totalSamples, 1.0f});
+        segments.push_back({speechStart, totalSamples, 1.0f,
+                            trailingSilence ? totalSamples - silenceStart : size_t(0)});
     }
     return segments;
 }

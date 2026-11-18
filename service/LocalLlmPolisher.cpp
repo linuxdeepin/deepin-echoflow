@@ -135,8 +135,11 @@ bool LocalLlmPolisher::continueGeneration(void* user)
 std::string LocalLlmPolisher::polish(const std::string& text,
     const std::function<bool()>& shouldAbort)
 {
+    if (shouldAbort && shouldAbort()) throw std::runtime_error("aborted");
     std::lock_guard<std::mutex> lock(mutex_);
+    if (shouldAbort && shouldAbort()) throw std::runtime_error("aborted");
     ensureLoadedLocked();
+    if (shouldAbort && shouldAbort()) throw std::runtime_error("aborted");
     if (!session_) {
         throw std::runtime_error("polish model unavailable: " + loadError_);
     }

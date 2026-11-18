@@ -38,6 +38,7 @@ jobs:
             debhelper \
             dpkg-dev \
             cmake \
+            pkg-config \
             qt6-base-dev \
             qt6-base-dev-tools \
             qt6-declarative-dev \
@@ -49,6 +50,7 @@ jobs:
             desktop-file-utils \
             libfcitx5core-dev \
             libopenblas-dev \
+            libsamplerate0-dev \
             pipewire-bin
 
       - name: Build Debian package

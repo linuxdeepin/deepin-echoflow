@@ -32,10 +32,11 @@ struct Config {
     int asrTimeoutSeconds = 120;
     double minRecordSeconds = 0.25;
     PipeWireRecordConfig pwRecord;
-    bool fcitxCommit = true;
     bool stripTrailingPunctuation = false;
     bool skipSilence = false;
     bool streamTranscription = true;
+    bool noiseSuppression = false;
+    int streamStepMs = 500;
     bool saveLiveDebugAudio = false;
     int openBlasThreads = 4;
 
@@ -48,7 +49,7 @@ struct Config {
     float vadThreshold = 0.15f;
     float vadEndThreshold = 0.10f;
     int vadMinSpeechMs = 100;
-    int vadMinSilenceMs = 300;
+    int vadMinSilenceMs = 500;
 
     // Optional rewrite of the final transcript by a local chat model before
     // it is committed. The model path is derived like the ASR model path.

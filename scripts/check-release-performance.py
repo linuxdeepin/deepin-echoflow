@@ -12,7 +12,7 @@ from scripts.release_performance import run_release_check  # noqa: E402
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Compare EchoFlow release performance")
+    parser = argparse.ArgumentParser(description="Compare deepin-echoflow release performance")
     parser.add_argument("--baseline-ref", required=True)
     parser.add_argument("--candidate-ref", default="HEAD")
     parser.add_argument("--version", required=True)

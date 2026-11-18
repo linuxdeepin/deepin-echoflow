@@ -82,7 +82,7 @@ void ModelDownloader::beginSizing() {
         QNetworkRequest req(urlFor(pending_[i]));
         req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                          QNetworkRequest::NoLessSafeRedirectPolicy);
-        req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("echoflow"));
+        req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("deepin-echoflow"));
         QNetworkReply* g = nam_->get(req);
         sizeReplies_.push_back(g);
         // Capture Content-Length as each response's metadata arrives. Redirect
@@ -164,7 +164,7 @@ void ModelDownloader::fetchNext() {
     QNetworkRequest req(urlFor(pending_[currentIndex_]));
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                      QNetworkRequest::NoLessSafeRedirectPolicy);
-    req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("echoflow"));
+    req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("deepin-echoflow"));
     reply_ = nam_->get(req);
 
     // readyRead only appends bytes to the .part file; byte accounting lives in

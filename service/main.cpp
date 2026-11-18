@@ -4,6 +4,7 @@
 #include "Committer.h"
 #include "AudioSegmenter.h"
 #include "Config.h"
+#include "ProjectPaths.h"
 #include "CrispAsrEngine.h"
 #include "CrispLiveVoicePipeline.h"
 #include "LocalLlmPolisher.h"
@@ -14,6 +15,9 @@
 #include "VoiceSession.h"
 
 #include <cstdio>
+#include <chrono>
+#include <sstream>
+#include <iomanip>
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
@@ -30,16 +34,16 @@ namespace {
 fs::path defaultConfigPath()
 {
     if (const char* configHome = std::getenv("XDG_CONFIG_HOME")) {
-        return fs::path(configHome) / "echoflow" / "echoflow.conf";
+        return echoflow::projectConfigPath(configHome);
     }
     const char* home = std::getenv("HOME");
-    return fs::path(home ? home : "/tmp") / ".config" / "echoflow" / "echoflow.conf";
+    return echoflow::projectConfigPath(fs::path(home ? home : "/tmp") / ".config");
 }
 
 void printUsage()
 {
-    std::printf("Usage: echoflow-service [--config PATH] [--self-test] "
-                "[--print-default-config] [--transcribe-file FILE] "
+    std::printf("Usage: deepin-echoflow-service [--config PATH] [--self-test] "
+                "[--print-default-config] [--transcribe-file FILE [--transcribe-json]] "
                 "[--polish-text TEXT]\n");
 }
 
@@ -59,9 +63,10 @@ void printDefaultConfig()
                 "  \"format\": \"%s\",\n"
                 "  \"source\": \"%s\",\n"
                  "  \"stream_transcription\": %s,\n"
+                 "  \"noise_suppression\": %s,\n"
+                 "  \"stream_step_ms\": %d,\n"
                  "  \"save_live_debug_audio\": %s,\n"
                  "  \"openblas_threads\": %d,\n"
-                 "  \"fcitx_commit\": %s,\n"
                  "  \"crisp_model_path\": \"%s\",\n"
                  "  \"crisp_backend\": \"%s\",\n"
                  "  \"crisp_threads\": %d,\n"
@@ -84,8 +89,10 @@ void printDefaultConfig()
                  cfg.pwRecord.rate, cfg.pwRecord.channels, cfg.pwRecord.format.c_str(),
                  cfg.pwRecord.source.c_str(),
                  cfg.streamTranscription ? "true" : "false",
+                 cfg.noiseSuppression ? "true" : "false",
+                 cfg.streamStepMs,
                  cfg.saveLiveDebugAudio ? "true" : "false",
-                 cfg.openBlasThreads, cfg.fcitxCommit ? "true" : "false",
+                 cfg.openBlasThreads,
                  cfg.crispModelPath.c_str(), cfg.crispBackend.c_str(),
                  cfg.crispThreads, cfg.crispMaxNewTokens,
                  cfg.vadBackend.c_str(), cfg.vadModelPath.c_str(),
@@ -95,6 +102,26 @@ void printDefaultConfig()
                  cfg.polishEnabled ? "true" : "false", cfg.polishModelName.c_str(),
                  segmenter.speechRatio, segmenter.minSpeechRms,
                  segmenter.forceOverlapMs);
+}
+
+std::string jsonString(const std::string& text)
+{
+    std::ostringstream out;
+    out << '"';
+    for (const unsigned char c : text) {
+        switch (c) {
+        case '"': out << "\\\""; break;
+        case '\\': out << "\\\\"; break;
+        case '\n': out << "\\n"; break;
+        case '\r': out << "\\r"; break;
+        case '\t': out << "\\t"; break;
+        default:
+            if (c < 0x20) out << "\\u" << std::hex << std::setw(4) << std::setfill('0') << int(c);
+            else out << c;
+        }
+    }
+    out << '"';
+    return out.str();
 }
 
 std::string polishOrRaw(echoflow::ITextPolisher* polisher, const std::string& text)
@@ -117,6 +144,7 @@ int main(int argc, char** argv)
     fs::path configPath = defaultConfigPath();
     bool selfTest = false;
     bool printDefault = false;
+    bool transcribeJson = false;
     std::optional<fs::path> transcribeFile;
     std::optional<std::string> polishInput;
 
@@ -128,6 +156,8 @@ int main(int argc, char** argv)
             selfTest = true;
         } else if (arg == "--print-default-config") {
             printDefault = true;
+        } else if (arg == "--transcribe-json") {
+            transcribeJson = true;
         } else if (arg == "--transcribe-file" && i + 1 < argc) {
             transcribeFile = argv[++i];
         } else if (arg == "--polish-text" && i + 1 < argc) {
@@ -140,6 +170,11 @@ int main(int argc, char** argv)
             printUsage();
             return 2;
         }
+    }
+
+    if (transcribeJson && !transcribeFile) {
+        std::fprintf(stderr, "--transcribe-json requires --transcribe-file\n");
+        return 2;
     }
 
     if (printDefault) {
@@ -203,16 +238,24 @@ int main(int argc, char** argv)
     }
 
     if (transcribeFile.has_value()) {
+        const auto started = std::chrono::steady_clock::now();
         echoflow::CrispAsrEngine asr(cfg);
         std::string text = polishOrRaw(polisher.get(), asr.transcribe(*transcribeFile));
         if (cfg.stripTrailingPunctuation) {
             text = echoflow::stripPunctuation(text);
         }
-        std::printf("%s\n", text.c_str());
+        if (transcribeJson) {
+            const auto duration = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - started).count();
+            std::printf("{\"transcript\":%s,\"recognition_ms\":%.3f,\"noise_suppression\":%s}\n",
+                jsonString(text).c_str(), duration, cfg.noiseSuppression ? "true" : "false");
+        } else {
+            std::printf("%s\n", text.c_str());
+        }
         return text.empty() ? 1 : 0;
     }
 
-    echoflow::Committer committer(cfg, echoflow::fcitxSocketPath(cfg));
+    echoflow::Committer committer(echoflow::fcitxSocketPath(cfg));
     echoflow::UnixDatagramUiNotifier ui(echoflow::uiSocketPath(cfg));
     if (polisher) {
         polisher->preload();

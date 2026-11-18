@@ -3,10 +3,12 @@
 
 #include "Recorder.h"
 
+#include "AudioLevelMeter.h"
 #include "log.h"
 
 #include <csignal>
 #include <ctime>
+#include <exception>
 #include <spawn.h>
 #include <string>
 #include <sys/wait.h>
@@ -64,6 +66,52 @@ PipeWireRecorder::PipeWireRecorder(Config cfg)
 {
 }
 
+PipeWireRecorder::~PipeWireRecorder()
+{
+    stop();
+}
+
+void PipeWireRecorder::setAudioLevelCallback(std::function<void(const AudioLevelFrame&)> callback)
+{
+    std::lock_guard<std::mutex> lock(levelMutex_);
+    audioLevelCallback_ = std::move(callback);
+}
+
+void PipeWireRecorder::stopLevelMonitor()
+{
+    {
+        std::lock_guard<std::mutex> lock(levelMutex_);
+        levelStopped_ = true;
+    }
+    levelCondition_.notify_all();
+    if (levelThread_.joinable()) levelThread_.join();
+}
+
+void PipeWireRecorder::monitorLevels(std::filesystem::path path)
+{
+    WavAudioLevelReader reader(std::move(path), true);
+    while (true) {
+        {
+            std::lock_guard<std::mutex> lock(levelMutex_);
+            if (levelStopped_) return;
+        }
+        try {
+            const auto level = reader.poll();
+            std::function<void(const AudioLevelFrame&)> callback;
+            {
+                std::lock_guard<std::mutex> lock(levelMutex_);
+                callback = audioLevelCallback_;
+            }
+            if (level && callback) callback(*level);
+        } catch (const std::exception& error) {
+            log(std::string("recording audio level failed: ") + error.what());
+        }
+        std::unique_lock<std::mutex> lock(levelMutex_);
+        if (levelCondition_.wait_for(lock, std::chrono::milliseconds(50),
+                                    [this] { return levelStopped_; })) return;
+    }
+}
+
 void PipeWireRecorder::start()
 {
     if (child_ != -1) {
@@ -71,7 +119,10 @@ void PipeWireRecorder::start()
     }
 
     fs::create_directories(cfg_.recordingsDir);
-    path_ = fs::path(cfg_.recordingsDir) / ("voice-" + timestamp() + ".wav");
+    const auto stamp = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    path_ = fs::path(cfg_.recordingsDir)
+        / ("voice-" + timestamp() + "-" + std::to_string(stamp) + ".wav");
 
     std::vector<std::string> args = buildPipeWireRecordArgs(cfg_.pwRecord, path_.string());
 
@@ -92,12 +143,22 @@ void PipeWireRecorder::start()
 
     child_ = pid;
     startedAt_ = std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::mutex> lock(levelMutex_);
+        levelStopped_ = false;
+    }
+    try {
+        levelThread_ = std::thread(&PipeWireRecorder::monitorLevels, this, path_);
+    } catch (const std::exception& error) {
+        log(std::string("recording audio level monitor unavailable: ") + error.what());
+    }
     log("recording started: " + path_.string() +
         ", source=" + (cfg_.pwRecord.source.empty() ? std::string("default") : cfg_.pwRecord.source));
 }
 
 fs::path PipeWireRecorder::stop()
 {
+    stopLevelMonitor();
     if (child_ == -1) {
         return {};
     }
