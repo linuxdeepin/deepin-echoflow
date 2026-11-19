@@ -38,6 +38,24 @@ CapsuleController::CapsuleController(SendCommand sendCommand, QObject *parent)
     audioLevelTimer_.setSingleShot(true);
     audioLevelTimer_.setInterval(kAudioLevelTimeoutMs);
     connect(&audioLevelTimer_, &QTimer::timeout, this, [this] { setAudioLevel(0); });
+    placementTimer_.setSingleShot(true);
+    connect(&placementTimer_, &QTimer::timeout, this, &CapsuleController::publish);
+    const auto watchScreen = [this](QScreen *screen) {
+        connect(screen, &QScreen::geometryChanged, this, &CapsuleController::schedulePlacementUpdate);
+        connect(screen, &QScreen::availableGeometryChanged,
+                this, &CapsuleController::schedulePlacementUpdate);
+    };
+    auto *app = qGuiApp;
+    for (auto *screen : app->screens()) {
+        watchScreen(screen);
+    }
+    connect(app, &QGuiApplication::screenAdded, this, [this, watchScreen](QScreen *screen) {
+        watchScreen(screen);
+        schedulePlacementUpdate();
+    });
+    connect(app, &QGuiApplication::screenRemoved, this, &CapsuleController::schedulePlacementUpdate);
+    connect(app, &QGuiApplication::primaryScreenChanged,
+            this, &CapsuleController::schedulePlacementUpdate);
     clock_.start();
     hintTimer_.setSingleShot(true);
     hintTimer_.setInterval(kDefaultHintTimeoutMs);
@@ -207,6 +225,7 @@ bool CapsuleController::applyFocusMessage(const QString &verb, const QString &ge
         return true;
     }
 
+    QScreen *previousScreen = capsuleVisible() ? capsuleScreen() : nullptr;
     if (verb == QStringLiteral("BLUR")) {
         focused_ = false;
         caret_ = QRect();
@@ -214,6 +233,9 @@ bool CapsuleController::applyFocusMessage(const QString &verb, const QString &ge
         anchoredAtPress_ = false;
         hintRequested_ = false;
         updateHint();
+        if (previousScreen && previousScreen != capsuleScreen()) {
+            schedulePlacementUpdate();
+        }
         emit inputFocusChanged(false, QRect());
         return true;
     }
@@ -254,6 +276,9 @@ bool CapsuleController::applyFocusMessage(const QString &verb, const QString &ge
         anchoredAtPress_ = false;
     }
     updateHint();
+    if (previousScreen && previousScreen != capsuleScreen()) {
+        schedulePlacementUpdate();
+    }
     emit inputFocusChanged(true, caret_);
     return true;
 }
@@ -263,8 +288,12 @@ void CapsuleController::notePointerPress(QPoint position) {
     lastPressAt_ = clock_.elapsed();
     // The press can arrive over D-Bus after Fcitx already reported focus.
     if (focused_ && lastFocusAt_ >= 0 && lastPressAt_ - lastFocusAt_ <= kClickFocusWindowMs) {
+        QScreen *previousScreen = capsuleVisible() ? capsuleScreen() : nullptr;
         caret_ = caretAtPress();
         updateHint();
+        if (previousScreen && previousScreen != capsuleScreen()) {
+            schedulePlacementUpdate();
+        }
         emit inputFocusChanged(true, caret_);
     }
 }
@@ -351,19 +380,40 @@ void CapsuleController::publishHint() {
     emit hintChanged(hintVisible_, hintText_, hintPosition_.x(), hintPosition_.y());
 }
 
-void CapsuleController::publish() {
-    const bool visible = persistent_
-        || phase_ == Phase::Recording
-        || phase_ == Phase::Transcribing;
+bool CapsuleController::capsuleVisible() const {
+    return persistent_ || phase_ == Phase::Recording || phase_ == Phase::Transcribing;
+}
 
+QScreen *CapsuleController::capsuleScreen() const {
+    if (focused_ && hasCaret(caret_)) {
+        if (auto *screen = QGuiApplication::screenAt(caret_.center())) {
+            return screen;
+        }
+    }
+    return QGuiApplication::primaryScreen();
+}
+
+void CapsuleController::schedulePlacementUpdate() {
+    if (capsuleVisible()) {
+        // Coalesce blur/refocus and changes from a single output layout update.
+        placementTimer_.start();
+    }
+}
+
+void CapsuleController::publish() {
+    placementTimer_.stop();
+    const bool visible = capsuleVisible();
     bool hasPosition = false;
     int moveX = 0;
     int moveY = 0;
-    if (QScreen *screen = QGuiApplication::primaryScreen()) {
+    if (QScreen *screen = capsuleScreen()) {
         const QRect available = screen->availableGeometry();
         hasPosition = true;
         moveX = available.left() + available.width() / 2;
         moveY = available.bottom() - available.height() / kCapsuleBottomDivisor;
+        if (visible) {
+            emit capsulePlacementChanged(screen, QPoint(moveX, moveY));
+        }
     }
 
     emit capsuleChanged(visible, phaseName(phase_), message_,

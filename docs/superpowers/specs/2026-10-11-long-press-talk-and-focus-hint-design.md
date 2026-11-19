@@ -55,10 +55,14 @@ commit would replace.
 
 ### Capsule Position
 
-The capsule, transient or pinned, is horizontally centered on the primary
-screen with its bottom edge one eighth of the available height above the
-screen's bottom edge. It never follows the caret: an earlier caret-anchored
-placement covered the text being dictated into and jumped between fields.
+The capsule, transient or pinned, is horizontally centered on the screen
+containing the focused caret, falling back to the primary screen when no caret
+screen is available. Its bottom edge sits one eighth of that screen's available
+height above the bottom. It does not follow the caret position within that
+screen; an earlier caret-anchored placement covered dictated text and jumped
+between fields. On Treeland with layer-shell support, the capsule binds directly
+to the selected output on the overlay layer, with keyboard interactivity off.
+X11 positions the capsule in global desktop coordinates.
 
 ## Detecting a Press Inside a Text Field
 

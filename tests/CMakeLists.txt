@@ -74,6 +74,10 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
     find_package(Qt6 REQUIRED COMPONENTS Qml Quick)
+    set(capsule_test_platform offscreen)
+    if(Qt6_VERSION VERSION_GREATER_EQUAL 6.8)
+        string(APPEND capsule_test_platform ":configfile=${CMAKE_CURRENT_SOURCE_DIR}/capsule-test-screens.json")
+    endif()
     add_executable(test_capsule_controller
         test_capsule_controller.cpp
         ../ui-host/CapsuleController.cpp
@@ -84,7 +88,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::Test)
     add_test(NAME test_capsule_controller COMMAND test_capsule_controller)
     set_tests_properties(test_capsule_controller PROPERTIES
-        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
+        ENVIRONMENT "QT_QPA_PLATFORM=${capsule_test_platform};QT_QUICK_BACKEND=software")
     add_executable(test_long_press_detector
         test_long_press_detector.cpp
         ../ui-host/LongPressDetector.cpp)
@@ -229,6 +233,10 @@ set_tests_properties(test_onboarding_dialog PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 find_package(Qt6 REQUIRED COMPONENTS Qml Quick)
+set(capsule_test_platform offscreen)
+if(Qt6_VERSION VERSION_GREATER_EQUAL 6.8)
+    string(APPEND capsule_test_platform ":configfile=${CMAKE_CURRENT_SOURCE_DIR}/capsule-test-screens.json")
+endif()
 add_executable(test_capsule_controller
     test_capsule_controller.cpp
     ../ui-host/CapsuleController.cpp
@@ -240,7 +248,7 @@ target_link_libraries(test_capsule_controller PRIVATE
 echoflow_enable_dead_strip(test_capsule_controller)
 add_test(NAME test_capsule_controller COMMAND test_capsule_controller)
 set_tests_properties(test_capsule_controller PROPERTIES
-    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
+    ENVIRONMENT "QT_QPA_PLATFORM=${capsule_test_platform};QT_QUICK_BACKEND=software")
 
 add_executable(test_long_press_detector
     test_long_press_detector.cpp

@@ -10,6 +10,7 @@
 #include <QObject>
 #include <QPoint>
 #include <QRect>
+#include <QScreen>
 #include <QString>
 #include <QTimer>
 #include <QVariantList>
@@ -63,8 +64,10 @@ signals:
     void audioLevelChanged();
     void audioLevelsChanged();
     void recordingDurationChanged();
-    // (moveX, moveY) is the bottom-center anchor at the lower middle of the
-    // primary screen; the capsule never follows the caret.
+    // Delivered before capsuleChanged so Wayland can place the surface on map.
+    void capsulePlacementChanged(QScreen *screen, QPoint anchor);
+    // (moveX, moveY) is the bottom-center anchor on the focused caret's screen,
+    // falling back to the primary screen.
     void capsuleChanged(bool visible, QString phase, QString message,
                         bool hasPosition, int moveX, int moveY);
     void hintChanged(bool visible, QString text, int moveX, int moveY);
@@ -86,6 +89,9 @@ private:
     void setAudioLevel(double level, const QVariantList& waveform = {});
     void resetAudioLevel();
     void stopRecordingClock();
+    bool capsuleVisible() const;
+    QScreen *capsuleScreen() const;
+    void schedulePlacementUpdate();
     void publish();
     void updateHint();
     void publishHint();
@@ -121,6 +127,7 @@ private:
     bool hintVisible_ = false;
     QString hintText_;
     QPoint hintPosition_;
+    QTimer placementTimer_;
     QTimer hintTimer_;
     QTimer hintPublishTimer_;
 };

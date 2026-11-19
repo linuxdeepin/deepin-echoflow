@@ -49,11 +49,17 @@ Window {
     readonly property bool transcribing: root.phase === "transcribing"
     readonly property bool cancelling: root.phase === "cancelling"
 
-    // (targetX, targetY) is the capsule's bottom-center anchor.
     width: capsule.width
     height: capsule.height
-    x: targetX - width / 2
-    y: targetY - height
+
+    function updatePosition() {
+        root.x = targetX - Math.ceil(width / 2)
+        root.y = targetY - height
+    }
+
+    // Moving to another screen can update the status label's width limit.
+    onWidthChanged: Qt.callLater(root.updatePosition)
+    onHeightChanged: Qt.callLater(root.updatePosition)
 
     Connections {
         target: tooltipController
@@ -63,6 +69,7 @@ Window {
             if (hasPosition) {
                 root.targetX = moveX
                 root.targetY = moveY
+                root.updatePosition()
             }
             if (visibility) {
                 root.visible = true

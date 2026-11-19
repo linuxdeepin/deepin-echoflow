@@ -44,6 +44,7 @@
 #include <DPalette>
 
 #include "CapsuleController.h"
+#include "CapsuleWindowPolicy.h"
 #include "ProjectPaths.h"
 #include "EchoFlowSettings.h"
 #include "LongPressDetector.h"
@@ -322,6 +323,9 @@ int main(int argc, char **argv) {
     engine.load(qmlUrl);
     if (engine.rootObjects().isEmpty()) {
         return 2;
+    }
+    if (auto *capsuleWindow = qobject_cast<QWindow *>(engine.rootObjects().first())) {
+        configureCapsuleWindow(capsuleWindow, controller);
     }
     engine.load(QUrl(QStringLiteral("qrc:/qml/EchoFlowHint.qml")));
     if (engine.rootObjects().size() < 2) {

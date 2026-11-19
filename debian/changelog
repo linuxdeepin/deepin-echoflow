@@ -1,3 +1,13 @@
+deepin-echoflow (0.2.14) unstable; urgency=medium
+
+  * Show the recording capsule on the display containing the focused
+    text field instead of always using the primary screen.
+  * Position the capsule through native Wayland layer-shell and
+    Treeland integration on supported desktops without taking keyboard
+    focus; X11 placement stays unchanged.
+
+ -- Wang Yu <wangyu@uniontech.com>  Thu, 19 Nov 2026 21:41:29 +0800
+
 deepin-echoflow (0.2.13) unstable; urgency=medium
 
   * Show live transcription in the input field while recording, with a
