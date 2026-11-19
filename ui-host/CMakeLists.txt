@@ -3,7 +3,7 @@
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     cmake_minimum_required(VERSION 3.16)
-    project(deepin-echoflow-ui-host LANGUAGES CXX)
+    project(deepin-echoflow-ui-host LANGUAGES C CXX)
 endif()
 
 set(CMAKE_CXX_STANDARD 17)
@@ -12,6 +12,7 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Qml Quick Widgets Network DBus LinguistTools)
+find_package(Qt6 QUIET COMPONENTS WaylandClient)
 find_package(Dtk6 COMPONENTS Widget Core Gui REQUIRED)
 include(GNUInstallDirs)
 # Long-press checks the active window through the X server directly.
@@ -23,6 +24,7 @@ endif()
 
 add_executable(deepin-echoflow-ui
     main.cpp
+    CapsuleWindowPolicy.cpp
     CapsuleController.cpp
     UiSocketServer.cpp
     LongPressDetector.cpp
@@ -68,6 +70,41 @@ target_link_libraries(deepin-echoflow-ui
         Dtk6::Core
         Dtk6::Gui
 )
+
+if(TARGET Qt6::WaylandClient AND TARGET Qt6::GuiPrivate)
+    target_link_libraries(deepin-echoflow-ui PRIVATE Qt6::WaylandClient Qt6::GuiPrivate)
+    target_compile_definitions(deepin-echoflow-ui PRIVATE ECHOFLOW_HAVE_TREELAND_DDE_SHELL)
+    qt_generate_wayland_protocol_client_sources(deepin-echoflow-ui
+        NO_INCLUDE_CORE_ONLY
+        FILES
+            ${CMAKE_CURRENT_SOURCE_DIR}/protocols/treeland-dde-shell-unstable-v2.xml
+    )
+else()
+    message(STATUS "Treeland DDE shell support disabled; using Qt window hints")
+endif()
+
+# The capsule needs its own shell integration to bind to an explicit output.
+# Other windows continue to use Qt's default xdg-shell integration.
+if(TARGET Qt6::WaylandClientPrivate AND TARGET Qt6::GuiPrivate
+   AND Qt6WaylandClient_VERSION VERSION_GREATER_EQUAL 6.8)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_get_variable(WAYLAND_PROTOCOLS_DIR wayland-protocols pkgdatadir)
+    endif()
+    set(XDG_SHELL_XML "${WAYLAND_PROTOCOLS_DIR}/stable/xdg-shell/xdg-shell.xml")
+    if(EXISTS "${XDG_SHELL_XML}")
+        target_link_libraries(deepin-echoflow-ui PRIVATE Qt6::WaylandClientPrivate)
+        target_compile_definitions(deepin-echoflow-ui PRIVATE ECHOFLOW_HAVE_LAYER_SHELL)
+        qt_generate_wayland_protocol_client_sources(deepin-echoflow-ui
+            NO_INCLUDE_CORE_ONLY PRIVATE_CODE
+            FILES
+                ${CMAKE_CURRENT_SOURCE_DIR}/protocols/wlr-layer-shell-unstable-v1.xml
+                ${XDG_SHELL_XML}
+        )
+    else()
+        message(STATUS "Layer shell support disabled; wayland-protocols is missing")
+    endif()
+endif()
 
 # Keep the onboarding source path tied to the configured install prefix.
 target_compile_definitions(deepin-echoflow-ui PRIVATE

@@ -1,0 +1,7 @@
+{
+    "screens": [
+        {"name": "1-primary", "width": 800, "height": 800},
+        {"name": "2-left", "x": -1280, "y": -200, "width": 1280, "height": 1024},
+        {"name": "3-above", "x": 200, "y": -900, "width": 1600, "height": 900}
+    ]
+}

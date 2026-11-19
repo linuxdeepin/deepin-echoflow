@@ -101,6 +101,7 @@ private slots:
     void hintSuppressedWhenDisabledPersistentOrBusy();
     void focusHintIsDisabledByDefault();
     void recordingCapsuleStaysAtLowerCenter();
+    void recordingCapsuleSelectsMonitorBeforeShowing();
     void inputFocusIsReportedForLongPress();
     void refocusTracksCaretWithoutHinting();
     void clickFocusAnchorsAtPress();
@@ -682,9 +683,10 @@ void CapsuleControllerTest::focusHintIsDisabledByDefault() {
 }
 
 void CapsuleControllerTest::recordingCapsuleStaysAtLowerCenter() {
-    QScreen *screen = QGuiApplication::primaryScreen();
+    QScreen *screen = QGuiApplication::screenAt(QPoint(100, 200));
+    if (!screen) screen = QGuiApplication::primaryScreen();
     if (!screen) {
-        QSKIP("no primary screen");
+        QSKIP("no screen available");
     }
     const QRect available = screen->availableGeometry();
     const int expectedX = available.left() + available.width() / 2;
@@ -694,8 +696,7 @@ void CapsuleControllerTest::recordingCapsuleStaysAtLowerCenter() {
     CapsuleController controller(ignoreCommands());
     QSignalSpy capsuleSpy(&controller, &CapsuleController::capsuleChanged);
 
-    // The capsule ignores the caret both when recording starts and while it
-    // moves during the session.
+    // The caret selects the screen. Moving within the screen keeps the anchor.
     controller.applyServiceMessage(QStringLiteral("FOCUS 100 200 2 18"));
     controller.applyServiceMessage(QStringLiteral("RECORDING"));
     controller.applyServiceMessage(QStringLiteral("CARET 300 400 2 18"));
@@ -709,6 +710,50 @@ void CapsuleControllerTest::recordingCapsuleStaysAtLowerCenter() {
         QCOMPARE(state.moveX, expectedX);
         QCOMPARE(state.moveY, expectedY);
     }
+}
+
+void CapsuleControllerTest::recordingCapsuleSelectsMonitorBeforeShowing() {
+    if (QGuiApplication::platformName() != QStringLiteral("offscreen")
+        || !qEnvironmentVariable("QT_QPA_PLATFORM").contains(QStringLiteral("capsule-test-screens"))) {
+        QSKIP("requires the offscreen multi-monitor fixture");
+    }
+
+    QScreen *primary = QGuiApplication::primaryScreen();
+    QScreen *left = QGuiApplication::screenAt(QPoint(-1100, 10));
+    QScreen *above = QGuiApplication::screenAt(QPoint(500, -500));
+    QVERIFY(primary && left && above);
+    QVERIFY(left != primary && above != primary && left != above);
+
+    CapsuleController controller(ignoreCommands());
+    QScreen *target = nullptr;
+    QPoint anchor;
+    connect(&controller, &CapsuleController::capsulePlacementChanged, this,
+            [&](QScreen *screen, QPoint position) {
+                target = screen;
+                anchor = position;
+            });
+    connect(&controller, &CapsuleController::capsuleChanged, this,
+            [&](bool visible, const QString &, const QString &, bool hasPosition, int x, int y) {
+                if (visible) {
+                    QVERIFY(target);
+                    QVERIFY(hasPosition);
+                    QCOMPARE(QPoint(x, y), anchor);
+                }
+            });
+
+    controller.applyServiceMessage(QStringLiteral("FOCUS -1100 10 2 18"));
+    controller.applyServiceMessage(QStringLiteral("RECORDING"));
+    QCOMPARE(target, left);
+    QCOMPARE(anchor, QPoint(-640, 695));
+
+    // The capsule is already visible when the caret moves to another output.
+    controller.applyServiceMessage(QStringLiteral("FOCUS 500 -500 2 18"));
+    QTRY_COMPARE(target, above);
+    QCOMPARE(anchor, QPoint(1000, -113));
+
+    controller.applyServiceMessage(QStringLiteral("BLUR"));
+    QTRY_COMPARE(target, primary);
+    QCOMPARE(anchor, QPoint(400, 699));
 }
 
 void CapsuleControllerTest::inputFocusIsReportedForLongPress() {
