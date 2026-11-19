@@ -4,6 +4,7 @@
 import copy
 import hashlib
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +12,9 @@ import subprocess
 
 from scripts import release_performance as driver
 from tests.test_performance_gate import IDENTITY
+
+
+GIT_AVAILABLE = shutil.which("git") is not None
 
 
 class ReleasePerformanceDriverTest(unittest.TestCase):
@@ -125,6 +129,7 @@ class ReleasePerformanceDriverTest(unittest.TestCase):
     def test_link_only_second_build_is_accepted(self):
         driver.verify_noop_build_output("[100%] Built target voice_latency_benchmark")
 
+    @unittest.skipUnless(GIT_AVAILABLE, "git executable is required")
     def test_finds_submodule_object_in_another_local_worktree(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -148,6 +153,7 @@ class ReleasePerformanceDriverTest(unittest.TestCase):
             self.assertIsNone(driver.find_local_submodule_source(
                 [Path(directory) / "missing"], "0" * 40))
 
+    @unittest.skipUnless(GIT_AVAILABLE, "git executable is required")
     def test_local_clone_fetches_unreferenced_historical_commit(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -185,6 +191,7 @@ class ReleasePerformanceDriverTest(unittest.TestCase):
             self.assertEqual(checked_out, historical)
             self.assertEqual((destination / "historical").read_text(encoding="utf-8"), "old tree")
 
+    @unittest.skipUnless(GIT_AVAILABLE, "git executable is required")
     def test_local_clone_initializes_nested_submodules_present_locally(self):
         def git(cwd, *args):
             return subprocess.run(
@@ -217,6 +224,7 @@ class ReleasePerformanceDriverTest(unittest.TestCase):
                 (destination / "ggml" / "CMakeLists.txt").read_text(encoding="utf-8"),
                 "nested")
 
+    @unittest.skipUnless(GIT_AVAILABLE, "git executable is required")
     def test_initialize_submodule_skips_vendored_source(self):
         def git(cwd, *args):
             return subprocess.run(

@@ -3,6 +3,7 @@
 
 import copy
 import json
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -13,6 +14,10 @@ from scripts.performance_gate import LIVE_BENCHMARK_SOURCE, compare_release_resu
 from tests.test_performance_gate import IDENTITY, result, with_live
 
 
+GIT_AVAILABLE = shutil.which("git") is not None
+
+
+@unittest.skipUnless(GIT_AVAILABLE, "git executable is required")
 class ReleaseEvidenceTest(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
