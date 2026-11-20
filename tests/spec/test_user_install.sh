@@ -30,7 +30,8 @@ if [[ "${1:-}" == "-S" ]]; then
   mkdir -p "$build_dir/systemd/user"
   : > "$build_dir/systemd/user/deepin-echoflow.service"
   : > "$build_dir/systemd/user/deepin-echoflow.socket"
-  : > "$build_dir/deepin-echoflow-autostart.desktop"
+  sed "s|@CMAKE_INSTALL_FULL_BINDIR@|$PREFIX/bin|g" \
+    "$2/ui-host/deepin-echoflow-autostart.desktop.in" > "$build_dir/deepin-echoflow-autostart.desktop"
 elif [[ "${1:-}" == "--install" ]]; then
   mkdir -p "$PREFIX/bin" "$PREFIX/lib/fcitx5"
   : > "$PREFIX/bin/deepin-echoflow-service"
@@ -107,7 +108,11 @@ assert_logged "systemctl --user disable --now deepin-echoflow-ui.service"
 assert_logged "systemctl --user disable --now deepin-echoflow.service"
 assert_logged "systemctl --user stop deepin-echoflow.socket"
 assert_logged "deepin-echoflow-session-start --socket-only"
-[[ -f "$DEFAULT_HOME/autostart/deepin-echoflow-autostart.desktop" ]] || fail "user autostart desktop entry was not installed"
+installed_autostart="$DEFAULT_HOME/autostart/deepin-echoflow-autostart.desktop"
+[[ -f "$installed_autostart" ]] || fail "user autostart desktop entry was not installed"
+grep -qFx 'NoDisplay=true' "$installed_autostart" || fail "user autostart entry is visible"
+grep -qFx "Exec=\"$DEFAULT_HOME/prefix with spaces/bin/deepin-echoflow-session-start\"" "$installed_autostart" || fail "user autostart entry does not launch the session"
+desktop-file-validate "$installed_autostart"
 assert_logged "fcitx5 -rd"
 assert_ordered \
   "systemctl --user disable --now deepin-echoflow.service" \
@@ -147,7 +152,7 @@ UPGRADE_PREFIX="$UPGRADE_HOME/prefix with spaces"
 UPGRADE_CONFIG="$UPGRADE_HOME/xdg-config"
 mkdir -p "$UPGRADE_CONFIG/echoflow/qwen3-asr-0.6b" "$UPGRADE_HOME/systemd" \
   "$UPGRADE_HOME/autostart" "$UPGRADE_HOME/.local/share/fcitx5/addon" \
-  "$UPGRADE_PREFIX/bin" "$UPGRADE_PREFIX/share/applications"
+  "$UPGRADE_PREFIX/bin" "$UPGRADE_PREFIX/share/applications" "$UPGRADE_PREFIX/share/deepin-echoflow"
 printf 'existing user config\n' > "$UPGRADE_CONFIG/echoflow/echoflow.conf"
 printf 'existing model\n' > "$UPGRADE_CONFIG/echoflow/qwen3-asr-0.6b/model.gguf"
 : > "$UPGRADE_HOME/systemd/echoflow.service"
@@ -155,6 +160,9 @@ printf 'existing model\n' > "$UPGRADE_CONFIG/echoflow/qwen3-asr-0.6b/model.gguf"
 : > "$UPGRADE_HOME/.local/share/fcitx5/addon/echoflow.conf"
 : > "$UPGRADE_PREFIX/bin/echoflow-ui"
 : > "$UPGRADE_PREFIX/share/applications/echoflow.desktop"
+: > "$UPGRADE_PREFIX/share/applications/deepin-echoflow.desktop"
+: > "$UPGRADE_PREFIX/share/deepin-echoflow/deepin-echoflow-autostart.desktop"
+printf '[Desktop Entry]\nNoDisplay=false\n' > "$UPGRADE_HOME/autostart/deepin-echoflow-autostart.desktop"
 : > "$TEST_LOG"
 upgrade_output="$(env -u CONFIG_DIR HOME="$UPGRADE_HOME" XDG_CONFIG_HOME="$UPGRADE_CONFIG" \
   PREFIX="$UPGRADE_PREFIX" STATE_DIR="$UPGRADE_HOME/state" \
@@ -168,9 +176,12 @@ grep -qF "Config: $UPGRADE_CONFIG/echoflow/echoflow.conf" <<< "$upgrade_output" 
 for old_entry in "$UPGRADE_HOME/systemd/echoflow.service" \
   "$UPGRADE_HOME/autostart/echoflow-autostart.desktop" \
   "$UPGRADE_HOME/.local/share/fcitx5/addon/echoflow.conf" \
-  "$UPGRADE_PREFIX/bin/echoflow-ui" "$UPGRADE_PREFIX/share/applications/echoflow.desktop"; do
+  "$UPGRADE_PREFIX/bin/echoflow-ui" "$UPGRADE_PREFIX/share/applications/echoflow.desktop" \
+  "$UPGRADE_PREFIX/share/applications/deepin-echoflow.desktop" \
+  "$UPGRADE_PREFIX/share/deepin-echoflow/deepin-echoflow-autostart.desktop"; do
   [[ ! -e "$old_entry" ]] || fail "legacy entry remains: $old_entry"
 done
+grep -qFx 'NoDisplay=true' "$UPGRADE_HOME/autostart/deepin-echoflow-autostart.desktop" || fail "upgrade kept a visible user autostart entry"
 [[ -f "$UPGRADE_HOME/.local/share/fcitx5/addon/deepin-echoflow.conf" ]] || fail "renamed addon missing"
 assert_logged "systemctl --user disable --now echoflow.socket echoflow.service echoflow-ui.service"
 

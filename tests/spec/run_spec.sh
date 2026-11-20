@@ -66,32 +66,6 @@ assert_count() {
   fi
 }
 
-assert_png_asset() {
-  local file="$1"
-  local description="$2"
-  local dimensions=""
-  if [[ -s "$file" ]]; then
-    dimensions="$(python3 - "$file" <<'PY'
-import struct
-import sys
-
-with open(sys.argv[1], "rb") as png:
-    signature = png.read(24)
-if signature[:8] != b"\x89PNG\r\n\x1a\n" or signature[12:16] != b"IHDR":
-    raise SystemExit("not a PNG with an IHDR header")
-print(*struct.unpack(">II", signature[16:24]))
-PY
-)"
-  fi
-  if [[ "$dimensions" == "768 768" ]]; then
-    echo "ok   - $description"
-    pass=$((pass + 1))
-  else
-    echo "FAIL - $description ($file is missing, empty, or ${dimensions:-unreadable})"
-    fail=$((fail + 1))
-  fi
-}
-
 assert_absent "$ROOT/install-user.sh" "uv venv" "install-user.sh has no uv venv"
 assert_absent "$ROOT/install-user.sh" "uv pip" "install-user.sh has no uv pip"
 assert_absent "$ROOT/install-user.sh" "llama" "install-user.sh has no llama"
@@ -101,6 +75,7 @@ assert_contains "$ROOT/install-user.sh" 'cmake -S "$ROOT_DIR"' "install-user.sh 
 assert_contains "$ROOT/install-user.sh" 'cmake --install "$BUILD_DIR"' "install-user.sh installs root build"
 assert_contains "$ROOT/install-user.sh" '$BUILD_DIR/systemd/user/deepin-echoflow.service' "install-user.sh installs configured service unit"
 assert_contains "$ROOT/install-user.sh" '$BUILD_DIR/systemd/user/deepin-echoflow.socket' "install-user.sh installs activation socket unit"
+assert_contains "$ROOT/install-user.sh" '$PREFIX/share/applications/deepin-echoflow.desktop' "user upgrade removes the obsolete application launcher"
 assert_contains "$ROOT/install-user.sh" '$BUILD_DIR/deepin-echoflow-autostart.desktop' "install-user.sh installs UI desktop autostart"
 assert_contains "$ROOT/install-user.sh" 'systemctl --user disable --now deepin-echoflow.service' "install-user.sh disables the legacy eager service"
 assert_contains "$ROOT/install-user.sh" 'systemctl --user stop deepin-echoflow.socket' "install-user.sh stops activation during upgrade"
@@ -135,7 +110,7 @@ assert_contains "$ROOT/scripts/deepin-echoflow-session-start" 'systemctl --user 
 assert_contains "$ROOT/scripts/deepin-echoflow-session-start" 'systemctl --user start deepin-echoflow.socket' "session launcher starts only the activation socket"
 assert_contains "$ROOT/scripts/deepin-echoflow-session-start" 'is-active --quiet deepin-echoflow.service' "settings restart is guarded by service activity"
 assert_contains "$ROOT/scripts/deepin-echoflow-session-start" 'while :' "session launcher restarts the UI after a crash"
-assert_contains "$ROOT/ui-host/CMakeLists.txt" 'ECHOFLOW_AUTOSTART_DESKTOP_PATH' "UI uses the configured data path for autostart"
+assert_contains "$ROOT/ui-host/CMakeLists.txt" 'ECHOFLOW_SYSTEM_AUTOSTART_PATH' "UI uses the installed entry to migrate stock user autostart files"
 assert_contains "$ROOT/run.sh" 'systemd-socket-activate --datagram' "run.sh uses socket activation for the service"
 assert_contains "$ROOT/run.sh" 'while :; do' "run.sh recreates the activation listener after service exit"
 assert_contains "$ROOT/run.sh" 'systemctl --user is-active --quiet deepin-echoflow.socket' "run.sh avoids conflicting with the installed socket"
@@ -168,12 +143,6 @@ assert_script_absent() {
 assert_script_absent
 
 assert_contains "$ROOT/ui-host/settings-schema.json" "modeldownload" "settings schema has modeldownload widget type"
-assert_contains "$ROOT/ui-host/settings-schema.json" '"key": "getting_started"' "settings schema has Getting started group"
-assert_contains "$ROOT/ui-host/settings-schema.json" '"name": "Getting Started"' "settings schema names Getting started group"
-assert_contains "$ROOT/ui-host/settings-schema.json" '"key": "usage_guide"' "settings schema has Usage guide option"
-assert_contains "$ROOT/ui-host/settings-schema.json" '"name": "Usage Guide"' "settings schema names Usage guide option"
-assert_contains "$ROOT/ui-host/settings-schema.json" '"type": "guide"' "settings schema uses guide widget type"
-assert_before "$ROOT/ui-host/settings-schema.json" '"key": "getting_started"' '"key": "basic"' "Getting started precedes Basic settings"
 assert_contains "$ROOT/ui-host/settings-schema.json" "download_0.6b" "settings schema has 0.6B download row key"
 assert_contains "$ROOT/ui-host/settings-schema.json" "download_1.7b" "settings schema has 1.7B download row key"
 assert_contains "$ROOT/ui-host/settings-schema.json" "Qwen3-ASR-0.6B" "settings schema lists 0.6B model row"
@@ -182,11 +151,6 @@ assert_contains "$ROOT/ui-host/settings-schema.json" "hf-mirror" "settings schem
 assert_absent "$ROOT/ui-host/settings-schema.json" "model_dir" "settings schema has no model_dir option"
 assert_absent "$ROOT/install-user.sh" "model_dir" "install-user.sh writes no model_dir"
 assert_contains "$ROOT/ui-host/SettingsDialog.cpp" "modeldownload" "SettingsDialog registers modeldownload factory"
-assert_contains "$ROOT/ui-host/SettingsDialog.cpp" 'registerWidget(QStringLiteral("guide")' "SettingsDialog registers guide factory"
-assert_contains "$ROOT/ui-host/SettingsDialog.cpp" 'setObjectName(QStringLiteral("usageGuideButton"))' "Usage guide button has stable object name"
-assert_contains "$ROOT/ui-host/SettingsDialog.cpp" 'emit usageGuideRequested()' "Usage guide button emits request signal"
-assert_contains "$ROOT/ui-host/SettingsDialog.h" 'void usageGuideRequested();' "SettingsDialog exposes Usage guide request signal"
-assert_before "$ROOT/ui-host/SettingsDialog.cpp" 'registerWidget(QStringLiteral("guide")' 'updateSettings(settings)' "guide factory is registered before settings rows are built"
 assert_contains "$ROOT/service/ModelCatalog.h" "cstr/qwen3-asr-1.7b-GGUF" "ModelCatalog knows the 1.7B GGUF repo"
 
 assert_absent "$ROOT/ui-host/settings-schema.json" "asr_runner" "settings schema drops asr_runner"
@@ -284,50 +248,13 @@ done
 assert_contains "$ROOT/ui-host/CMakeLists.txt" '${CMAKE_CURRENT_LIST_DIR}/../service' "standalone ui-host resolves service includes from its own directory"
 assert_contains "$ROOT/ui-host/CMakeLists.txt" "icons.qrc" "ui-host embeds app icon resources"
 assert_contains "$ROOT/ui-host/CMakeLists.txt" "onboarding.qrc" "ui-host embeds onboarding illustration resources"
-if grep -qF '<!DOCTYPE RCC>' "$ROOT/ui-host/onboarding.qrc" \
-    && grep -qF '<RCC version="1.0">' "$ROOT/ui-host/onboarding.qrc" \
-    && grep -qF '<qresource prefix="/onboarding">' "$ROOT/ui-host/onboarding.qrc"; then
-  echo "ok   - onboarding resources use the canonical RCC format and prefix"
-  pass=$((pass + 1))
-else
-  echo "FAIL - onboarding resources use the canonical RCC format and prefix"
-  fail=$((fail + 1))
-fi
-for illustration in intro shortcut settings setup; do
-  assert_png_asset "$ROOT/ui-host/onboarding/${illustration}.png" "onboarding ${illustration} illustration exists on the shared 768px canvas"
-  assert_contains "$ROOT/ui-host/onboarding.qrc" "<file alias=\"${illustration}.png\">onboarding/${illustration}.png</file>" "onboarding qrc aliases ${illustration}.png"
-done
-onboarding_test_resource_count="$(grep -cF '../ui-host/onboarding.qrc' "$ROOT/tests/CMakeLists.txt")"
-onboarding_test_autorcc_count="$(grep -cF 'set_property(TARGET test_onboarding_dialog PROPERTY AUTORCC ON)' "$ROOT/tests/CMakeLists.txt")"
-if [[ "$onboarding_test_resource_count" -eq 2 && "$onboarding_test_autorcc_count" -eq 2 ]]; then
-  echo "ok   - both focused onboarding dialog targets compile onboarding resources"
-  pass=$((pass + 1))
-else
-  echo "FAIL - both focused onboarding dialog targets compile onboarding resources (found $onboarding_test_resource_count references and $onboarding_test_autorcc_count AUTORCC settings)"
-  fail=$((fail + 1))
-fi
-assert_contains "$ROOT/ui-host/CMakeLists.txt" 'configure_file(' "ui-host configures desktop entry"
-assert_contains "$ROOT/ui-host/CMakeLists.txt" '"${CMAKE_CURRENT_SOURCE_DIR}/deepin-echoflow.desktop.in"' "desktop entry source works in standalone builds"
-assert_contains "$ROOT/ui-host/CMakeLists.txt" '"${CMAKE_CURRENT_BINARY_DIR}/deepin-echoflow.desktop"' "desktop entry is generated in the current build tree"
-assert_contains "$ROOT/ui-host/CMakeLists.txt" 'DESTINATION "${CMAKE_INSTALL_DATADIR}/applications"' "ui-host installs desktop entry to applications"
+assert_absent "$ROOT/ui-host/CMakeLists.txt" '"${CMAKE_INSTALL_DATADIR}/applications"' "ui-host installs no application launcher"
 assert_contains "$ROOT/ui-host/CMakeLists.txt" '"${CMAKE_CURRENT_SOURCE_DIR}/icons/deepin-echoflow.svg"' "ui-host installs deepin-echoflow icon"
-assert_contains "$ROOT/ui-host/CMakeLists.txt" 'DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps"' "ui-host installs scalable app icon"
-assert_contains "$ROOT/ui-host/deepin-echoflow.desktop.in" '[Desktop Entry]' "desktop entry has standard header"
-assert_contains "$ROOT/ui-host/deepin-echoflow.desktop.in" 'Type=Application' "desktop entry declares application type"
-assert_contains "$ROOT/ui-host/deepin-echoflow.desktop.in" 'Name=EchoFlow' "desktop entry keeps the EchoFlow display name"
+assert_contains "$ROOT/ui-host/CMakeLists.txt" '"${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps"' "ui-host installs scalable app icon"
 assert_contains "$ROOT/ui-host/main.cpp" 'app.setApplicationDisplayName(QStringLiteral("EchoFlow"))' "application display name keeps EchoFlow branding"
 assert_contains "$ROOT/ui-host/main.cpp" 'trayIcon.setToolTip(QStringLiteral("EchoFlow"))' "tray tooltip keeps EchoFlow branding"
-assert_contains "$ROOT/ui-host/deepin-echoflow.desktop.in" 'Name[zh_CN]=EchoFlow 语音输入' "desktop entry has Chinese name"
-assert_contains "$ROOT/ui-host/deepin-echoflow.desktop.in" 'Comment=Offline voice input for Fcitx5' "desktop entry has English comment"
-assert_contains "$ROOT/ui-host/deepin-echoflow.desktop.in" 'Comment[zh_CN]=离线、安全、流畅的语音输入' "desktop entry has Chinese comment"
-assert_contains "$ROOT/ui-host/deepin-echoflow.desktop.in" '# SPDX-FileCopyrightText: 2026 Hualet Wang' "desktop entry has copyright header"
-assert_contains "$ROOT/ui-host/deepin-echoflow.desktop.in" '# SPDX-License-Identifier: GPL-3.0-or-later' "desktop entry has license header"
-assert_contains "$ROOT/ui-host/deepin-echoflow.desktop.in" 'Exec="@CMAKE_INSTALL_FULL_BINDIR@/deepin-echoflow-ui" --activate' "desktop entry activates the configured deepin-echoflow UI"
-assert_contains "$ROOT/ui-host/deepin-echoflow.desktop.in" 'Icon=deepin-echoflow' "desktop entry uses installed deepin-echoflow icon"
-assert_contains "$ROOT/ui-host/deepin-echoflow.desktop.in" 'Terminal=false' "desktop entry does not open a terminal"
-assert_contains "$ROOT/ui-host/deepin-echoflow.desktop.in" 'Categories=Utility;Accessibility;' "desktop entry has utility and accessibility categories"
-assert_contains "$ROOT/ui-host/deepin-echoflow.desktop.in" 'StartupNotify=true' "desktop entry enables startup notification"
-assert_absent "$ROOT/ui-host/deepin-echoflow.desktop.in" "$ROOT" "desktop entry has no source-tree absolute path"
+assert_contains "$ROOT/ui-host/deepin-echoflow-autostart.desktop.in" 'NoDisplay=true' "autostart entry is hidden from application listings"
+assert_absent "$ROOT/ui-host/deepin-echoflow-autostart.desktop.in" 'Hidden=true' "autostart entry remains enabled"
 assert_contains "$ROOT/ui-host/main.cpp" ":/icons/deepin-echoflow.svg" "tray icon uses deepin-echoflow logo resource"
 assert_absent "$ROOT/ui-host/main.cpp" "SP_ComputerIcon" "tray icon no longer uses generic computer icon"
 assert_contains "$ROOT/ui-host/main.cpp" 'QStringLiteral("activate")' "ui-host accepts explicit activation option"
@@ -337,6 +264,8 @@ assert_contains "$ROOT/ui-host/main.cpp" 'UiActivationServer::Result::Failed' "i
 assert_absent "$ROOT/ui-host/main.cpp" 'acquireUiInstanceServer' "legacy inline instance acquisition is removed"
 assert_contains "$ROOT/ui-host/main.cpp" 'bool pendingActivation' "early activation is queued until UI readiness"
 assert_contains "$ROOT/ui-host/main.cpp" 'activationHost.acquire(pendingActivation' "startup activation is routed through the threaded host"
+assert_contains "$ROOT/ui-host/main.cpp" 'pendingActivation || !onboardingState.isComplete()' "first-run guide opens without an application launcher"
+assert_contains "$ROOT/ui-host/settings-schema.json" '"usage_guide"' "settings provide the usage guide"
 assert_contains "$ROOT/ui-host/main.cpp" 'OnboardingState onboardingState' "onboarding state has process lifetime"
 assert_contains "$ROOT/ui-host/main.cpp" 'QProcessSetupCommandRunner setupCommandRunner' "setup command runner has process lifetime"
 assert_contains "$ROOT/ui-host/main.cpp" 'ModelSetupAdapter modelSetupAdapter' "model adapter has process lifetime"
@@ -348,15 +277,14 @@ assert_contains "$ROOT/ui-host/main.cpp" 'finishedAndSettingsRequested' "onboard
 assert_contains "$ROOT/ui-host/main.cpp" '#include "CapsuleController.h"' "ui-host uses the shared capsule controller"
 assert_absent "$ROOT/ui-host/main.cpp" 'QObject::tr("Show recording capsule")' "tray does not expose a persistent capsule action"
 assert_contains "$ROOT/ui-host/UiSocketServer.cpp" 'controller_->applyServiceMessage(message)' "UI socket routes service state through capsule controller"
-assert_contains "$ROOT/ui-host/main.cpp" 'QObject::tr("Usage Guide")' "tray exposes Usage guide action"
-assert_before "$ROOT/ui-host/main.cpp" 'QObject::tr("Usage Guide")' 'QObject::tr("Settings")' "tray Usage guide precedes Settings"
+assert_contains "$ROOT/ui-host/main.cpp" 'QObject::tr("Usage Guide")' "tray provides the usage guide"
+assert_contains "$ROOT/ui-host/main.cpp" 'showOnboarding(true)' "usage guide can replay onboarding"
 assert_before "$ROOT/ui-host/main.cpp" 'QObject::tr("Settings")' 'trayMenu.addSeparator()' "tray separator follows Settings"
 assert_before "$ROOT/ui-host/main.cpp" 'trayMenu.addSeparator()' 'QObject::tr("Quit")' "tray Quit follows separator"
 assert_contains "$ROOT/ui-host/main.cpp" 'bool shuttingDown = false' "ui-host tracks application shutdown"
 assert_contains "$ROOT/ui-host/main.cpp" '&QCoreApplication::aboutToQuit' "ui-host cleans dialogs before app.exec returns"
 assert_contains "$ROOT/ui-host/main.cpp" 'shuttingDown = true' "shutdown guard is set before dialog cleanup"
 assert_contains "$ROOT/ui-host/main.cpp" 'delete settingsDialog.data()' "settings dialog is deleted synchronously during shutdown"
-assert_contains "$ROOT/ui-host/main.cpp" 'delete onboardingDialog.data()' "onboarding dialog is deleted synchronously during shutdown"
 assert_contains "$ROOT/ui-host/main.cpp" '--restart-service-if-active' "settings restart preserves on-demand service state"
 assert_contains "$ROOT/ui-host/main.cpp" 'if (!shuttingDown)' "service restart is suppressed during application shutdown"
 assert_before "$ROOT/ui-host/main.cpp" 'shuttingDown = true' 'delete settingsDialog.data()' "shutdown guard precedes settings dialog deletion"
@@ -377,13 +305,8 @@ fi
 assert_contains "$ROOT/debian/control" "Package: deepin-echoflow" "debian control defines echoflow package"
 assert_contains "$ROOT/debian/control" "debhelper-compat (= 13)" "debian control uses debhelper compat 13"
 assert_contains "$ROOT/debian/control" "desktop-file-utils" "debian build dependencies provide desktop-file-validate"
-if [[ ! -e "$ROOT/debian/postinst" ]]; then
-  echo "ok   - Debian uses debhelper-generated user-service maintainer scripts"
-  pass=$((pass + 1))
-else
-  echo "FAIL - manual Debian postinst would duplicate debhelper user-service restart"
-  fail=$((fail + 1))
-fi
+assert_contains "$ROOT/debian/postinst" '#DEBHELPER#' "Debian retains debhelper-generated user-service handling"
+assert_absent "$ROOT/debian/postinst" 'systemctl' "Debian migration does not duplicate debhelper user-service handling"
 assert_contains "$ROOT/debian/control" "libdtk6widget-dev (>= 6.7)" "debian control keeps DTK widget dependency at minor version"
 assert_absent "$ROOT/debian/control" "libdtk6widget-dev (>= 6.7." "debian control does not pin DTK widget dependency to patch/build"
 assert_contains "$ROOT/debian/shlibs.local" "libdtk6widget 6 libdtk6widget (>= 6.7)" "debian shlibs keeps DTK widget runtime dependency at minor version"
@@ -417,10 +340,17 @@ assert_contains "$ROOT/.github/workflows/deb.yml" "softprops/action-gh-release" 
 assert_contains "$ROOT/AGENTS.md" "scripts/check-release-performance.py" "version bump instructions require a benchmark"
 assert_contains "$ROOT/AGENTS.md" "release-only commit" "version bump instructions require isolated release metadata"
 
-if bash "$ROOT/tests/spec/test_onboarding_install.sh"; then
+if bash "$ROOT/tests/spec/test_user_install.sh"; then
   pass=$((pass + 1))
 else
   echo "FAIL - executable install and uninstall behavior"
+  fail=$((fail + 1))
+fi
+
+if python3 "$ROOT/tests/spec/test_deb_upgrade.py"; then
+  pass=$((pass + 1))
+else
+  echo "FAIL - Debian legacy autostart migration"
   fail=$((fail + 1))
 fi
 

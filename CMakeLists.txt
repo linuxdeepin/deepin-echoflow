@@ -140,8 +140,6 @@ install(FILES
     DESTINATION "lib/systemd/user")
 install(FILES "${CMAKE_BINARY_DIR}/deepin-echoflow-autostart.desktop"
     DESTINATION "${CMAKE_INSTALL_SYSCONFDIR}/xdg/autostart")
-install(FILES "${CMAKE_BINARY_DIR}/deepin-echoflow-autostart.desktop"
-    DESTINATION "${CMAKE_INSTALL_DATADIR}/deepin-echoflow")
 install(PROGRAMS
     "${CMAKE_SOURCE_DIR}/scripts/deepin-echoflow-session-start"
     "${CMAKE_SOURCE_DIR}/scripts/deepin-echoflow-session-stop"
