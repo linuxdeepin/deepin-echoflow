@@ -21,6 +21,7 @@
 #include <QCursor>
 #include <QDebug>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QIcon>
 #include <QMenu>
@@ -29,6 +30,7 @@
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QProcess>
+#include <QSaveFile>
 #include <QSocketNotifier>
 #include <QStandardPaths>
 #include <QString>
@@ -176,6 +178,44 @@ bool sendControlCommand(const QString &controlPath, std::string_view command) {
     return ok;
 }
 
+void updateLegacyUserAutostart() {
+#ifdef ECHOFLOW_SYSTEM_AUTOSTART_PATH
+    const QString path = QDir(QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation))
+        .filePath(QStringLiteral("autostart/deepin-echoflow-autostart.desktop"));
+    const QFileInfo info(path);
+    if (!info.isFile() || info.isSymLink()) {
+        return;
+    }
+
+    QFile userEntry(path);
+    QFile systemEntry(QStringLiteral(ECHOFLOW_SYSTEM_AUTOSTART_PATH));
+    if (!userEntry.open(QIODevice::ReadOnly) || !systemEntry.open(QIODevice::ReadOnly)) {
+        return;
+    }
+
+    constexpr auto noDisplay = "NoDisplay=true\n";
+    const QByteArray updatedEntry = systemEntry.readAll();
+    if (!updatedEntry.contains(noDisplay)) {
+        return;
+    }
+
+    // The old wizard copied the installed entry verbatim. Preserve any edits
+    // made by the user or their autostart manager.
+    QByteArray legacyEntry = updatedEntry;
+    legacyEntry.replace(noDisplay, "");
+    if (userEntry.readAll() != legacyEntry) {
+        return;
+    }
+    userEntry.close();
+
+    QSaveFile replacement(path);
+    if (!replacement.open(QIODevice::WriteOnly) ||
+        replacement.write(updatedEntry) != updatedEntry.size() || !replacement.commit()) {
+        qWarning("failed to update the legacy EchoFlow autostart entry");
+    }
+#endif
+}
+
 void restartServiceAfterSettingsChange() {
     const QString launcher = QDir(QCoreApplication::applicationDirPath())
         .filePath(QStringLiteral("deepin-echoflow-session-start"));
@@ -297,6 +337,8 @@ int main(int argc, char **argv) {
         logDuplicateInstanceExit();
         return 0;
     }
+
+    updateLegacyUserAutostart();
 
     const QString configPath = parser.value(configOption);
     if (!echoflow::EchoFlowSettings::instance()->init(configPath)) {
@@ -502,7 +544,7 @@ int main(int argc, char **argv) {
     });
 
     uiReady = true;
-    if (pendingActivation) {
+    if (pendingActivation || !onboardingState.isComplete()) {
         pendingActivation = false;
         QTimer::singleShot(0, &app, activationHandler);
     }

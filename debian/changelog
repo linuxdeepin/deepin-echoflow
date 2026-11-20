@@ -1,3 +1,13 @@
+deepin-echoflow (0.2.15) unstable; urgency=medium
+
+  * Open the setup wizard on first launch and keep it available from
+    the tray and settings after setup.
+  * Remove the application menu launcher and keep login autostart
+    hidden. Move obsolete autostart files from the old package aside
+    on upgrade and update unmodified user copies in place.
+
+ -- Wang Yu <wangyu@uniontech.com>  Fri, 20 Nov 2026 17:10:24 +0800
+
 deepin-echoflow (0.2.14) unstable; urgency=medium
 
   * Show the recording capsule on the display containing the focused

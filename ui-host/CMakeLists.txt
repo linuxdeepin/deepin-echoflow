@@ -106,9 +106,10 @@ if(TARGET Qt6::WaylandClientPrivate AND TARGET Qt6::GuiPrivate
     endif()
 endif()
 
-# Keep the onboarding source path tied to the configured install prefix.
-target_compile_definitions(deepin-echoflow-ui PRIVATE
-    ECHOFLOW_AUTOSTART_DESKTOP_PATH="${CMAKE_INSTALL_FULL_DATADIR}/deepin-echoflow/deepin-echoflow-autostart.desktop")
+if(NOT CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    target_compile_definitions(deepin-echoflow-ui PRIVATE
+        ECHOFLOW_SYSTEM_AUTOSTART_PATH="${CMAKE_INSTALL_FULL_SYSCONFDIR}/xdg/autostart/deepin-echoflow-autostart.desktop")
+endif()
 
 # lupdate runs on this target's sources (the .qrc pulls in the QML files);
 # rebuild the update_translations target to refresh the .ts files. Install
@@ -134,13 +135,6 @@ foreach(translation_file IN LISTS ECHOFLOW_TRANSLATION_QM_FILES)
         RENAME "deepin-echoflow-ui_${translation_locale}.qm")
 endforeach()
 
-configure_file(
-    "${CMAKE_CURRENT_SOURCE_DIR}/deepin-echoflow.desktop.in"
-    "${CMAKE_CURRENT_BINARY_DIR}/deepin-echoflow.desktop"
-    @ONLY)
-
 install(TARGETS deepin-echoflow-ui RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
-install(FILES "${CMAKE_CURRENT_BINARY_DIR}/deepin-echoflow.desktop"
-    DESTINATION "${CMAKE_INSTALL_DATADIR}/applications")
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/icons/deepin-echoflow.svg"
     DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps")

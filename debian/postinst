@@ -1,0 +1,24 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 Hualet Wang
+# SPDX-License-Identifier: GPL-3.0-or-later
+set -eu
+
+if [ "$1" = configure ]; then
+    entry=/etc/xdg/autostart/echoflow-autostart.desktop
+    legacy="${DPKG_ROOT:-}$entry"
+    # The renamed package leaves the old package's conffiles on disk.
+    if { [ -f "$legacy" ] || [ -L "$legacy" ]; } &&
+        dpkg-query --admindir="${DPKG_ADMINDIR:-${DPKG_ROOT:-}/var/lib/dpkg}" \
+            -W -f='${db:Status-Status}\n${Conffiles}\n' echoflow 2>/dev/null |
+            awk -v entry="$entry" 'NR == 1 { removed = ($0 == "config-files") }
+                $1 == entry { owned = 1 } END { exit !(removed && owned) }'; then
+        backup=$(mktemp "${legacy}.bak.XXXXXX")
+        if ! mv -fT -- "$legacy" "$backup"; then
+            rm -f -- "$backup"
+            exit 1
+        fi
+        printf 'Moved the obsolete EchoFlow autostart entry to %s\n' "$backup"
+    fi
+fi
+
+#DEBHELPER#
