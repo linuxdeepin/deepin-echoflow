@@ -84,9 +84,11 @@ rm -f "$PREFIX/bin/echoflow-service" "$PREFIX/bin/echoflow-ui" \
       "$PREFIX/lib/fcitx5/libechoflow.so" \
       "$PREFIX/lib/x86_64-linux-gnu/fcitx5/libechoflow.so" \
       "$PREFIX/share/applications/echoflow.desktop" \
+      "$PREFIX/share/applications/deepin-echoflow.desktop" \
       "$PREFIX/share/echoflow/echoflow-autostart.desktop" \
       "$PREFIX/etc/xdg/autostart/echoflow-autostart.desktop" \
       "$PREFIX/share/icons/hicolor/scalable/apps/echoflow.svg"
+rm -f "$PREFIX/share/deepin-echoflow/deepin-echoflow-autostart.desktop"
 
 
 if [[ ! -e "$CONFIG_FILE" ]]; then

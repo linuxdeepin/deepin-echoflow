@@ -8,9 +8,10 @@
 #include <algorithm>
 #include <QCoreApplication>
 #include <QDir>
+#include <QStandardPaths>
 
-#ifndef ECHOFLOW_AUTOSTART_DESKTOP_PATH
-#define ECHOFLOW_AUTOSTART_DESKTOP_PATH ""
+#ifndef ECHOFLOW_SYSTEM_AUTOSTART_PATH
+#define ECHOFLOW_SYSTEM_AUTOSTART_PATH ""
 #endif
 
 OnboardingSetupController::OnboardingSetupController(ModelSetupSource *model,
@@ -220,13 +221,13 @@ void OnboardingSetupController::startItem(SetupItem item)
         }
         break;
     case SetupItem::UiAutostart: {
-        QString source = QStringLiteral(ECHOFLOW_AUTOSTART_DESKTOP_PATH);
+        QString source = QStringLiteral(ECHOFLOW_SYSTEM_AUTOSTART_PATH);
         if (source.isEmpty()) {
             source = QDir(QCoreApplication::applicationDirPath())
-                .filePath(QStringLiteral("../share/deepin-echoflow/deepin-echoflow-autostart.desktop"));
+                .filePath(QStringLiteral("../etc/xdg/autostart/deepin-echoflow-autostart.desktop"));
         }
-        const QString destination = QDir::home().filePath(
-            QStringLiteral(".config/autostart/deepin-echoflow-autostart.desktop"));
+        const QString destination = QDir(QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation))
+            .filePath(QStringLiteral("autostart/deepin-echoflow-autostart.desktop"));
         runner_->run(QStringLiteral("ui-autostart"), QStringLiteral("install"),
                      {QStringLiteral("-D"), source, destination});
         break;

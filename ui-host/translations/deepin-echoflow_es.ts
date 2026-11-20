@@ -4,28 +4,28 @@
 <context>
     <name>CapsuleController</name>
     <message>
-        <location filename="../CapsuleController.cpp" line="85"/>
-        <location filename="../CapsuleController.cpp" line="140"/>
+        <location filename="../CapsuleController.cpp" line="103"/>
+        <location filename="../CapsuleController.cpp" line="158"/>
         <source>Cancelling</source>
         <translation>Cancelando</translation>
     </message>
     <message>
-        <location filename="../CapsuleController.cpp" line="134"/>
+        <location filename="../CapsuleController.cpp" line="152"/>
         <source>Listening</source>
         <translation>Escuchando</translation>
     </message>
     <message>
-        <location filename="../CapsuleController.cpp" line="137"/>
+        <location filename="../CapsuleController.cpp" line="155"/>
         <source>Transcribing</source>
         <translation>Transcribiendo</translation>
     </message>
     <message>
-        <location filename="../CapsuleController.cpp" line="334"/>
+        <location filename="../CapsuleController.cpp" line="364"/>
         <source>Hold the left mouse button or right Ctrl to talk</source>
         <translation>Mantén pulsado el botón izquierdo del ratón o Ctrl derecho para hablar</translation>
     </message>
     <message>
-        <location filename="../CapsuleController.cpp" line="335"/>
+        <location filename="../CapsuleController.cpp" line="365"/>
         <source>Hold right Ctrl to talk</source>
         <translation>Mantén pulsado Ctrl derecho para hablar</translation>
     </message>
@@ -33,17 +33,17 @@
 <context>
     <name>EchoFlowTooltip</name>
     <message>
-        <location filename="../../qml/EchoFlowTooltip.qml" line="139"/>
+        <location filename="../../qml/EchoFlowTooltip.qml" line="146"/>
         <source>Start recording</source>
         <translation>Iniciar grabación</translation>
     </message>
     <message>
-        <location filename="../../qml/EchoFlowTooltip.qml" line="209"/>
+        <location filename="../../qml/EchoFlowTooltip.qml" line="216"/>
         <source>Cancel and discard the recording</source>
         <translation>Cancelar y descartar la grabación</translation>
     </message>
     <message>
-        <location filename="../../qml/EchoFlowTooltip.qml" line="307"/>
+        <location filename="../../qml/EchoFlowTooltip.qml" line="314"/>
         <source>Finish recording and start transcription</source>
         <translation>Terminar la grabación e iniciar la transcripción</translation>
     </message>
@@ -255,23 +255,23 @@
 <context>
     <name>QObject</name>
     <message>
-        <location filename="../main.cpp" line="303"/>
+        <location filename="../main.cpp" line="346"/>
         <source>Failed to load the settings schema.</source>
         <translation>No se pudo cargar el esquema de configuración.</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="404"/>
+        <location filename="../main.cpp" line="450"/>
         <location filename="../SettingsTranslation.cpp" line="18"/>
         <source>Usage Guide</source>
         <translation>Guía de uso</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="405"/>
+        <location filename="../main.cpp" line="451"/>
         <source>Settings</source>
         <translation>Configuración</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="407"/>
+        <location filename="../main.cpp" line="453"/>
         <source>Quit</source>
         <translation>Salir</translation>
     </message>
