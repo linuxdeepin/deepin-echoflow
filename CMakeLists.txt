@@ -43,6 +43,40 @@ elseif(NOT ECHOFLOW_CPU_TARGET STREQUAL "native"
     message(FATAL_ERROR "Unsupported ECHOFLOW_CPU_TARGET=${ECHOFLOW_CPU_TARGET}")
 endif()
 
+# ggml enables the RISC-V vector extensions by default and compiles ggml-cpu
+# with -march=..._zvfh, gated on `defined(__riscv_zvfh)` in the source. GCC 12
+# and 13 — what riscv64 builds use on deepin 25 — both define the macro without
+# the intrinsics the code needs: GCC 12 ships no riscv_vector.h and no _Float16
+# for that target, and GCC 13 only has the v0.11 intrinsics while ggml uses the
+# v1.0 API. binutils 2.41 additionally rejects the _zvfh suffix. Any of these
+# breaks the CPU backend, so probe the toolchain with the code ggml-cpu uses and
+# fall back to the scalar profile when it does not compile.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^riscv64")
+    include(CheckCSourceCompiles)
+    set(_echoflow_try_compile_target_type "${CMAKE_TRY_COMPILE_TARGET_TYPE}")
+    set(_echoflow_required_flags "${CMAKE_REQUIRED_FLAGS}")
+    # Compile only: the probe must exercise the assembler too, and a link into
+    # a cross sysroot is not what decides whether ggml-cpu builds.
+    set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+    set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} -march=rv64gcv_zfh_zvfh -mabi=lp64d")
+    check_c_source_compiles("
+        #include <riscv_vector.h>
+        int main(void) {
+            vfloat32m2_t vx = __riscv_vle32_v_f32m2((const float *) 0, 1);
+            vfloat16m1_t vy = __riscv_vfncvt_f_f_w_f16m1(vx, 1);
+            __riscv_vse16_v_f16m1((_Float16 *) 0, vy, 1);
+            return 0;
+        }" ECHOFLOW_RISCV64_RVV_INTRINSICS)
+    set(CMAKE_REQUIRED_FLAGS "${_echoflow_required_flags}")
+    set(CMAKE_TRY_COMPILE_TARGET_TYPE "${_echoflow_try_compile_target_type}")
+    if(NOT ECHOFLOW_RISCV64_RVV_INTRINSICS)
+        message(STATUS
+            "riscv64 toolchain cannot compile the RISC-V vector intrinsics "
+            "ggml-cpu uses; building ggml-cpu without them")
+        set(GGML_RVV OFF CACHE BOOL "" FORCE)
+    endif()
+endif()
+
 # Vendored CrispASR — build as static lib, link C-ABI into echoflow_service.
 # Only the qwen3 backend is compiled (other backends stripped at configure time).
 set(CRISPASR_WASM OFF CACHE BOOL "" FORCE)
