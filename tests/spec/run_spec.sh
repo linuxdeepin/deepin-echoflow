@@ -328,15 +328,20 @@ assert_contains "$ROOT/debian/rules" 'override_dh_auto_configure:' "Debian overr
 assert_contains "$ROOT/debian/rules" '-- -DECHOFLOW_CPU_TARGET=x86-64-v3' "Debian selects deterministic CPU target"
 assert_contains "$ROOT/debian/rules" '-- -DECHOFLOW_CPU_TARGET=native' "Debian selects native target on non-amd64"
 assert_contains "$ROOT/debian/source/format" "3.0 (native)" "debian source format is native"
-assert_contains "$ROOT/.github/workflows/build.yml" "cmake --build build" "build workflow builds CMake tree"
-assert_contains "$ROOT/.github/workflows/build.yml" "ctest --test-dir build --output-on-failure" "build workflow runs tests"
-assert_contains "$ROOT/.github/workflows/build.yml" "desktop-file-utils" "build workflow installs desktop-file-validate"
-assert_contains "$ROOT/.github/workflows/build.yml" "qt6-tools-dev" "build workflow installs Qt LinguistTools"
-assert_contains "$ROOT/.github/workflows/deb.yml" "dpkg-buildpackage -us -uc -b" "deb workflow builds binary package"
-assert_contains "$ROOT/.github/workflows/deb.yml" "desktop-file-utils" "deb workflow installs desktop-file-validate"
-assert_contains "$ROOT/.github/workflows/deb.yml" "qt6-tools-dev" "deb workflow installs Qt LinguistTools"
+# Debian source archives may omit GitHub Actions metadata.
+if [[ -e "$ROOT/.git" || -d "$ROOT/.github/workflows" ]]; then
+  assert_contains "$ROOT/.github/workflows/build.yml" "cmake --build build" "build workflow builds CMake tree"
+  assert_contains "$ROOT/.github/workflows/build.yml" "ctest --test-dir build --output-on-failure" "build workflow runs tests"
+  assert_contains "$ROOT/.github/workflows/build.yml" "desktop-file-utils" "build workflow installs desktop-file-validate"
+  assert_contains "$ROOT/.github/workflows/build.yml" "qt6-tools-dev" "build workflow installs Qt LinguistTools"
+  assert_contains "$ROOT/.github/workflows/deb.yml" "dpkg-buildpackage -us -uc -b" "deb workflow builds binary package"
+  assert_contains "$ROOT/.github/workflows/deb.yml" "desktop-file-utils" "deb workflow installs desktop-file-validate"
+  assert_contains "$ROOT/.github/workflows/deb.yml" "qt6-tools-dev" "deb workflow installs Qt LinguistTools"
+  assert_contains "$ROOT/.github/workflows/deb.yml" "softprops/action-gh-release" "deb workflow publishes release assets"
+else
+  echo "skip - GitHub workflow checks (workflow directory absent from source archive)"
+fi
 assert_contains "$ROOT/debian/control" "qt6-tools-dev" "Debian package declares Qt LinguistTools build dependency"
-assert_contains "$ROOT/.github/workflows/deb.yml" "softprops/action-gh-release" "deb workflow publishes release assets"
 assert_contains "$ROOT/AGENTS.md" "scripts/check-release-performance.py" "version bump instructions require a benchmark"
 assert_contains "$ROOT/AGENTS.md" "release-only commit" "version bump instructions require isolated release metadata"
 
