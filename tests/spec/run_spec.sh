@@ -93,6 +93,8 @@ assert_contains "$ROOT/CMakeLists.txt" 'set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
 assert_contains "$ROOT/CMakeLists.txt" 'set(GGML_AVX2 ON CACHE BOOL "" FORCE)' "portable target enables AVX2"
 assert_contains "$ROOT/CMakeLists.txt" 'set(GGML_FMA ON CACHE BOOL "" FORCE)' "portable target enables FMA"
 assert_contains "$ROOT/CMakeLists.txt" 'set(GGML_F16C ON CACHE BOOL "" FORCE)' "portable target enables F16C"
+assert_contains "$ROOT/CMakeLists.txt" 'check_c_source_compiles(' "CMake probes the toolchain before enabling RISC-V vector kernels"
+assert_contains "$ROOT/CMakeLists.txt" 'set(GGML_RVV OFF CACHE BOOL "" FORCE)' "CMake disables RISC-V vector kernels the toolchain cannot compile"
 assert_contains "$ROOT/CMakeLists.txt" 'set(CRISPASR_OPUS OFF CACHE BOOL "" FORCE)' "deepin-echoflow disables unused CrispASR Opus decoding"
 assert_contains "$ROOT/CMakeLists.txt" 'list(FILTER _crispasr_sources INCLUDE REGEX "(^|/)(crispasr|crispasr_c_api)\\.cpp$")' "deepin-echoflow only compiles the required CrispASR session sources"
 assert_contains "$ROOT/CMakeLists.txt" 'list(FILTER _crispasr_links INCLUDE REGEX "${_crispasr_link_allowlist}")' "deepin-echoflow links only allowlisted CrispASR dependencies"
