@@ -213,6 +213,7 @@ void TestConfig::loadDtkConfDerivesModelDirFromName() {
     f.write("[basic.model.model_name]\nvalue=qwen3-asr-1.7b\n"
             "[basic.recognition.language]\nvalue=English\n"
             "[basic.recognition.prompt]\nvalue=Preserve spelling: CUDA\n"
+            u8"[basic.recognition.hotwords]\n# User vocabulary\nvalue=Deepin\uFF0CC++\uFF0CC#\n"
             "[basic.recording.rate]\nvalue=22050\n"
             "[basic.recording.source]\nvalue=alsa_input.pci-test.Mic__source\n"
             "[basic.recording.min_record_seconds]\nvalue=0.5\n"
@@ -226,6 +227,7 @@ void TestConfig::loadDtkConfDerivesModelDirFromName() {
     QCOMPARE(QString::fromStdString(c.modelName), QStringLiteral("qwen3-asr-1.7b"));
     QCOMPARE(QString::fromStdString(*c.language), QStringLiteral("English"));
     QCOMPARE(QString::fromStdString(c.prompt), QStringLiteral("Preserve spelling: CUDA"));
+    QCOMPARE(QString::fromStdString(c.hotwords), QStringLiteral("Deepin\uFF0CC++\uFF0CC#"));
     QCOMPARE(c.pwRecord.rate, 22050);
     QCOMPARE(QString::fromStdString(c.pwRecord.source),
              QStringLiteral("alsa_input.pci-test.Mic__source"));

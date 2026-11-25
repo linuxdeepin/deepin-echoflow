@@ -4,6 +4,8 @@
 #ifndef ECHOFLOW_CRISP_SESSION_H
 #define ECHOFLOW_CRISP_SESSION_H
 
+#include "AsrHotwords.h"
+
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -26,8 +28,10 @@ public:
 
     bool isLoaded() const;
     void setLanguage(const std::string& lang);
+    void setHotwords(const std::string& hotwords);
     void setMaxNewTokens(int n);
     std::string transcribe(const float* pcm, int nSamples);
+    std::string transcribe(const int16_t* pcm, size_t nSamples);
 
     int streamKind() const;
     bool openStream(int stepMs = 500, int lengthMs = 2000, int keepMs = 800);
@@ -57,6 +61,7 @@ private:
     crispasr_stream* stream_ = nullptr;
     int nThreads_ = 1;
     std::string language_;
+    AsrHotwords hotwords_;
     std::string streamText_;
 };
 

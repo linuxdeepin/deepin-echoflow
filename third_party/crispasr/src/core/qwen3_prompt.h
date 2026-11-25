@@ -10,7 +10,7 @@ inline std::string build(int audio_tokens, std::string system, const std::string
     if (!hotwords.empty()) {
         if (!system.empty() && system.back() != ' ')
             system += ' ';
-        system += "The following words may appear in the audio: " + hotwords + ".";
+        system += hotwords;
     }
     std::string text = "<|im_start|>system\n" + system + "<|im_end|>\n<|im_start|>user\n<|audio_start|>";
     text.reserve(text.size() + (size_t)audio_tokens * 13 + question.size() + prefill.size() + 64);

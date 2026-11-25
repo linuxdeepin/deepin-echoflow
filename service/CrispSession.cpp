@@ -171,6 +171,12 @@ void CrispSession::setLanguage(const std::string& lang)
     }
 }
 
+void CrispSession::setHotwords(const std::string& hotwords)
+{
+    hotwords_ = AsrHotwords(hotwords);
+    if (session_) crispasr_session_set_hotwords(session_, hotwords_.prompt().c_str(), 0);
+}
+
 void CrispSession::setMaxNewTokens(int n)
 {
     if (session_ && n > 0) {
@@ -190,7 +196,16 @@ CrispSession::Result CrispSession::transcribeResult(const float* pcm, int nSampl
 
 std::string CrispSession::transcribe(const float* pcm, int nSamples)
 {
-    return transcribeResult(pcm, nSamples).text();
+    return hotwords_.filterEcho(transcribeResult(pcm, nSamples).text());
+}
+
+std::string CrispSession::transcribe(const int16_t* pcm, size_t nSamples)
+{
+    std::vector<float> audio(nSamples);
+    std::transform(pcm, pcm + nSamples, audio.begin(), [](int16_t sample) {
+        return sample / 32768.0f;
+    });
+    return transcribe(audio.data(), static_cast<int>(audio.size()));
 }
 
 int CrispSession::streamKind() const
@@ -259,7 +274,7 @@ void CrispSession::updateStreamText()
         if (size < 0) throw std::runtime_error("crispasr stream text retrieval failed");
     }
     // Empty is a valid retraction of the preceding hypothesis.
-    streamText_.assign(buffer.data(), static_cast<size_t>(size));
+    streamText_ = hotwords_.filterEcho(std::string(buffer.data(), static_cast<size_t>(size)));
 }
 
 std::string CrispSession::streamText() const

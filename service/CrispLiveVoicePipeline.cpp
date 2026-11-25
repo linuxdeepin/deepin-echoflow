@@ -174,6 +174,7 @@ void CrispLiveVoicePipeline::startImpl(bool replay)
             std::chrono::milliseconds>(Clock::now() - loadStarted).count()));
     auto lang = CrispAsrEngine::languageCode(cfg_.language.value_or(""));
     if (!lang.empty()) session_->setLanguage(lang);
+    session_->setHotwords(cfg_.hotwords);
     log("live ASR configuration: language=" + (lang.empty() ? std::string("auto") : lang)
         + ", threads=" + std::to_string(cfg_.crispThreads)
         + ", step_ms=" + std::to_string(cfg_.streamStepMs)
@@ -235,8 +236,17 @@ void CrispLiveVoicePipeline::startImpl(bool replay)
             return text;
         };
         decoder.close = [this] { session_->closeStream(); };
+        decoder.retryEmptySegment = [this](const int16_t* samples, size_t count) {
+            emitRecognitionBusy(true);
+            auto text = session_->transcribe(samples, count);
+            log("live segment retried after empty result: chars=" + std::to_string(text.size()));
+            if (!streamBacklog_) emitRecognitionBusy(false);
+            return text;
+        };
         decoder.deferPreview = [this] { segmentFinalizing_ = true; };
         decoder.setSilence = [this](bool quiet) { streamSilence_ = quiet; };
+        // Decoding can finish after STOP. Retain the result for finalization.
+        decoder.suppressPreview = [this] { return finishing_ || cancelled_; };
         if (session_->streamKind() == 3) {
             decoder.checkpoint = [this]() -> std::optional<std::string> {
                 if (finishing_ || cancelled_ || streamBacklog_) return std::nullopt;
@@ -514,10 +524,15 @@ void CrispLiveVoicePipeline::stopNativeStreamInput(bool discard)
     }
 }
 
+void CrispLiveVoicePipeline::beginFinalization() noexcept
+{
+    finishing_ = true;
+}
+
 std::string CrispLiveVoicePipeline::finish()
 {
     if (!active_) return {};
-    finishing_ = true;
+    beginFinalization();
     emitRecognitionBusy(true);
     auto finishStarted = Clock::now();
     log("crisp live pipeline stop after " + std::to_string(elapsedSeconds(startedAt_)) + "s");

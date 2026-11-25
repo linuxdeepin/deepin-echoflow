@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 add_library(echoflow_service STATIC
+    AsrHotwords.cpp
     AudioLevelMeter.cpp
     AudioSpectrum.cpp
     AudioSegmenter.cpp

@@ -66,6 +66,7 @@ CrispAsrEngine::CrispAsrEngine(Config cfg)
     session_ = std::make_unique<CrispSession>(cfg_.crispModelPath, cfg_.crispBackend,
                                               cfg_.crispThreads);
     if (session_->isLoaded()) {
+        session_->setHotwords(cfg_.hotwords);
         auto lang = languageCode(cfg_.language.value_or(""));
         log("file ASR configuration: language=" + lang + ", threads=" + std::to_string(cfg_.crispThreads)
             + ", noise_suppression=" + (cfg_.noiseSuppression ? "rnnoise" : "off"));

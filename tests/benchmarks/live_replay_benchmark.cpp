@@ -7,6 +7,7 @@
 
 #include <QCommandLineParser>
 #include <QCoreApplication>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 
@@ -15,8 +16,12 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <mutex>
 #include <stdexcept>
+#include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 
 namespace {
 using Clock = std::chrono::steady_clock;
@@ -37,6 +42,7 @@ int main(int argc, char** argv)
         {"audio", "16 kHz mono WAV to replay.", "path"},
         {"threads", "ASR thread count.", "count", "6"},
         {"iterations", "Number of replays, including warmup.", "count", "1"},
+        {"trace-previews", "Include timestamped raw ASR previews in the JSON report."},
     });
     parser.process(app);
 
@@ -60,11 +66,20 @@ int main(int argc, char** argv)
         }
 
         std::atomic<Clock::rep> firstPreview{0};
+        const bool tracePreviews = parser.isSet("trace-previews");
+        std::mutex previewMutex;
+        std::vector<std::pair<Clock::time_point, std::string>> previewTrace;
         echoflow::CrispLiveVoicePipeline pipeline(cfg);
         pipeline.setPartialTextCallback([&](const std::string& text) {
-            if (text.empty()) return;
-            Clock::rep none = 0;
-            firstPreview.compare_exchange_strong(none, Clock::now().time_since_epoch().count());
+            const auto now = Clock::now();
+            if (!text.empty()) {
+                Clock::rep none = 0;
+                firstPreview.compare_exchange_strong(none, now.time_since_epoch().count());
+            }
+            if (tracePreviews) {
+                std::lock_guard<std::mutex> lock(previewMutex);
+                previewTrace.emplace_back(now, text);
+            }
         });
         for (int i = 0; i < iterations; ++i) {
             firstPreview = 0;
@@ -84,7 +99,7 @@ int main(int argc, char** argv)
             const auto first = Clock::time_point(Clock::duration(firstPreview.load()));
             const QJsonValue preview = first >= start && first < stop
                 ? QJsonValue(milliseconds(first - start)) : QJsonValue(QJsonValue::Null);
-            const QJsonObject row{
+            QJsonObject row{
                 {"mode", "live-replay"},
                 {"iteration", i + 1},
                 {"first_preview_ms", preview},
@@ -92,6 +107,17 @@ int main(int argc, char** argv)
                 {"transcript", QString::fromStdString(transcript)},
                 {"model", QString::fromStdString(cfg.crispModelPath)},
             };
+            if (tracePreviews) {
+                QJsonArray updates;
+                std::lock_guard<std::mutex> lock(previewMutex);
+                for (const auto& [when, text] : previewTrace) {
+                    updates.append(QJsonObject{{"ms", milliseconds(when - start)},
+                                               {"after_stop", when >= stop},
+                                               {"text", QString::fromStdString(text)}});
+                }
+                previewTrace.clear();
+                row.insert("previews", updates);
+            }
             const auto json = QJsonDocument(row).toJson(QJsonDocument::Compact);
             std::puts(json.constData());
         }

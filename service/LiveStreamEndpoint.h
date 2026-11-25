@@ -29,7 +29,8 @@ public:
     virtual ~ILiveStreamEndpoint() = default;
     virtual LiveEndpointState append(const int16_t* samples, size_t count) = 0;
     virtual LiveEndpointState finish() = 0;
-    virtual void reset(size_t retainSamples = 0) = 0;
+    // Preserve the supplied suffix of the audio already passed to append().
+    virtual void reset(const int16_t* retainedAudio = nullptr, size_t retainSamples = 0) = 0;
     virtual std::string name() const = 0;
 };
 

@@ -56,6 +56,7 @@ void printDefaultConfig()
                 "  \"model_dir\": \"(derived at runtime: <config_dir>/<model_name>)\",\n"
                 "  \"language\": \"%s\",\n"
                 "  \"prompt\": \"%s\",\n"
+                "  \"hotwords\": \"%s\",\n"
                 "  \"recordings_dir\": \"%s\",\n"
                 "  \"min_record_seconds\": %.2f,\n"
                 "  \"rate\": %d,\n"
@@ -84,7 +85,7 @@ void printDefaultConfig()
                  "  \"forced_segment_overlap_ms\": %d\n"
                  "}\n",
                  cfg.modelName.c_str(),
-                 cfg.language.value_or("").c_str(), cfg.prompt.c_str(),
+                 cfg.language.value_or("").c_str(), cfg.prompt.c_str(), cfg.hotwords.c_str(),
                  cfg.recordingsDir.c_str(), cfg.minRecordSeconds,
                  cfg.pwRecord.rate, cfg.pwRecord.channels, cfg.pwRecord.format.c_str(),
                  cfg.pwRecord.source.c_str(),
