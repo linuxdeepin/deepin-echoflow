@@ -29,6 +29,7 @@ struct Config {
     std::string modelName = "qwen3-asr-0.6b";
     std::optional<std::string> language;
     std::string prompt;
+    std::string hotwords;
     int asrTimeoutSeconds = 120;
     double minRecordSeconds = 0.25;
     PipeWireRecordConfig pwRecord;

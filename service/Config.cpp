@@ -203,7 +203,8 @@ Config loadDtkConf(const fs::path& path)
     std::string section;
     while (std::getline(in, line)) {
         auto hash = line.find('#');
-        if (hash != std::string::npos) {
+        if (hash != std::string::npos
+            && (section != "basic.recognition.hotwords" || hash == line.find_first_not_of(" \t"))) {
             line.erase(hash);
         }
 
@@ -238,6 +239,8 @@ Config loadDtkConf(const fs::path& path)
                 : std::optional<std::string>(val);
         } else if (section == "basic.recognition.prompt") {
             cfg.prompt = val;
+        } else if (section == "basic.recognition.hotwords") {
+            cfg.hotwords = val;
         } else if (section == "basic.recognition.stream_transcription") {
             cfg.streamTranscription = parseBool(val);
         } else if (section == "basic.recognition.noise_suppression") {

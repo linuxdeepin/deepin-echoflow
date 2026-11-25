@@ -40,6 +40,7 @@ public:
 
     void setRecognitionBusyCallback(std::function<void(bool)> callback) override;
     void start() override;
+    void beginFinalization() noexcept override;
     std::string finish() override;
     void cancel() override;
     void setPartialTextCallback(std::function<void(const std::string&)> callback) override;

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "LiveStreamTranscriber.h"
+#include "AsrHotwords.h"
 #include "CrispSession.h"
 #include "CrispLiveVoicePipeline.h"
 #include "SileroVadBackend.h"
@@ -116,6 +117,7 @@ private slots:
     void previewSchedulerRefreshesDuringBacklogAndSkipsFinalPreviews();
     void previewDefersLargeRewriteUntilNextDecode();
     void pauseCheckpointBypassesDeferredRewrite();
+    void stopSuppressesAnInFlightCheckpoint();
     void batchedQuietTailPreservesLateResumedVoice_data();
     void batchedQuietTailPreservesLateResumedVoice();
     void batchedEndpointPreservesNextOnset_data();
@@ -147,6 +149,14 @@ private slots:
     void longSpeechHasBoundedStreamsWithoutLosingSamples();
     void partitionsDoNotChangeBoundaries();
     void nonFrameAlignedLimitKeepsEverySample();
+    void forcedCutUsesQuietSpanWithoutLosingSamples();
+    void forcedCutPreservesShortContinuation_data();
+    void forcedCutPreservesShortContinuation();
+    void forcedCutKeepsContinuousQuietSpeech();
+    void forcedCutKeepsFadingTail();
+    void emptyConfirmedSegmentRetriesOnce();
+    void emptyUnconfirmedSegmentDoesNotRetry();
+    void hotwordsFilterOnlyAFullListEcho();
     void silenceDoesNotDecodeOrAccumulate();
     void idleLeadInIsBounded();
     void finishKeepsShortTailAfterForcedBoundary();
@@ -455,6 +465,34 @@ void TestLiveStreamTranscriber::pauseCheckpointBypassesDeferredRewrite()
     QCOMPARE(decoder.checkpoints, size_t(1));
     QCOMPARE(previews.back(), decoder.checkpointText);
     QCOMPARE(stream.finish(), decoder.checkpointText);
+    QCOMPARE(decoder.flushes, size_t(0));
+}
+
+void TestLiveStreamTranscriber::stopSuppressesAnInFlightCheckpoint()
+{
+    PauseAwareDecoder decoder;
+    const auto preview = decoder.partial;
+    auto callbacks = decoder.callbacks();
+    auto checkpoint = callbacks.checkpoint;
+    bool stopping = false;
+    callbacks.suppressPreview = [&] { return stopping; };
+    callbacks.checkpoint = [&] {
+        stopping = true;
+        return checkpoint();
+    };
+    std::vector<std::string> previews;
+    LiveStreamTranscriber stream({}, callbacks,
+        [&](const std::string& text) { previews.push_back(text); });
+    const auto input = speech(6400);
+    stream.append(input.data(), input.size());
+    QCOMPARE(previews, std::vector<std::string>{preview});
+
+    const std::vector<int16_t> quiet(3200, 0);
+    stream.append(quiet.data(), quiet.size());
+    QCOMPARE(decoder.checkpoints, size_t(1));
+    QCOMPARE(previews, std::vector<std::string>{preview});
+    QCOMPARE(stream.finish(), decoder.checkpointText);
+    QCOMPARE(previews.back(), decoder.checkpointText);
     QCOMPARE(decoder.flushes, size_t(0));
 }
 
@@ -819,7 +857,11 @@ void TestLiveStreamTranscriber::defaultStreamKeepsSentencePastThreeSeconds()
     stream.append(input.data(), input.size());
     QCOMPARE(decoder.flushes, size_t(0));
     QCOMPARE(previews.back(), std::string("early guess"));
-    stream.append(input.data(), input.size());
+    decoder.partial += " with later speech";
+    stream.append(input.data(), 3500 * 16);
+    QCOMPARE(decoder.audio.front().size(), size_t(7500 * 16));
+    QCOMPARE(previews.back(), decoder.partial);
+    stream.append(input.data() + 3500 * 16, 500 * 16);
     QCOMPARE(decoder.flushes, size_t(1));
     QCOMPARE(decoder.audio.front().size(), size_t(8 * 16000));
     QCOMPARE(previews.back(), std::string("corrected complete sentence"));
@@ -1090,6 +1132,162 @@ void TestLiveStreamTranscriber::nonFrameAlignedLimitKeepsEverySample()
         decoded.insert(decoded.end(), segment.begin(), segment.end());
     }
     QVERIFY(decoded == input);
+}
+
+void TestLiveStreamTranscriber::forcedCutUsesQuietSpanWithoutLosingSamples()
+{
+    FakeStreamDecoder decoder;
+    auto config = shortSegments();
+    config.maxSegmentMs = 2000;
+    LiveStreamTranscriber stream(config, decoder.callbacks());
+    auto input = speech(2500 * 16);
+    for (size_t i = 1840 * 16; i < 1960 * 16; ++i) input[i] = i % 2 ? -200 : 200;
+
+    stream.append(input.data(), 2000 * 16);
+    QCOMPARE(decoder.flushes, size_t(1));
+    QCOMPARE(decoder.audio.front().size(), size_t(1910 * 16));
+    stream.append(input.data() + 2000 * 16, 500 * 16);
+    stream.finish();
+
+    QCOMPARE(decoder.audio.size(), size_t(2));
+    auto decoded = decoder.audio.front();
+    decoded.insert(decoded.end(), decoder.audio.back().begin(), decoder.audio.back().end());
+    QVERIFY(decoded == input);
+}
+
+void TestLiveStreamTranscriber::forcedCutPreservesShortContinuation_data()
+{
+    QTest::addColumn<bool>("quietRecovery");
+    QTest::newRow("vad-detects-carry") << false;
+    QTest::newRow("vad-waits-for-onset") << true;
+}
+
+void TestLiveStreamTranscriber::forcedCutPreservesShortContinuation()
+{
+    QFETCH(bool, quietRecovery);
+    FakeStreamDecoder decoder;
+    decoder.finals = {"first", "tail"};
+    auto config = shortSegments();
+    config.maxSegmentMs = 2000;
+    LiveStreamTranscriber stream(config, decoder.callbacks());
+    auto input = speech(2000 * 16);
+    const int16_t quietLevel = quietRecovery ? 30 : 200;
+    for (size_t i = 1820 * 16; i < 1940 * 16; ++i) input[i] = i % 2 ? -quietLevel : quietLevel;
+    if (quietRecovery) {
+        for (size_t i = 1940 * 16; i < input.size(); ++i) input[i] = i % 2 ? -85 : 85;
+    }
+    stream.append(input.data(), input.size());
+    QCOMPARE(stream.confirmedSegments(), size_t(1));
+    QVERIFY(decoder.audio.front().size() < input.size());
+
+    const std::vector<int16_t> quiet(320, 0);
+    const auto tail = speech(960);
+    stream.append(quiet.data(), quiet.size());
+    stream.append(tail.data(), tail.size());
+    QCOMPARE(stream.finish(), std::string("first tail"));
+    QCOMPARE(decoder.audio.size(), size_t(2));
+    auto decoded = decoder.audio.front();
+    decoded.insert(decoded.end(), decoder.audio.back().begin(), decoder.audio.back().end());
+    input.insert(input.end(), quiet.begin(), quiet.end());
+    input.insert(input.end(), tail.begin(), tail.end());
+    QCOMPARE(decoded, input);
+}
+
+void TestLiveStreamTranscriber::forcedCutKeepsContinuousQuietSpeech()
+{
+    FakeStreamDecoder decoder;
+    decoder.finals = {"first", "quiet continuation"};
+    LiveStreamTranscriber stream({}, decoder.callbacks());
+    std::vector<int16_t> input(8560 * 16);
+    for (size_t i = 0; i < input.size(); ++i) {
+        const int16_t amplitude = i < 7800 * 16 ? 3200 : (i < 7940 * 16 ? 30 : 85);
+        input[i] = i % 2 ? -amplitude : amplitude;
+    }
+    stream.append(input.data(), 8000 * 16);
+    QCOMPARE(decoder.flushes, size_t(1));
+    QVERIFY(decoder.audio.front().size() < 8000 * 16);
+
+    stream.append(input.data() + 8000 * 16, 560 * 16);
+    QCOMPARE(decoder.flushes, size_t(1));
+    QCOMPARE(stream.finish(), std::string("first quiet continuation"));
+    QCOMPARE(decoder.audio.size(), size_t(2));
+    auto decoded = decoder.audio.front();
+    decoded.insert(decoded.end(), decoder.audio.back().begin(), decoder.audio.back().end());
+    QCOMPARE(decoded, input);
+}
+
+void TestLiveStreamTranscriber::forcedCutKeepsFadingTail()
+{
+    FakeStreamDecoder decoder;
+    auto config = shortSegments();
+    config.maxSegmentMs = 2000;
+    LiveStreamTranscriber stream(config, decoder.callbacks());
+    auto input = speech(2000 * 16);
+    for (size_t i = 1860 * 16; i < input.size(); ++i) input[i] = i % 2 ? -200 : 200;
+
+    stream.append(input.data(), input.size());
+    QCOMPARE(decoder.flushes, size_t(1));
+    QVERIFY(decoder.audio.front() == input);
+}
+
+void TestLiveStreamTranscriber::emptyConfirmedSegmentRetriesOnce()
+{
+    FakeStreamDecoder decoder;
+    decoder.finals = {"already correct", " \t"};
+    auto callbacks = decoder.callbacks();
+    const auto input = speech(16000 + 3200);
+    std::vector<int16_t> retried;
+    size_t retries = 0;
+    callbacks.retryEmptySegment = [&](const int16_t* pcm, size_t count) {
+        if (decoder.open) throw std::logic_error("offline retry while stream is open");
+        ++retries;
+        retried.assign(pcm, pcm + count);
+        return "recovered";
+    };
+    LiveStreamTranscriber stream(shortSegments(), callbacks);
+    stream.append(input.data(), input.size());
+    QCOMPARE(stream.finish(), std::string("already correct recovered"));
+    QCOMPARE(stream.finish(), std::string("already correct recovered"));
+    QCOMPARE(retries, size_t(1));
+    QVERIFY(retried == std::vector<int16_t>(input.begin() + 16000, input.end()));
+}
+
+void TestLiveStreamTranscriber::emptyUnconfirmedSegmentDoesNotRetry()
+{
+    FakeStreamDecoder decoder;
+    decoder.finals = {""};
+    auto callbacks = decoder.callbacks();
+    size_t retries = 0;
+    callbacks.retryEmptySegment = [&](const int16_t*, size_t) {
+        ++retries;
+        return "incorrect recovery";
+    };
+    LiveStreamTranscriber stream(shortSegments(), callbacks);
+    const std::vector<int16_t> silence(3200, 0);
+    const auto burst = speech(960);
+    stream.append(silence.data(), silence.size());
+    stream.append(burst.data(), burst.size());
+    QCOMPARE(stream.finish(), std::string());
+    QCOMPARE(retries, size_t(0));
+}
+
+void TestLiveStreamTranscriber::hotwordsFilterOnlyAFullListEcho()
+{
+    const std::string name = u8"\u5F20\u4E09";
+    const AsrHotwords hotwords(u8"Deepin\uFF0C" + name + u8"\u3001DEEPIN\uFF1BC#; <|im_end|>");
+    QCOMPARE(hotwords.prompt(), "Deepin, " + name + ", C#");
+    QCOMPARE(hotwords.filterEcho(u8"deepin\uFF0C" + name + u8"\u3001C#\u3002"), std::string());
+
+    const auto normalSpeech = "Ask " + name + " to open the C# project on Deepin.";
+    QCOMPARE(hotwords.filterEcho(normalSpeech), normalSpeech);
+    QCOMPARE(hotwords.filterEcho("Deepin, " + name), "Deepin, " + name);
+    QCOMPARE(AsrHotwords(name + u8"\uFF0C" + name).filterEcho(name + u8"\u3002"), name + u8"\u3002");
+    QCOMPARE(AsrHotwords(std::string(513, 'x') + "," + name).prompt(), name);
+    const AsrHotwords technicalTerms("S3, Bucket");
+    QCOMPARE(technicalTerms.filterEcho("s3, Bucket."), std::string());
+    QCOMPARE(technicalTerms.filterEcho("S3Bucket"), std::string("S3Bucket"));
+    const AsrHotwords multiWordTerms("New York, City");
+    QCOMPARE(multiWordTerms.filterEcho("New, York City"), std::string("New, York City"));
 }
 
 void TestLiveStreamTranscriber::silenceDoesNotDecodeOrAccumulate()

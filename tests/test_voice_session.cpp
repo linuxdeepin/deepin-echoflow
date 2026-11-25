@@ -117,6 +117,7 @@ struct FakeLivePipeline : ILiveVoicePipeline {
 
     int starts_ = 0;
     int finishes_ = 0;
+    std::atomic<bool> finalizationStarted{false};
     int cancels_ = 0;
     std::string result = "hello";
     bool throwOnStart = false;
@@ -163,6 +164,11 @@ struct FakeLivePipeline : ILiveVoicePipeline {
         if (throwOnStart) {
             throw std::runtime_error("live start unavailable");
         }
+    }
+
+    void beginFinalization() noexcept override
+    {
+        finalizationStarted = true;
     }
 
     std::string finish() override
@@ -823,6 +829,7 @@ private slots:
     void destructorWaitsForBlockedPartialNotification();
     void copiedPartialCallbackIsSafeAfterDestruction();
     void destructorClosesCommitGateBeforeCallbackTeardown();
+    void stopBeginsFinalizationBeforePhaseNotification();
     void threadLaunchFailureRestoresRecording();
     void statusReportsEveryPhaseWithoutMutation();
     void staleStatusCannotOvertakeFinalIdle();
@@ -2260,6 +2267,26 @@ void TestVoiceSession::destructorClosesCommitGateBeforeCallbackTeardown()
         "finalizer committed text while destructor was blocked in callback teardown");
 }
 
+void TestVoiceSession::stopBeginsFinalizationBeforePhaseNotification()
+{
+    FakeLivePipeline pipeline;
+    FakeCommitter committer;
+    BlockingStatusUi ui;
+    VoiceSession session(Config::defaultConfig(), pipeline, committer, ui);
+    QCOMPARE(session.handleCommand("START"), std::string("RECORDING"));
+    ui.blockNext("TRANSCRIBING");
+    auto stop = std::async(std::launch::async, [&session] { return session.handleCommand("STOP"); });
+    const bool phaseBlocked = ui.waitForStatusEntered();
+    const bool beganBeforeNotification = pipeline.finalizationStarted.load();
+    const int finishedWhileBlocked = pipeline.finishes();
+    ui.releaseStatus();
+    QCOMPARE(stop.get(), std::string("TRANSCRIBING"));
+    QVERIFY(phaseBlocked);
+    QVERIFY(beganBeforeNotification);
+    QCOMPARE(finishedWhileBlocked, 0);
+    QTRY_COMPARE(committer.texts(), std::vector<std::string>{pipeline.result});
+}
+
 void TestVoiceSession::threadLaunchFailureRestoresRecording()
 {
     FakeLivePipeline pipeline;
@@ -2278,6 +2305,7 @@ void TestVoiceSession::threadLaunchFailureRestoresRecording()
 
     QVERIFY(QString::fromStdString(response).startsWith(QStringLiteral("ERR ")));
     QCOMPARE(session.state(), SessionState::Recording);
+    QVERIFY(!pipeline.finalizationStarted);
     QCOMPARE(pipeline.finishes(), 0);
     QCOMPARE(QString::fromStdString(ui.messages().back()), QStringLiteral("RECORDING"));
     session.handleCommand("CANCEL");

@@ -32,6 +32,8 @@ class ILiveVoicePipeline {
 public:
     virtual ~ILiveVoicePipeline() = default;
     virtual void start() = 0;
+    // Called on STOP before phase notification. Do not block or invoke callbacks.
+    virtual void beginFinalization() noexcept {}
     virtual std::string finish() = 0;
     virtual void cancel() = 0;
     virtual void setPartialTextCallback(std::function<void(const std::string&)> callback) = 0;

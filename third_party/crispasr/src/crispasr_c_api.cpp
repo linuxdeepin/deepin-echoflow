@@ -11194,11 +11194,11 @@ CA_EXPORT crispasr_stream* crispasr_session_stream_open(crispasr_session* s, int
         auto encoderCache = std::shared_ptr<crisp_audio_encoder_cache>(
             use_encoder_cache ? crisp_audio_encoder_cache_new() : nullptr, &crisp_audio_encoder_cache_free);
         if (use_encoder_cache && !encoderCache) return nullptr;
-        state->hooks.generate = [ctx, suffix, prefixCache, split_prefill, encoderCache](const std::vector<float>& audio,
-                                                           const std::string& prefix, int max_new) {
+        state->hooks.generate = [ctx, suffix, prefixCache, split_prefill, encoderCache, hotwords = s->hotwords](
+                                    const std::vector<float>& audio, const std::string& prefix, int max_new) {
             bool ok = false;
-            auto result = core_qwen3_stream_model::generate(ctx, false, audio, suffix + prefix,
-                                                             max_new, &ok, prefixCache.get(), nullptr, split_prefill, encoderCache.get());
+            auto result = core_qwen3_stream_model::generate(ctx, false, audio, suffix + prefix, max_new,
+                &ok, prefixCache.get(), nullptr, split_prefill, encoderCache.get(), hotwords);
             if (!ok)
                 throw std::runtime_error("Qwen streaming inference failed");
             return result;

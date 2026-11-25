@@ -44,6 +44,7 @@ public:
     std::vector<AudioSegment> append(const int16_t* samples, size_t count) override;
     std::optional<AudioSegment> flush() override;
     void reset() override;
+    void resetForContinuation();
     std::string name() const override;
     std::string diagnosticSummary() const override;
     AudioSegmenterDiagnostics diagnostics() const;

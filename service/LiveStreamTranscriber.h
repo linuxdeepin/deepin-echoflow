@@ -39,6 +39,8 @@ struct LiveStreamDecoder {
     // Quiet gating is reversible; a checkpoint revises text without closing.
     std::function<void(bool)> setSilence;
     std::function<std::optional<std::string>()> checkpoint;
+    std::function<std::string(const int16_t*, size_t)> retryEmptySegment;
+    std::function<bool()> suppressPreview;
 };
 
 // Runs on the ASR worker. Each native stream owns only one bounded utterance;
@@ -66,6 +68,7 @@ private:
     void replayPausedAudio(size_t count, bool validSpeech);
     void clearPause();
     void feed(const int16_t* samples, size_t count, bool validSpeech);
+    std::optional<std::string> feedBufferedAudio(size_t end);
     void finalizeSegment();
     void confirmSegment();
     void discardSegment();
@@ -83,7 +86,9 @@ private:
     size_t continuationSilence_ = 0;
     size_t maxSegmentSamples_;
     size_t prePaddingSamples_;
-    size_t segmentSamples_ = 0;
+    size_t cutSearchSamples_;
+    size_t fedSegmentSamples_ = 0;
+    std::vector<int16_t> segmentAudio_;
     size_t confirmedSegments_ = 0;
     std::vector<int16_t> frame_;
     std::vector<int16_t> pendingAudio_;
@@ -95,6 +100,7 @@ private:
     std::string activeText_;
     std::string publishedText_;
     bool streamOpen_ = false;
+    bool segmentSpeechConfirmed_ = false;
     bool deferredPreviewRewrite_ = false;
     bool pauseCheckpointed_ = false;
     bool decoderSilence_ = false;

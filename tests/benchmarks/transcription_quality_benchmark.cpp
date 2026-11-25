@@ -60,6 +60,7 @@ QJsonObject replay(echoflow::CrispSession& session, const echoflow::Config& cfg,
     bool quiet = false;
     qint64 calls = 0;
     int updates = 0;
+    int retries = 0;
     double flushMs = 0;
     double pauseMs = 0;
     echoflow::LiveStreamDecoder decoder;
@@ -92,6 +93,10 @@ QJsonObject replay(echoflow::CrispSession& session, const echoflow::Config& cfg,
     decoder.deferPreview = [&] { deferred = true; };
     decoder.setSilence = [&](bool value) { quiet = value; };
     if (fullSegment) {
+        decoder.retryEmptySegment = [&](const int16_t* pcm, size_t count) {
+            ++retries;
+            return session.transcribe(pcm, count);
+        };
         decoder.checkpoint = [&] {
             const auto started = Clock::now();
             auto text = session.refreshStream();
@@ -107,7 +112,7 @@ QJsonObject replay(echoflow::CrispSession& session, const echoflow::Config& cfg,
     const auto text = stream.finish();
     return {{"transcript", QString::fromStdString(text)}, {"elapsed_ms", elapsedMs(started)},
         {"final_decode_total_ms", flushMs}, {"pause_decode_total_ms", pauseMs}, {"inference_calls", calls}, {"updates", updates},
-        {"confirmed_segments", static_cast<qint64>(stream.confirmedSegments())},
+        {"confirmed_segments", static_cast<qint64>(stream.confirmedSegments())}, {"empty_segment_retries", retries},
         {"max_segment_ms", config.maxSegmentMs}, {"short_pause_ms", config.shortPauseMs}, {"full_segment_correction", fullSegment}};
 }
 
@@ -213,6 +218,7 @@ int main(int argc, char** argv)
         if (!session.isLoaded() || session.streamKind() != 3) throw std::runtime_error("requires a Qwen prefix-stream model");
         const auto language = echoflow::CrispAsrEngine::languageCode(cfg.language.value_or(""));
         session.setLanguage(language);
+        session.setHotwords(cfg.hotwords);
         if (cfg.crispMaxNewTokens > 0) session.setMaxNewTokens(cfg.crispMaxNewTokens);
         const auto started = Clock::now();
         const auto whole = session.transcribe(pcm.data(), static_cast<int>(pcm.size()));

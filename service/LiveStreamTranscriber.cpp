@@ -17,6 +17,10 @@ constexpr size_t kFrameSamples = 320; // 20 ms, 16 kHz mono.
 constexpr size_t kMinTailFrameSamples = 80; // Include partial STOP frames of at least 5 ms.
 constexpr double kMinTailPower = 40.0 * 40.0;
 constexpr size_t kPreferredPauseWindowSamples = 800 * 16;
+// Leave room for the 7.5 s preview at the default 8 s segment limit.
+constexpr size_t kQuietCutWindowSamples = 400 * 16;
+constexpr size_t kQuietCutSpanSamples = 100 * 16;
+constexpr size_t kQuietCutResumeSamples = 2 * kFrameSamples;
 constexpr size_t kMutablePreviewTailCharacters = 4;
 
 bool rewritesPreviewPrefix(const std::string& displayed, const std::string& next)
@@ -44,6 +48,25 @@ double acPower(const int16_t* samples, size_t count)
     }
     const double mean = sum / count;
     return squareSum / count - mean * mean;
+}
+
+size_t quietCut(const std::vector<int16_t>& audio, size_t start)
+{
+    if (audio.size() - start < kQuietCutSpanSamples + kQuietCutResumeSamples) return audio.size();
+    size_t cut = audio.size();
+    double bestPower = acPower(audio.data() + start, audio.size() - start) / 4;
+    for (size_t end = audio.size() - kQuietCutResumeSamples;
+         end >= start + kQuietCutSpanSamples; end -= kFrameSamples) {
+        const double power = acPower(audio.data() + end - kQuietCutSpanSamples, kQuietCutSpanSamples);
+        if (power >= bestPower) continue;
+        // A fading utterance can be quiet without containing a break.
+        const auto following = std::min(kQuietCutSpanSamples, audio.size() - end);
+        if (4 * power < acPower(audio.data() + end, following)) {
+            bestPower = power;
+            cut = end - kQuietCutSpanSamples / 2;
+        }
+    }
+    return cut;
 }
 
 std::string joinDisjointText(const std::string& left, const std::string& right)
@@ -111,7 +134,8 @@ LiveStreamTranscriber::LiveStreamTranscriber(LiveStreamConfig config,
       endSilenceSamples_(static_cast<size_t>(config.endSilenceMs) * 16),
       shortPauseSamples_(static_cast<size_t>(std::min(config.shortPauseMs, config.endSilenceMs)) * 16),
       maxSegmentSamples_(static_cast<size_t>(config.maxSegmentMs) * 16),
-      prePaddingSamples_(static_cast<size_t>(config.prePaddingMs) * 16)
+      prePaddingSamples_(static_cast<size_t>(config.prePaddingMs) * 16),
+      cutSearchSamples_(0)
 {
     if (config.maxSegmentMs < 20 || config.endSilenceMs <= 0
         || config.minSpeechMs <= 0 || config.shortPauseMs <= 0 || config.prePaddingMs < 0
@@ -120,6 +144,10 @@ LiveStreamTranscriber::LiveStreamTranscriber(LiveStreamConfig config,
         || !decoder_.open || !decoder_.feed || !decoder_.flush || !decoder_.close) {
         throw std::invalid_argument("invalid live stream configuration");
     }
+    const size_t minSegmentSamples = prePaddingSamples_ + static_cast<size_t>(config.minSpeechMs) * 16;
+    cutSearchSamples_ = std::min({kQuietCutWindowSamples, maxSegmentSamples_ / 10,
+                                  maxSegmentSamples_ - minSegmentSamples});
+    if (cutSearchSamples_ < kQuietCutSpanSamples + kQuietCutResumeSamples) cutSearchSamples_ = 0;
     frame_.reserve(kFrameSamples);
 }
 
@@ -166,7 +194,7 @@ void LiveStreamTranscriber::processAnalyzedAudio(const LiveEndpointState& state,
     if (nextSpeech) {
         const size_t previousSamples = pendingAudio_.size() - nextSpeech;
         processAudio(pendingAudio_.data(), previousSamples, {false, false, true, {}}, false, false);
-        endpoint_->reset(nextSpeech);
+        endpoint_->reset(pendingAudio_.data() + previousSamples, nextSpeech);
         auto nextState = state;
         nextState.ended = false;
         nextState.nextSpeechSamples = 0;
@@ -181,25 +209,26 @@ void LiveStreamTranscriber::processAudio(const int16_t* samples, size_t count,
                                          const LiveEndpointState& endpointState,
                                          bool allowCheckpoint, bool resetEndpoint)
 {
+    const bool wasActive = endpointState_.active;
     endpointState_ = endpointState;
     const bool speechActive = endpointState.active;
     const size_t trailingSilence = endpointState.trailingSilenceSamples.value_or(0);
     const bool quiet = !speechActive || endpointState.ended || trailingSilence > 0;
     setDecoderSilence(quiet);
     const bool validSpeech = continuation_ || endpointState.ended || endpointState.enoughSpeech;
+    // The reset detector may not recognize the carried audio as an onset yet.
+    const bool waitingForOnset = continuation_ && !wasActive && !speechActive && !endpointState.ended;
+    continuationSilence_ = waitingForOnset ? continuationSilence_ + count : 0;
+    const bool keepContinuation = waitingForOnset && continuationSilence_ < endSilenceSamples_;
     if (!streamOpen_) {
         if (!speechActive && !endpointState.ended) {
-            if (continuation_) {
-                continuationSilence_ += count;
-                if (continuationSilence_ >= endSilenceSamples_) continuation_ = false;
-            }
+            continuation_ = keepContinuation;
             leadIn_.insert(leadIn_.end(), samples, samples + count);
             if (leadIn_.size() > prePaddingSamples_) {
                 leadIn_.erase(leadIn_.begin(), leadIn_.end() - prePaddingSamples_);
             }
             return;
         }
-        continuationSilence_ = 0;
         openStream();
         if (endpointState.ended && decoder_.deferPreview) decoder_.deferPreview();
         if (!leadIn_.empty()) feed(leadIn_.data(), leadIn_.size(), validSpeech);
@@ -230,14 +259,14 @@ void LiveStreamTranscriber::processAudio(const int16_t* samples, size_t count,
     // An analysis that straddles the limit can then drop only excess quiet samples.
     const bool preferPause = validSpeech && endpointState_.active && !endpointState.ended
         && verifiedSilence >= std::max(shortPauseSamples_, count)
-        && segmentSamples_ + (pauseCheckpointed_ ? pausedAudio_.size() : count)
+        && segmentAudio_.size() + (pauseCheckpointed_ ? pausedAudio_.size() : count)
             >= maxSegmentSamples_ - pauseWindow;
-    const bool closing = endpointState.ended || !speechActive || preferPause;
+    const bool closing = endpointState.ended || (!speechActive && !keepContinuation) || preferPause;
     if (closing && decoder_.deferPreview) decoder_.deferPreview();
 
     if (pauseCheckpointed_) {
         // Keep suspicious audio until confirmation, unless waiting would exceed the cap.
-        const size_t remaining = maxSegmentSamples_ - segmentSamples_;
+        const size_t remaining = maxSegmentSamples_ - segmentAudio_.size();
         if (!closing && pausedTailSamples_ > 0
             && pausedAudio_.size() >= remaining) {
             replayPausedAudio(std::max(remaining, pausedTailSamples_), validSpeech);
@@ -247,7 +276,7 @@ void LiveStreamTranscriber::processAudio(const int16_t* samples, size_t count,
         if (!streamOpen_) {
             openStream();
         }
-        feed(samples, preferPause ? std::min(count, maxSegmentSamples_ - segmentSamples_) : count,
+        feed(samples, preferPause ? std::min(count, maxSegmentSamples_ - segmentAudio_.size()) : count,
              validSpeech);
     }
     if (closing) {
@@ -262,6 +291,7 @@ void LiveStreamTranscriber::processAudio(const int16_t* samples, size_t count,
         endpointState_ = {};
     } else if (allowCheckpoint && streamOpen_ && quiet && validSpeech && endpointState_.active
                && !pauseCheckpointed_ && decoder_.checkpoint && trailingSilence >= shortPauseSamples_) {
+        feedBufferedAudio(segmentAudio_.size());
         if (auto text = decoder_.checkpoint()) {
             pauseCheckpointed_ = true;
             updateActivePreview(std::move(*text), true);
@@ -308,27 +338,57 @@ void LiveStreamTranscriber::clearPause()
 
 void LiveStreamTranscriber::feed(const int16_t* samples, size_t count, bool validSpeech)
 {
+    const size_t searchStart = maxSegmentSamples_ - cutSearchSamples_;
     while (count) {
-        const size_t take = std::min(count, maxSegmentSamples_ - segmentSamples_);
-        if (segmentSamples_ + take == maxSegmentSamples_ && decoder_.deferPreview) decoder_.deferPreview();
-        auto preview = decoder_.feed(samples, take);
-        segmentSamples_ += take;
+        const size_t take = std::min(count, maxSegmentSamples_ - segmentAudio_.size());
+        segmentAudio_.insert(segmentAudio_.end(), samples, samples + take);
+        segmentSpeechConfirmed_ |= endpointState_.enoughSpeech || endpointState_.ended;
         samples += take;
         count -= take;
-        if (preview) updateActivePreview(std::move(*preview));
-        if (segmentSamples_ == maxSegmentSamples_) {
-            const bool valid = continuation_ || validSpeech;
-            if (valid) confirmSegment();
-            else discardSegment();
-            continuation_ = valid;
-            continuationSilence_ = 0;
-            endpoint_->reset();
-            endpointState_ = {};
-            if (count) {
-                openStream();
+        if (segmentAudio_.size() < maxSegmentSamples_) {
+            // Keep the candidate cut window out of the decoder so samples
+            // after the chosen cut can move intact to the next segment.
+            if (auto preview = feedBufferedAudio(std::min(segmentAudio_.size(), searchStart))) {
+                updateActivePreview(std::move(*preview));
             }
+            continue;
+        }
+
+        const bool valid = continuation_ || validSpeech;
+        std::vector<int16_t> carry;
+        if (valid && !decoderSilence_) {
+            const size_t cut = quietCut(segmentAudio_, std::max(searchStart, fedSegmentSamples_));
+            carry.assign(segmentAudio_.begin() + cut, segmentAudio_.end());
+            segmentAudio_.resize(cut);
+        }
+        if (valid) confirmSegment();
+        else discardSegment();
+        continuation_ = valid;
+        continuationSilence_ = 0;
+        if (carry.empty()) {
+            endpoint_->reset();
+        } else {
+            // The endpoint has already seen both the carried audio and the
+            // remainder of this batch. Keep that suffix available to its VAD.
+            const size_t carrySamples = carry.size();
+            carry.insert(carry.end(), samples, samples + count);
+            endpoint_->reset(carry.data(), carry.size());
+            carry.resize(carrySamples);
+        }
+        endpointState_ = {};
+        if (count || !carry.empty()) {
+            openStream();
+            if (!carry.empty()) segmentAudio_ = std::move(carry);
         }
     }
+}
+
+std::optional<std::string> LiveStreamTranscriber::feedBufferedAudio(size_t end)
+{
+    if (end <= fedSegmentSamples_) return std::nullopt;
+    const auto start = fedSegmentSamples_;
+    fedSegmentSamples_ = end;
+    return decoder_.feed(segmentAudio_.data() + start, end - start);
 }
 
 void LiveStreamTranscriber::finalizeSegment()
@@ -340,12 +400,23 @@ void LiveStreamTranscriber::finalizeSegment()
 void LiveStreamTranscriber::confirmSegment()
 {
     if (!streamOpen_) return;
-    if (!pauseCheckpointed_) activeText_ = decoder_.flush();
-    confirmedText_ = combinedText();
-    activeText_.clear();
+    if (!pauseCheckpointed_) {
+        if (decoder_.deferPreview) decoder_.deferPreview();
+        feedBufferedAudio(segmentAudio_.size());
+        activeText_ = decoder_.flush();
+    }
     decoder_.close();
     streamOpen_ = false;
-    segmentSamples_ = 0;
+    if (decoder_.retryEmptySegment && segmentSpeechConfirmed_ && !segmentAudio_.empty()
+        && activeText_.find_first_not_of(" \t\r\n") == std::string::npos) {
+        activeText_ = decoder_.retryEmptySegment(segmentAudio_.data(), segmentAudio_.size());
+        if (activeText_.find_first_not_of(" \t\r\n") == std::string::npos) activeText_.clear();
+    }
+    confirmedText_ = combinedText();
+    activeText_.clear();
+    segmentAudio_.clear();
+    fedSegmentSamples_ = 0;
+    segmentSpeechConfirmed_ = false;
     clearPause();
     ++confirmedSegments_;
     if (confirmed_) confirmed_(confirmedText_);
@@ -357,7 +428,9 @@ void LiveStreamTranscriber::discardSegment()
     if (!streamOpen_) return;
     decoder_.close();
     streamOpen_ = false;
-    segmentSamples_ = 0;
+    segmentAudio_.clear();
+    fedSegmentSamples_ = 0;
+    segmentSpeechConfirmed_ = false;
     clearPause();
     activeText_.clear();
     publishText();
@@ -373,7 +446,7 @@ void LiveStreamTranscriber::updateActivePreview(std::string text, bool force)
     }
     deferredPreviewRewrite_ = false;
     activeText_ = std::move(text);
-    publishText();
+    if (!decoder_.suppressPreview || !decoder_.suppressPreview()) publishText();
 }
 
 std::string LiveStreamTranscriber::combinedText() const
@@ -409,8 +482,13 @@ std::string LiveStreamTranscriber::finish()
         openStream();
         feed(leadIn_.data(), leadIn_.size(), endpointState_.enoughSpeech || endpointState_.ended);
     }
-    if (continuation_ || endpointState_.enoughSpeech || endpointState_.ended) finalizeSegment();
-    else discardSegment();
+    const bool speechConfirmed = endpointState_.enoughSpeech || endpointState_.ended;
+    if (continuation_ || speechConfirmed) {
+        segmentSpeechConfirmed_ |= speechConfirmed;
+        finalizeSegment();
+    } else {
+        discardSegment();
+    }
     continuation_ = false;
     continuationSilence_ = 0;
     endpoint_->reset();
@@ -427,7 +505,9 @@ void LiveStreamTranscriber::cancel()
     streamOpen_ = false;
     continuation_ = false;
     continuationSilence_ = 0;
-    segmentSamples_ = 0;
+    segmentAudio_.clear();
+    fedSegmentSamples_ = 0;
+    segmentSpeechConfirmed_ = false;
     clearPause();
     confirmedSegments_ = 0;
     frame_.clear();

@@ -4,11 +4,11 @@
 
 TEST_CASE("Qwen3 hotwords preserve forced-language transcription", "[unit][asr-prompt]") {
     const auto prompt = core_qwen3_prompt::build(2, "", "", "language English<asr_text>", "Hello, CrispASR");
-    REQUIRE(prompt == "<|im_start|>system\nThe following words may appear in the audio: Hello, CrispASR."
+    REQUIRE(prompt == "<|im_start|>system\nHello, CrispASR"
                       "<|im_end|>\n<|im_start|>user\n<|audio_start|><|audio_pad|><|audio_pad|>"
                       "<|audio_end|><|im_end|>\n<|im_start|>assistant\nlanguage English<asr_text>");
     const auto cleared = core_qwen3_prompt::build(2, "", "", "language English<asr_text>", "");
-    REQUIRE(cleared.find("The following words") == std::string::npos);
+    REQUIRE(cleared.find("<|im_start|>system\n<|im_end|>") == 0);
     REQUIRE(cleared.substr(cleared.size() - std::string("language English<asr_text>").size()) ==
             "language English<asr_text>");
 }
@@ -22,7 +22,7 @@ TEST_CASE("Qwen3 hotwords leave explicit questions and auto language intact", "[
     REQUIRE(automatic.substr(automatic.size() - std::string("<|im_start|>assistant\n").size()) ==
             "<|im_start|>assistant\n");
     const auto legacy = core_qwen3_prompt::build(1, "Transcribe the speech in English.", "", "", "CrispASR");
-    REQUIRE(legacy.find("English. The following words") != std::string::npos);
+    REQUIRE(legacy.find("English. CrispASR") != std::string::npos);
 }
 
 TEST_CASE("MiMo language bias and user instruction are independent", "[unit][asr-prompt]") {

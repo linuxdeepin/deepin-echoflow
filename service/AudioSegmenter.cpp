@@ -169,6 +169,19 @@ void AudioSegmenter::reset() {
     currentBelow200Frames_ = 0;
 }
 
+void AudioSegmenter::resetForContinuation()
+{
+    const auto noiseFloor = noiseFloor_;
+    const auto hasNoiseFloor = hasNoiseFloor_;
+    const auto useElevatedEndpoint = useElevatedEndpoint_;
+    const auto active = active_;
+    reset();
+    noiseFloor_ = noiseFloor;
+    hasNoiseFloor_ = hasNoiseFloor;
+    useElevatedEndpoint_ = useElevatedEndpoint;
+    active_ = active;
+}
+
 AudioSegmenterDiagnostics AudioSegmenter::diagnostics() const {
     return diagnostics_;
 }

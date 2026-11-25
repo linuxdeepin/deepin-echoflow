@@ -48,7 +48,16 @@ public:
         }
         return state_;
     }
-    void reset(size_t) override { detector_.reset(); state_ = {}; partialFrameSamples_ = 0; }
+    void reset(const int16_t* retainedAudio, size_t retainSamples) override
+    {
+        // A forced ASR cut can occur within speech. Replay the suffix using
+        // the established threshold, including before a noise floor was learned.
+        if (retainSamples && detector_.hasActiveSpeech()) detector_.resetForContinuation();
+        else detector_.reset();
+        state_ = {};
+        partialFrameSamples_ = 0;
+        if (retainSamples) append(retainedAudio, retainSamples);
+    }
     std::string name() const override { return "energy"; }
 private:
     AudioSegmenter detector_;
@@ -83,7 +92,7 @@ public:
         return state_;
     }
     LiveEndpointState finish() override { analyze(); return state_; }
-    void reset(size_t retainSamples) override
+    void reset(const int16_t*, size_t retainSamples) override
     {
         // Keep a second of already-captured lead-in: resetting at an onset
         // otherwise deprives Silero's front-end of its required context.

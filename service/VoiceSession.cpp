@@ -537,6 +537,7 @@ std::string VoiceSession::startFinalization()
         try {
             finalizationWorker_
                 = threadLauncher_([this, generation] { finalize(generation); });
+            if (livePipeline_) livePipeline_->beginFinalization();
         } catch (const std::system_error& e) {
             launchError = e.what();
             phaseVersion = setStateLocked(SessionState::Recording);

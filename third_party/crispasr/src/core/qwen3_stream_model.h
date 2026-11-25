@@ -6,6 +6,7 @@
 #include "qwen3_asr.h"
 #include "crisp_audio.h"
 #include "core/bpe.h"
+#include "core/qwen3_prompt.h"
 #include "core/qwen3_stream_metrics.h"
 #include <algorithm>
 #include <cstdio>
@@ -50,7 +51,8 @@ inline bool can_reuse_prefix_kv(const PrefixKvCache& cache, qwen3_asr_context* c
 inline std::string generate(qwen3_asr_context* ctx_, bool raon_, const std::vector<float>& audio,
                             const std::string& assistant_suffix, int max_new, bool* success = nullptr,
                             PrefixKvCache* prefix_cache = nullptr, DecodeMetrics* metrics = nullptr,
-                            bool split_prefill = false, crisp_audio_encoder_cache* encoder_cache = nullptr) {
+                            bool split_prefill = false, crisp_audio_encoder_cache* encoder_cache = nullptr,
+                            const std::string& hotwords = {}) {
     DecodeProfile profile(metrics, static_cast<std::int64_t>(audio.size()));
     const auto run_llm = [&](const float* embeds, int count, int past, int* tokens, int* vocab) {
         auto* result = qwen3_asr_run_llm_kv(ctx_, embeds, count, past, tokens, vocab);
@@ -95,19 +97,14 @@ inline std::string generate(qwen3_asr_context* ctx_, bool raon_, const std::vect
     profile.metrics().audio_frames = N_enc;
     if (!audio_embeds)
         return {};
-    // qwen_asr _build_text_prompt with context="" (the chat template puts
-    // the context in the system turn; R2T2's example passes none).
-    std::string text = "<|im_start|>system\n<|im_end|>\n<|im_start|>user\n<|audio_start|>";
-    for (int i = 0; i < N_enc; i++)
-        text += "<|audio_pad|>";
-    text += "<|audio_end|><|im_end|>\n<|im_start|>assistant\n";
-    text += assistant_suffix;
-    if (raon_)
-        text = "<|im_start|>user\n<|audio_start|>";
+    std::string text;
     if (raon_) {
+        text = "<|im_start|>user\n<|audio_start|>";
         for (int i = 0; i < N_enc; ++i)
             text += "<|audio_pad|>";
         text += "<|audio_end|>Transcribe the audio into text<|im_end|>\n<|im_start|>assistant\n" + assistant_suffix;
+    } else {
+        text = core_qwen3_prompt::build(N_enc, {}, {}, assistant_suffix, hotwords);
     }
     int n_prompt = 0;
     int32_t* raw_ids = qwen3_asr_tokenize(ctx_, text.c_str(), &n_prompt);
