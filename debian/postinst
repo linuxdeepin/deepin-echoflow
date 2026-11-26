@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 set -eu
 
-if [ "$1" = configure ]; then
+if [ "${1:-}" = configure ]; then
     entry=/etc/xdg/autostart/echoflow-autostart.desktop
     legacy="${DPKG_ROOT:-}$entry"
     # The renamed package leaves the old package's conffiles on disk.
@@ -22,3 +22,35 @@ if [ "$1" = configure ]; then
 fi
 
 #DEBHELPER#
+
+if [ "${1:-}" = configure ] && [ -z "${DPKG_ROOT:-}" ] &&
+    command -v systemd-run >/dev/null 2>&1 && ! systemd-detect-virt --chroot --quiet; then
+    # Dispatch as the desktop user, independently of dpkg. The launcher
+    # recovers the graphical environment from the selected login session.
+    started=' '
+    loginctl list-sessions --no-legend --no-pager 2>/dev/null |
+    while read -r session rest; do
+        properties=$(loginctl show-session "$session" -p User -p Class \
+            -p Type -p Active -p Remote 2>/dev/null) || continue
+        uid=$(printf '%s\n' "$properties" | awk -F= '{ p[$1] = $2 }
+            END { if (p["Class"] == "user" && p["Active"] == "yes" &&
+                p["Remote"] == "no" && p["Type"] ~ /^(x11|wayland)$/)
+                print p["User"] }')
+        case "$uid" in ''|*[!0-9]*) continue ;; esac
+        [ "$uid" -gt 0 ] || continue
+        case "$started" in *" $uid "*) continue ;; esac
+        gid=$(id -g -- "$uid") || continue
+        runtime="/run/user/$uid"
+        if setpriv --reuid="$uid" --regid="$gid" --init-groups --reset-env \
+            env XDG_RUNTIME_DIR="$runtime" DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus" \
+            setsid --fork systemd-cat --identifier=deepin-echoflow-install \
+            systemd-run --user --scope --collect --quiet \
+            --unit="deepin-echoflow-install-$$.scope" --property=PartOf=graphical-session.target \
+            /usr/bin/deepin-echoflow-session-start --after-install "$session" \
+            </dev/null >/dev/null 2>&1; then
+            started="$started$uid "
+        else
+            printf 'Could not start EchoFlow for desktop user %s; it can start at next login.\n' "$uid" >&2
+        fi
+    done
+fi

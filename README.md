@@ -63,15 +63,18 @@ Fcitx 将焦点和光标信息直接发送到 UI socket；服务未启动时，�
 立即生效。使用 `--no-start` 时不会修改当前 Fcitx 会话，稍后需手动执行
 `fcitx5 -rd`。
 
-通过 deb 安装或升级时，addon 使用系统模块名 `libechoflow`。由于 Debian
-维护脚本不能安全重启某个用户的桌面输入法会话，安装完成后需在该用户会话中
-执行一次：
+通过 `.deb` 安装或升级后，EchoFlow 会尝试在已登录的本地图形会话中启动
+录音唤醒 socket、重启 Fcitx5 以加载插件，并启动托盘 UI。升级时会替换旧托盘进程，
+录音守护进程只在已经运行时重启。没有图形会话时，EchoFlow 会在下次登录时启动。
+如果托盘没有启动，可在桌面终端以普通用户执行：
 
 ```bash
-fcitx5 -rd
+systemctl --user daemon-reload
+deepin-echoflow-session-start
 ```
 
-EchoFlow 会在下次登录时启动。要立即打开首次使用向导，可在当前桌面会话运行 `deepin-echoflow-session-start`。
+如果当前桌面不允许 Fcitx5 自重启，注销再登录后即可加载插件。如需查看安装时的启动日志，
+运行 `journalctl -t deepin-echoflow-install`。
 
 ### 第三步：下载模型 & 开始使用
 

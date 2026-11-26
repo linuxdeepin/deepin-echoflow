@@ -7,6 +7,7 @@ Description=deepin-echoflow recording activation socket
 [Socket]
 ListenDatagram=%t/deepin-echoflow-wakeup.sock
 SocketMode=0600
+RemoveOnStop=yes
 Service=deepin-echoflow.service
 
 [Install]

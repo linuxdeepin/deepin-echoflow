@@ -30,7 +30,7 @@ Architecture: any
 Conflicts: echoflow
 Replaces: echoflow
 Provides: echoflow
-Depends: ${shlibs:Depends}, ${misc:Depends}, fcitx5, pipewire-bin
+Depends: ${shlibs:Depends}, ${misc:Depends}, fcitx5, pipewire-bin, init-system-helpers (>= 1.61)
 Description: Offline voice input method for Fcitx5
  deepin-echoflow is an offline voice input method for deepin and Fcitx5.
  It ships a native daemon, Fcitx5 addon, Qt/DTK settings UI, and

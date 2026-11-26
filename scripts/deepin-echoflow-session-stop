@@ -32,7 +32,8 @@ matches_command() {
 for proc_dir in /proc/[0-9]*; do
     [[ -O "$proc_dir" ]] || continue
     pid="${proc_dir##*/}"
-    [[ "$pid" != "$$" ]] || continue
+    # During a package upgrade the new launcher calls us to retire old ones.
+    [[ "$pid" != "$$" && "$pid" != "$PPID" ]] || continue
     executable="$(readlink "$proc_dir/exe" 2>/dev/null)" || continue
     executable="${executable% (deleted)}"
     args=()

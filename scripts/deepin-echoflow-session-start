@@ -1,23 +1,119 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # SPDX-FileCopyrightText: 2026 Hualet Wang
 # SPDX-License-Identifier: GPL-3.0-or-later
 set -eu
 
 socket_only=0
 restart_service=0
+after_install=0
+session=
 if [ "${1:-}" = "--socket-only" ]; then
     socket_only=1
     shift
 elif [ "${1:-}" = "--restart-service-if-active" ]; then
     restart_service=1
     shift
+elif [ "${1:-}" = "--after-install" ] && [ -n "${2:-}" ]; then
+    after_install=1
+    session=$2
+    shift 2
 fi
 if [ "$#" -ne 0 ]; then
-    echo "Usage: deepin-echoflow-session-start [--socket-only|--restart-service-if-active]" >&2
+    echo "Usage: deepin-echoflow-session-start [--socket-only|--restart-service-if-active|--after-install SESSION]" >&2
     exit 2
 fi
 
-session_vars="XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS DISPLAY WAYLAND_DISPLAY XAUTHORITY PULSE_SERVER PIPEWIRE_REMOTE XDG_SESSION_TYPE XDG_CURRENT_DESKTOP DESKTOP_SESSION LANG LC_ALL LC_MESSAGES QT_QPA_PLATFORM XDG_DATA_DIRS XDG_CONFIG_DIRS GDK_BACKEND"
+desktop_vars="DISPLAY WAYLAND_DISPLAY XAUTHORITY PULSE_SERVER PIPEWIRE_REMOTE XDG_SESSION_ID XDG_SESSION_TYPE XDG_CURRENT_DESKTOP DESKTOP_SESSION LANG LC_ALL LC_MESSAGES QT_QPA_PLATFORM XDG_DATA_DIRS XDG_CONFIG_DIRS XDG_DATA_HOME XDG_CONFIG_HOME XDG_CACHE_HOME GDK_BACKEND GTK_IM_MODULE QT_IM_MODULE XMODIFIERS"
+session_vars="XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS $desktop_vars"
+
+user_bus() { busctl --user --timeout=5s --auto-start=no call "$@"; }
+dbus_call() { user_bus org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus "$@"; }
+fcitx_call() { user_bus org.fcitx.Fcitx5 /controller org.fcitx.Fcitx.Controller1 "$1"; }
+
+read_desktop_environment() {
+    local pid=$1 entry name candidate_display candidate_session
+    local -A values=()
+    [[ "$pid" =~ ^[1-9][0-9]*$ && -O "/proc/$pid" ]] || return 1
+    while IFS= read -r -d '' entry; do
+        name=${entry%%=*}
+        case " $desktop_vars " in
+            *" $name "*) values[$name]=${entry#*=} ;;
+        esac
+    done 2>/dev/null < "/proc/$pid/environ" || return 1
+
+    candidate_session=${values[XDG_SESSION_ID]:-}
+    [[ -z "$candidate_session" || "$candidate_session" == "$session" ]] || return 1
+    [[ "${values[XDG_SESSION_TYPE]:-$session_type}" == "$session_type" ]] || return 1
+    if [[ "$session_type" == x11 ]]; then
+        candidate_display=${values[DISPLAY]:-}
+        [[ -n "$candidate_display" ]] || return 1
+        if [[ -n "$session_display" ]]; then
+            [[ "${candidate_display%%.*}" == "${session_display%%.*}" ]] || return 1
+        else
+            [[ "$candidate_session" == "$session" ]] || return 1
+        fi
+        unset 'values[WAYLAND_DISPLAY]'
+    else
+        candidate_display=${values[WAYLAND_DISPLAY]:-}
+        [[ "$candidate_session" == "$session" && -n "$candidate_display" ]] || return 1
+        if [[ "$candidate_display" != /* ]]; then
+            candidate_display="${XDG_RUNTIME_DIR:-/run/user/$UID}/$candidate_display"
+        fi
+        [[ -S "$candidate_display" ]] || return 1
+    fi
+
+    for name in $desktop_vars; do
+        if [[ -v "values[$name]" ]]; then
+            export "$name=${values[$name]}"
+        else
+            unset "$name"
+        fi
+    done
+    export XDG_SESSION_ID="$session" XDG_SESSION_TYPE="$session_type"
+}
+
+load_desktop_environment() {
+    local properties key value pid leader= user= active= remote= session_type= session_display=
+    properties=$(loginctl show-session "$session" -p Leader -p Type -p Display -p User -p Active -p Remote) || return 1
+    while IFS='=' read -r key value; do
+        case "$key" in
+            Leader) leader=$value ;;
+            Type) session_type=$value ;;
+            Display) session_display=$value ;;
+            User) user=$value ;;
+            Active) active=$value ;;
+            Remote) remote=$value ;;
+        esac
+    done <<< "$properties"
+    [[ "$user" == "$UID" && "$active" == yes && "$remote" == no ]] || return 1
+    [[ "$session_type" == x11 || "$session_type" == wayland ]] || return 1
+
+    # Fcitx and DDE inherit the live desktop environment; the logind leader may not.
+    pid=$(dbus_call GetConnectionUnixProcessID s org.fcitx.Fcitx5 2>/dev/null) || pid=
+    read_desktop_environment "${pid#u }" && return 0
+    read_desktop_environment "$leader" && return 0
+    while IFS= read -r pid; do
+        read_desktop_environment "$pid" && return 0
+    done < <(pgrep -u "$UID" -x dde-session)
+    return 1
+}
+
+if [ "$after_install" -eq 1 ]; then
+    if ! load_desktop_environment; then
+        echo "No graphical environment for login session $session; EchoFlow can start at next login." >&2
+        exit 0
+    fi
+    systemctl --user daemon-reload
+    # Avoid passing stale display/authentication values to the recording service.
+    unset_vars=()
+    for name in DISPLAY WAYLAND_DISPLAY XAUTHORITY QT_QPA_PLATFORM; do
+        [[ -v "$name" ]] || unset_vars+=("$name")
+    done
+    if (( ${#unset_vars[@]} )); then
+        systemctl --user unset-environment "${unset_vars[@]}"
+    fi
+fi
+
 set --
 for name in $session_vars; do
     if printenv "$name" >/dev/null 2>&1; then
@@ -37,6 +133,33 @@ fi
 
 systemctl --user start deepin-echoflow.socket
 
+if [ "$after_install" -eq 1 ]; then
+    # Retire a previous package's supervisor before its UI can respawn.
+    "$(dirname "$0")/deepin-echoflow-session-stop"
+    if ! systemctl --user try-restart deepin-echoflow.service; then
+        echo "Could not restart the running EchoFlow recording service." >&2
+    fi
+
+    owner=$(dbus_call NameHasOwner s org.fcitx.Fcitx5) || owner=
+    case "$owner" in
+        'b false')
+            echo "Fcitx5 is not running. Start it in your desktop session to load the EchoFlow addon." >&2
+            ;;
+        'b true')
+            can_restart=$(fcitx_call CanRestart) || can_restart=
+            if [ "$can_restart" = 'b false' ]; then
+                echo "This Fcitx5 instance does not support self-restart. Log out and back in to load the EchoFlow addon." >&2
+            # Restart in place to retain the input method's desktop environment.
+            elif [ "$can_restart" != 'b true' ] || ! fcitx_call Restart; then
+                echo "Could not request a Fcitx5 restart. Restart it via your desktop session or log out and back in." >&2
+            fi
+            ;;
+        *)
+            echo "Could not check whether Fcitx5 is running. Check the input method in your desktop session." >&2
+            ;;
+    esac
+fi
+
 if [ "$socket_only" -eq 1 ]; then
     exit 0
 fi
@@ -53,6 +176,7 @@ stop_ui() {
 }
 trap stop_ui TERM INT HUP
 while :; do
+    [[ -x "$ui" ]] || exit 0
     "$ui" &
     ui_pid=$!
     if wait "$ui_pid"; then
