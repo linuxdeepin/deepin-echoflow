@@ -361,6 +361,13 @@ else
   fail=$((fail + 1))
 fi
 
+if bash "$ROOT/tests/spec/test_deb_session_start.sh"; then
+  pass=$((pass + 1))
+else
+  echo "FAIL - Debian post-install desktop startup"
+  fail=$((fail + 1))
+fi
+
 if bash "$ROOT/tests/spec/test_ui_host_install.sh"; then
   pass=$((pass + 1))
 else

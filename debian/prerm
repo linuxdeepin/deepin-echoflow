@@ -1,0 +1,24 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 Hualet Wang
+# SPDX-License-Identifier: GPL-3.0-or-later
+set -eu
+
+if [ "${1:-}" = remove ] && [ -z "${DPKG_ROOT:-}" ] &&
+    command -v deb-systemd-invoke >/dev/null 2>&1 && ! systemd-detect-virt --chroot --quiet; then
+    # Cancel any pending activation before stopping the units it could start.
+    deb-systemd-invoke --user stop 'deepin-echoflow-install-*.scope' >/dev/null 2>&1 || true
+    systemctl list-units --type=service --no-legend --no-pager --plain 'user@*.service' |
+    while read -r unit rest; do
+        uid=${unit#user@}
+        uid=${uid%.service}
+        case "$uid" in ''|0|*[!0-9]*) continue ;; esac
+        gid=$(id -g -- "$uid") || continue
+        if ! timeout 10s setpriv --reuid="$uid" --regid="$gid" --init-groups --reset-env \
+            /usr/bin/deepin-echoflow-session-stop; then
+            printf 'Could not stop the EchoFlow UI for user %s.\n' "$uid" >&2
+        fi
+    done
+    deb-systemd-invoke --user stop deepin-echoflow.socket deepin-echoflow.service >/dev/null || true
+fi
+
+#DEBHELPER#
