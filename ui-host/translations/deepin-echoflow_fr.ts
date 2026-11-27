@@ -255,28 +255,28 @@
 <context>
     <name>QObject</name>
     <message>
-        <location filename="../main.cpp" line="346"/>
+        <location filename="../main.cpp" line="332"/>
         <source>Failed to load the settings schema.</source>
         <translation>Impossible de charger le schéma des paramètres.</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="450"/>
+        <location filename="../main.cpp" line="440"/>
         <location filename="../SettingsTranslation.cpp" line="18"/>
         <source>Usage Guide</source>
         <translation>Guide d’utilisation</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="451"/>
+        <location filename="../main.cpp" line="441"/>
         <source>Settings</source>
         <translation>Paramètres</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="453"/>
+        <location filename="../main.cpp" line="443"/>
         <source>Quit</source>
         <translation>Quitter</translation>
     </message>
     <message>
-        <location filename="../SettingsDialog.cpp" line="70"/>
+        <location filename="../SettingsDialog.cpp" line="146"/>
         <source>Unknown model</source>
         <translation>Modèle inconnu</translation>
     </message>
@@ -326,6 +326,7 @@
         <translation>Modèle de reconnaissance</translation>
     </message>
     <message>
+        <location filename="../SettingsDialog.cpp" line="136"/>
         <location filename="../SettingsTranslation.cpp" line="21"/>
         <source>Model</source>
         <translation>Modèle</translation>
@@ -484,7 +485,7 @@
 <context>
     <name>echoflow::EchoFlowSettings</name>
     <message>
-        <location filename="../EchoFlowSettings.cpp" line="220"/>
+        <location filename="../EchoFlowSettings.cpp" line="224"/>
         <source>System default</source>
         <translation>Valeur par défaut du système</translation>
     </message>
@@ -516,54 +517,103 @@
 <context>
     <name>echoflow::ModelRowWidget</name>
     <message>
-        <location filename="../ModelRowWidget.cpp" line="75"/>
-        <location filename="../ModelRowWidget.cpp" line="144"/>
-        <location filename="../ModelRowWidget.cpp" line="155"/>
+        <location filename="../ModelRowWidget.cpp" line="62"/>
+        <location filename="../ModelRowWidget.cpp" line="161"/>
+        <source>Uninstall</source>
+        <translation>Désinstaller</translation>
+    </message>
+    <message>
+        <location filename="../ModelRowWidget.cpp" line="58"/>
+        <location filename="../ModelRowWidget.cpp" line="59"/>
+        <location filename="../ModelRowWidget.cpp" line="160"/>
         <source>Cancel</source>
         <translation>Annuler</translation>
     </message>
     <message>
-        <location filename="../ModelRowWidget.cpp" line="100"/>
         <source>Unknown</source>
-        <translation>Inconnu</translation>
+        <translation type="vanished">Inconnu</translation>
     </message>
     <message>
-        <location filename="../ModelRowWidget.cpp" line="113"/>
         <source>Downloaded</source>
-        <translation>Téléchargé</translation>
+        <translation type="vanished">Téléchargé</translation>
     </message>
     <message>
-        <location filename="../ModelRowWidget.cpp" line="117"/>
+        <location filename="../ModelRowWidget.cpp" line="55"/>
         <source>Download</source>
         <translation>Télécharger</translation>
     </message>
     <message>
-        <location filename="../ModelRowWidget.cpp" line="164"/>
+        <location filename="../ModelRowWidget.cpp" line="152"/>
+        <location filename="../ModelRowWidget.cpp" line="170"/>
+        <source>At least one model must remain installed.</source>
+        <translation>Au moins un modèle doit rester installé.</translation>
+    </message>
+    <message>
+        <location filename="../ModelRowWidget.cpp" line="156"/>
+        <source>Uninstall model?</source>
+        <translation>Désinstaller le modèle ?</translation>
+    </message>
+    <message>
+        <location filename="../ModelRowWidget.cpp" line="157"/>
+        <source>The files for %1 will be removed from this device.</source>
+        <translation>Les fichiers de %1 seront supprimés de cet appareil.</translation>
+    </message>
+    <message>
+        <location filename="../ModelRowWidget.cpp" line="181"/>
+        <source>Models are in use. Try again when voice input is idle.</source>
+        <translation>Les modèles sont en cours d’utilisation. Réessayez lorsque la saisie vocale est inactive.</translation>
+    </message>
+    <message>
+        <location filename="../ModelRowWidget.cpp" line="182"/>
+        <source>Could not release the models. Restart EchoFlow and try again.</source>
+        <translation>Impossible de libérer les modèles. Redémarrez EchoFlow et réessayez.</translation>
+    </message>
+    <message>
+        <location filename="../ModelRowWidget.cpp" line="187"/>
+        <location filename="../ModelRowWidget.cpp" line="242"/>
+        <source>Could not uninstall the model.</source>
+        <translation>Impossible de désinstaller le modèle.</translation>
+    </message>
+    <message>
+        <location filename="../ModelRowWidget.cpp" line="224"/>
+        <source>Could not save the model settings.</source>
+        <translation>Impossible d’enregistrer les paramètres du modèle.</translation>
+    </message>
+    <message>
+        <source>Could not save the replacement model.</source>
+        <translation type="vanished">Impossible d’enregistrer le modèle de remplacement.</translation>
+    </message>
+    <message>
         <source>Retry</source>
-        <translation>Réessayer</translation>
+        <translation type="vanished">Réessayer</translation>
     </message>
 </context>
 <context>
     <name>echoflow::SettingsDialog</name>
     <message>
-        <location filename="../SettingsDialog.cpp" line="46"/>
+        <location filename="../SettingsDialog.cpp" line="80"/>
         <source>EchoFlow Settings</source>
         <translation>Paramètres EchoFlow</translation>
     </message>
     <message>
-        <location filename="../SettingsDialog.cpp" line="56"/>
+        <location filename="../SettingsDialog.cpp" line="90"/>
         <source>Usage Guide</source>
         <translation>Guide d’utilisation</translation>
     </message>
     <message>
-        <location filename="../SettingsDialog.cpp" line="58"/>
+        <location filename="../SettingsDialog.cpp" line="92"/>
         <source>Open</source>
         <translation>Ouvrir</translation>
     </message>
     <message>
-        <location filename="../SettingsDialog.cpp" line="60"/>
+        <location filename="../SettingsDialog.cpp" line="94"/>
         <source>Open the usage guide</source>
         <translation>Ouvrir le guide d’utilisation</translation>
+    </message>
+    <message>
+        <location filename="../SettingsDialog.cpp" line="117"/>
+        <source>Download a polish model to enable polishing.</source>
+        <translation>Téléchargez un modèle de reformulation pour activer cette fonction.</translation>
     </message>
 </context>
 </TS>

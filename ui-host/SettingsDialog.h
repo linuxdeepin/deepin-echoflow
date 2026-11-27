@@ -16,7 +16,7 @@ namespace echoflow {
 class SettingsDialog : public Dtk::Widget::DSettingsDialog {
     Q_OBJECT
 public:
-    explicit SettingsDialog(Dtk::Core::DSettings *settings, QWidget *parent = nullptr);
+    SettingsDialog(Dtk::Core::DSettings *settings, const QString &controlPath, QWidget *parent = nullptr);
 
 signals:
     void usageGuideRequested();

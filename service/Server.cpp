@@ -110,9 +110,10 @@ bool isActivityCommand(const std::string& verb)
 
 }  // namespace
 
-Server::Server(Config cfg, VoiceSession& session)
+Server::Server(Config cfg, VoiceSession& session, std::optional<ConfigFileSnapshot> startupConfig)
     : cfg_(std::move(cfg))
     , session_(session)
+    , startupConfig_(std::move(startupConfig))
 {
 }
 
@@ -141,6 +142,11 @@ int Server::run(int activationFd, const std::filesystem::path& serverPath)
         log(error);
         return 1;
     }
+    if (startupConfig_ && startupConfig_->changed()) {
+        // Leave the pending wakeup datagrams queued for the next activation.
+        log("settings changed during service startup; exiting before processing commands");
+        return 0;
+    }
     const int fd = instance.fd();
     log("deepin-echoflow service listening on " + serverPath.string());
 
@@ -148,6 +154,7 @@ int Server::run(int activationFd, const std::filesystem::path& serverPath)
     const auto timeout = idleTimeout();
     auto lastActivity = Clock::now();
     auto lastState = session_.state();
+    bool reloadSettings = false;
     char buf[4096];
     while (!shutdownRequested.load(std::memory_order_relaxed)) {
         const auto now = Clock::now();
@@ -157,6 +164,9 @@ int Server::run(int activationFd, const std::filesystem::path& serverPath)
                 lastActivity = now;
             }
             lastState = state;
+        }
+        if (reloadSettings && state == SessionState::Idle) {
+            return 0;
         }
         if (state == SessionState::Idle && now - lastActivity >= timeout) {
             log("service idle timeout reached; exiting normally");
@@ -188,6 +198,9 @@ int Server::run(int activationFd, const std::filesystem::path& serverPath)
             if (!(source.revents & POLLIN)) {
                 continue;
             }
+            if (reloadSettings && session_.state() == SessionState::Idle) {
+                return 0;
+            }
             sockaddr_un peer {};
             socklen_t peerLen = sizeof(peer);
             const ssize_t n = recvfrom(source.fd, buf, sizeof(buf) - 1, 0,
@@ -202,13 +215,28 @@ int Server::run(int activationFd, const std::filesystem::path& serverPath)
             if (isSessionCommand(verb)) {
                 log("control command: " + command);
             }
-            std::string reply = isAllowed(command) ? session_.handleCommand(command) + "\n"
-                                                   : "ERR unknown-command\n";
+            bool releaseModels = false;
+            std::string reply;
+            if (source.fd == fd && verb == "RELEASE_MODELS") {
+                releaseModels = session_.state() == SessionState::Idle;
+                reply = releaseModels ? "OK\n" : "BUSY\n";
+            } else if (source.fd == fd && verb == "RELOAD_SETTINGS") {
+                reloadSettings = true;
+                reply = "OK\n";
+            } else {
+                reply = isAllowed(command) ? session_.handleCommand(command) + "\n"
+                                           : "ERR unknown-command\n";
+            }
             if (peerLen > 0) {
                 sendto(source.fd, reply.data(), reply.size(), 0,
                     reinterpret_cast<sockaddr*>(&peer), peerLen);
             }
             const auto after = session_.state();
+            if (releaseModels || (reloadSettings && after == SessionState::Idle)) {
+                // Exit before accepting another recording. The model lock is released
+                // by main only after the voice session and its model owners are destroyed.
+                return 0;
+            }
             if (after != lastState) {
                 if (after == SessionState::Idle) {
                     lastActivity = Clock::now();

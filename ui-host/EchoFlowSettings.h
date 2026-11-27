@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <filesystem>
+
 #include <QObject>
 #include <QMap>
 #include <QString>
@@ -11,11 +13,14 @@
 namespace Dtk {
 namespace Core {
 class DSettings;
+class DSettingsOption;
 class QSettingBackend;
 }
 } // namespace Dtk
 
 namespace echoflow {
+
+struct ModelEntry;
 
 class EchoFlowSettings : public QObject {
     Q_OBJECT
@@ -27,9 +32,10 @@ public:
     Dtk::Core::DSettings *dsettings() const;
     void sync();
 
-    // Rebuild the model_name combobox items from the models actually present
-    // on disk (plus the current selection, kept visible even if not downloaded).
+    // Rebuild model choices from disk and keep the current recognition selection visible.
     void refreshModelNameItems();
+    Dtk::Core::DSettingsOption *modelSelection(const ModelEntry &entry) const;
+    std::filesystem::path modelDirectory(const ModelEntry &entry) const;
 
 private:
     explicit EchoFlowSettings(QObject *parent = nullptr);

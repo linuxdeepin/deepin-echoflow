@@ -18,6 +18,7 @@ add_library(echoflow_service STATIC
     LiveSegmentCoordinator.cpp
     LiveSegmenterFactory.cpp
     LocalLlmPolisher.cpp
+    ModelUseLock.cpp
     PolishPrompt.cpp
     Recorder.cpp
     StreamingDenoiser.cpp

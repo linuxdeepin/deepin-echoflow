@@ -272,7 +272,9 @@ add_test(NAME performance_gate_tests
 set_tests_properties(performance_gate_tests PROPERTIES
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
-add_executable(test_server_shutdown test_server_shutdown.cpp)
+add_executable(test_server_shutdown test_server_shutdown.cpp
+    ../ui-host/ModelUninstallGuard.cpp)
+target_include_directories(test_server_shutdown PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../ui-host)
 target_link_libraries(test_server_shutdown PRIVATE echoflow_service Qt6::Core Qt6::Test)
 echoflow_enable_dead_strip(test_server_shutdown)
 add_test(NAME test_server_shutdown COMMAND test_server_shutdown)
@@ -299,3 +301,23 @@ echoflow_enable_dead_strip(transcription_quality_benchmark)
 add_executable(live_replay_benchmark benchmarks/live_replay_benchmark.cpp)
 target_link_libraries(live_replay_benchmark PRIVATE echoflow_service Qt6::Core pthread)
 echoflow_enable_dead_strip(live_replay_benchmark)
+
+add_executable(test_model_uninstall
+    test_model_uninstall.cpp
+    ../ui-host/EchoFlowSettings.cpp
+    ../ui-host/ModelRowWidget.cpp
+    ../ui-host/ModelUninstallGuard.cpp
+    ../service/ModelUseLock.cpp
+    ../ui-host/SettingsDialog.cpp
+    ../ui-host/ModelDownloadCoordinator.cpp
+    ../ui-host/ModelDownloader.cpp
+    ../ui-host/settings.qrc)
+set_property(TARGET test_model_uninstall PROPERTY AUTORCC ON)
+target_include_directories(test_model_uninstall PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ui-host
+    ${CMAKE_CURRENT_SOURCE_DIR}/../service)
+target_link_libraries(test_model_uninstall PRIVATE
+    Qt6::Test Qt6::Widgets Qt6::Network Dtk6::Core Dtk6::Widget)
+add_test(NAME test_model_uninstall COMMAND test_model_uninstall)
+set_tests_properties(test_model_uninstall PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 20)

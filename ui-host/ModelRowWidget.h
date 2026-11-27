@@ -11,10 +11,15 @@
 
 class QLabel;
 class QPushButton;
+class QToolButton;
+
+namespace Dtk::Widget {
+class DWarningButton;
+}
 
 namespace echoflow {
 
-// Pure view of one model's download. Owns no downloader; it queries
+// Settings row for one model's download and removal. Owns no downloader; it queries
 // ModelDownloadCoordinator for the current snapshot and connects to its
 // id-tagged signals. Constructed fresh every time the (destroy-on-close)
 // settings dialog opens, so it always reflects live progress if a download is
@@ -22,21 +27,26 @@ namespace echoflow {
 class ModelRowWidget : public QWidget {
     Q_OBJECT
 public:
-    explicit ModelRowWidget(const ModelEntry* entry, QWidget* parent = nullptr);
+    ModelRowWidget(const ModelEntry* entry, const QString& controlPath, QWidget* parent = nullptr);
 
 private slots:
     void onClicked();
+    void uninstall();
     void onCoordinatorProgress(const QString& id, qint64 done, qint64 total, const QString& file);
-    void onCoordinatorStateChanged(const QString& id, DownloadState state, const QString& error);
+    void onCoordinatorStateChanged(const QString& id, DownloadState state);
 
 private:
     void refreshState();
+    const ModelEntry* installedReplacement() const;
     void renderProgress(qint64 done, qint64 total);
     QString modelId() const;
 
     const ModelEntry* entry_;
+    const std::filesystem::path controlPath_;
     QLabel* status_ = nullptr;
     QPushButton* button_ = nullptr;
+    QToolButton* cancelButton_ = nullptr;
+    Dtk::Widget::DWarningButton* uninstallButton_ = nullptr;
 };
 
 }  // namespace echoflow

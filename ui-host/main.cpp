@@ -28,7 +28,6 @@
 #include <QPointer>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
-#include <QProcess>
 #include <QSaveFile>
 #include <QSocketNotifier>
 #include <QStandardPaths>
@@ -152,7 +151,7 @@ bool sendControlCommand(const QString &controlPath, std::string_view command) {
         return false;
     }
 
-    const int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    const int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
     if (fd < 0) {
         return false;
     }
@@ -211,16 +210,6 @@ void updateLegacyUserAutostart() {
         qWarning("failed to update the legacy EchoFlow autostart entry");
     }
 #endif
-}
-
-void restartServiceAfterSettingsChange() {
-    const QString launcher = QDir(QCoreApplication::applicationDirPath())
-        .filePath(QStringLiteral("deepin-echoflow-session-start"));
-    const bool started = QProcess::startDetached(
-        launcher, QStringList{QStringLiteral("--restart-service-if-active")});
-    if (!started) {
-        qWarning("failed to restart deepin-echoflow.service after settings change");
-    }
 }
 
 class ThemeBridge final : public QObject {
@@ -479,19 +468,23 @@ int main(int argc, char **argv) {
         &modelSetupAdapter, &setupCommandRunner, &onboardingState);
 
     bool shuttingDown = false;
+    bool settingsChanged = false;
     QPointer<echoflow::SettingsDialog> settingsDialog;
     QPointer<OnboardingDialog> onboardingDialog;
     auto openSettings = [&]() {
         if (!settingsDialog) {
-            settingsDialog = new echoflow::SettingsDialog(
-                echoflow::EchoFlowSettings::instance()->dsettings());
+            auto *settings = echoflow::EchoFlowSettings::instance()->dsettings();
+            settingsChanged = false;
+            settingsDialog = new echoflow::SettingsDialog(settings, controlPath);
+            QObject::connect(settings, &Dtk::Core::DSettings::valueChanged,
+                             settingsDialog, [&settingsChanged] { settingsChanged = true; });
             settingsDialog->setAttribute(Qt::WA_DeleteOnClose);
             QObject::connect(settingsDialog, &echoflow::SettingsDialog::usageGuideRequested,
                              guideAction, &QAction::trigger);
             QObject::connect(settingsDialog, &QObject::destroyed, &app, [&]() {
                 echoflow::EchoFlowSettings::instance()->sync();
-                if (!shuttingDown) {
-                    restartServiceAfterSettingsChange();
+                if (!shuttingDown && settingsChanged) {
+                    sendControlCommand(controlPath, "RELOAD_SETTINGS");
                 }
                 settingsDialog = nullptr;
             });
