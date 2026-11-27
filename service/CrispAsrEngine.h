@@ -24,6 +24,8 @@ public:
     static std::string languageCode(const std::string& value);
 
 private:
+    void loadSessionIfAvailable();
+
     Config cfg_;
     std::unique_ptr<CrispSession> session_;
 };

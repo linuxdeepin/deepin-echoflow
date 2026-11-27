@@ -42,7 +42,8 @@ void TestConfig::projectNamePathsReuseLegacyModels()
     QTemporaryDir directory;
     QVERIFY(directory.isValid());
     const std::filesystem::path root = directory.path().toStdString();
-    const auto current = root / "deepin-echoflow" / "deepin-echoflow.conf";
+    const auto current = root / "deepin" / "deepin-echoflow" / "deepin-echoflow.conf";
+    const auto previous = root / "deepin-echoflow" / "deepin-echoflow.conf";
     const auto legacy = root / "echoflow" / "echoflow.conf";
     QCOMPARE(projectConfigPath(root), current);
     std::filesystem::create_directories(legacy.parent_path() / "qwen3-asr-0.6b");
@@ -53,6 +54,12 @@ void TestConfig::projectNamePathsReuseLegacyModels()
     QCOMPARE(projectConfigPath(root), legacy);
     const auto loaded = loadDtkConf(projectConfigPath(root));
     QCOMPARE(loaded.modelDir, (legacy.parent_path() / "qwen3-asr-0.6b").string());
+    std::filesystem::create_directories(previous.parent_path());
+    QFile previousConfig(QString::fromStdString(previous.string()));
+    QVERIFY(previousConfig.open(QIODevice::WriteOnly));
+    previousConfig.close();
+    QCOMPARE(projectConfigPath(root), previous);
+
     std::filesystem::create_directories(current.parent_path());
     QFile preferred(QString::fromStdString(current.string()));
     QVERIFY(preferred.open(QIODevice::WriteOnly));

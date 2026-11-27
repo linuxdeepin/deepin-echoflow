@@ -4,8 +4,10 @@
 #include <QtTest/QtTest>
 
 #include "Committer.h"
+#include "../fcitx-addon/CommitSocket.h"
 
 #include <cerrno>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <thread>
@@ -24,6 +26,8 @@ private slots:
     void directCommitDoesNotSendClear();
     void preeditReturnsAddonRejection();
     void emptyPreeditUsesRevisionedProtocol();
+    void overlappingAddonsKeepTheActiveSocket();
+    void legacySocketIsReplacedOnlyAfterItCloses();
 
 private:
     std::string serverPath_;
@@ -216,6 +220,52 @@ void TestCommitter::emptyPreeditUsesRevisionedProtocol()
     unlink(serverPath_.c_str());
     QVERIFY2(ok, detail.c_str());
     QCOMPARE(reply.payload, std::string("PREEDIT 42 2\n"));
+}
+
+void TestCommitter::overlappingAddonsKeepTheActiveSocket()
+{
+    QTemporaryDir runtime;
+    QVERIFY(runtime.isValid());
+    const std::string path = (runtime.path() + "/commit.sock").toStdString();
+    CommitSocket successor;
+    {
+        CommitSocket active;
+        QCOMPARE(active.open(path), CommitSocket::Result::Listening);
+        QCOMPARE(successor.open(path), CommitSocket::Result::Busy);
+        Committer committer(path);
+        ReplyResult reply;
+        std::thread server([&] {
+            pollfd socket {active.fd(), POLLIN, 0};
+            if (poll(&socket, 1, 1000) > 0) recvAndReply(active.fd(), "OK", &reply);
+        });
+        const auto [ok, detail] = committer.beginVoiceSession(42);
+        server.join();
+        QVERIFY2(ok, detail.c_str());
+        QCOMPARE(reply.payload, std::string("VOICE_BEGIN 42\n"));
+    }
+    QVERIFY(!QFileInfo::exists(QString::fromStdString(path)));
+    QCOMPARE(successor.open(path), CommitSocket::Result::Listening);
+}
+
+void TestCommitter::legacySocketIsReplacedOnlyAfterItCloses()
+{
+    QTemporaryDir runtime;
+    QVERIFY(runtime.isValid());
+    const std::string path = (runtime.path() + "/legacy.sock").toStdString();
+    sockaddr_un addr {};
+    addr.sun_family = AF_UNIX;
+    QVERIFY(path.size() < sizeof(addr.sun_path));
+    std::memcpy(addr.sun_path, path.c_str(), path.size() + 1);
+    const int legacy = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    QVERIFY(legacy >= 0);
+    const int bound = bind(legacy, reinterpret_cast<const sockaddr *>(&addr), sizeof(addr));
+    if (bound != 0) close(legacy);
+    QCOMPARE(bound, 0);
+    CommitSocket successor;
+    const auto whileLegacyListening = successor.open(path);
+    close(legacy);
+    QCOMPARE(whileLegacyListening, CommitSocket::Result::Busy);
+    QCOMPARE(successor.open(path), CommitSocket::Result::Listening);
 }
 
 QTEST_GUILESS_MAIN(TestCommitter)

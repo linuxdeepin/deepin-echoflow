@@ -22,7 +22,8 @@ private:
 
 inline bool isVoiceInputAllowed(fcitx::CapabilityFlags capabilities)
 {
-    return !capabilities.testAny(fcitx::CapabilityFlag::PasswordOrSensitive);
+    return !capabilities.testAny(fcitx::CapabilityFlag::PasswordOrSensitive)
+        && !capabilities.test(fcitx::CapabilityFlag::Disable);
 }
 
 } // namespace echoflow

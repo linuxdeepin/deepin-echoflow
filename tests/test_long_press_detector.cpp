@@ -11,7 +11,6 @@
 namespace {
 
 constexpr int kHoldMs = 40;
-const QRect kCaret(100, 200, 2, 18);
 
 struct Harness {
     QPoint cursor;
@@ -26,7 +25,6 @@ struct Harness {
         LongPressDetector::Options options;
         options.holdMs = kHoldMs;
         options.pollMs = 5;
-        options.belowCaretReach = 150;
         detector = std::make_unique<LongPressDetector>(
             [this] { return cursor; }, [this] { return canStart; }, options);
         detector->setPointerInActiveWindow([this] { return inActiveWindow; });
@@ -40,7 +38,6 @@ struct Harness {
         detector->handlePress(position);
     }
 
-    // Lets the hold threshold elapse without any caret change near the press.
     void waitPastThreshold() { QTest::qWait(kHoldMs * 3); }
 };
 
@@ -50,28 +47,23 @@ class LongPressDetectorTest final : public QObject {
     Q_OBJECT
 
 private slots:
-    void holdOnCaretLineStartsAndReleaseFinishes();
+    void focusedWindowHoldStartsAndReleaseFinishes();
     void releaseBeforeThresholdIsAClick();
     void movingBeforeThresholdIsASelection();
     void movingWhileHoldingCancels();
     void releaseAwayFromPressCancels();
-    void emptyAreaBelowCaretQualifies();
-    void pressFarBelowCaretIsIgnored();
-    void caretMovedByPressIsUsed();
-    void pressAboveCaretLineIsIgnored();
+    void focusAcquiredDuringPressQualifies();
     void pressOutsideActiveWindowIsIgnored();
-    void noFocusOrCaretIsIgnored();
+    void missingOrLostFocusDoesNotStart();
     void busySessionIsNotStarted();
     void disablingCancelsHoldAndIgnoresPresses();
 };
 
-void LongPressDetectorTest::holdOnCaretLineStartsAndReleaseFinishes() {
+void LongPressDetectorTest::focusedWindowHoldStartsAndReleaseFinishes() {
     Harness h;
-    h.detector->handleInputFocus(true, kCaret);
+    h.detector->handleInputFocus(true);
     h.waitPastThreshold();
 
-    // Right of the caret on its line: the click past the end of the text
-    // left the caret where it was.
     h.press(QPoint(400, 208));
     QTRY_COMPARE(h.started->count(), 1);
     QVERIFY(h.detector->holding());
@@ -84,7 +76,7 @@ void LongPressDetectorTest::holdOnCaretLineStartsAndReleaseFinishes() {
 
 void LongPressDetectorTest::releaseBeforeThresholdIsAClick() {
     Harness h;
-    h.detector->handleInputFocus(true, kCaret);
+    h.detector->handleInputFocus(true);
     h.press(QPoint(101, 208));
     h.detector->handleRelease(QPoint(101, 208));
     h.waitPastThreshold();
@@ -95,7 +87,7 @@ void LongPressDetectorTest::releaseBeforeThresholdIsAClick() {
 
 void LongPressDetectorTest::movingBeforeThresholdIsASelection() {
     Harness h;
-    h.detector->handleInputFocus(true, kCaret);
+    h.detector->handleInputFocus(true);
     h.press(QPoint(101, 208));
     h.cursor = QPoint(140, 208);
     h.waitPastThreshold();
@@ -107,7 +99,7 @@ void LongPressDetectorTest::movingBeforeThresholdIsASelection() {
 
 void LongPressDetectorTest::movingWhileHoldingCancels() {
     Harness h;
-    h.detector->handleInputFocus(true, kCaret);
+    h.detector->handleInputFocus(true);
     h.press(QPoint(101, 208));
     QTRY_COMPARE(h.started->count(), 1);
 
@@ -123,7 +115,7 @@ void LongPressDetectorTest::movingWhileHoldingCancels() {
 
 void LongPressDetectorTest::releaseAwayFromPressCancels() {
     Harness h;
-    h.detector->handleInputFocus(true, kCaret);
+    h.detector->handleInputFocus(true);
     h.press(QPoint(101, 208));
     QTRY_COMPARE(h.started->count(), 1);
 
@@ -132,70 +124,32 @@ void LongPressDetectorTest::releaseAwayFromPressCancels() {
     QCOMPARE(h.finished->count(), 0);
 }
 
-void LongPressDetectorTest::emptyAreaBelowCaretQualifies() {
+void LongPressDetectorTest::focusAcquiredDuringPressQualifies() {
     Harness h;
-    h.detector->handleInputFocus(true, kCaret);
-
-    // Below the last line of a chat box, left of the caret: the click leaves
-    // the caret at the end of the text.
-    h.press(QPoint(20, 300));
-    QTRY_COMPARE(h.started->count(), 1);
-}
-
-void LongPressDetectorTest::pressFarBelowCaretIsIgnored() {
-    Harness h;
-    h.detector->handleInputFocus(true, kCaret);
-    h.press(QPoint(101, 200 + 18 + 151));
-    h.waitPastThreshold();
-    QCOMPARE(h.started->count(), 0);
-}
-
-void LongPressDetectorTest::caretMovedByPressIsUsed() {
-    Harness h;
-    h.detector->handleInputFocus(true, QRect(100, 600, 2, 18));
-
-    // Clicking an earlier line of a multi-line field moves the caret up to
-    // the press before the threshold elapses.
     h.press(QPoint(300, 208));
-    h.detector->handleInputFocus(true, kCaret);
+    h.detector->handleInputFocus(true);
     QTRY_COMPARE(h.started->count(), 1);
-}
-
-void LongPressDetectorTest::pressAboveCaretLineIsIgnored() {
-    Harness h;
-    h.press(QPoint(101, 100));
-    h.detector->handleInputFocus(true, kCaret);
-    h.waitPastThreshold();
-    QCOMPARE(h.started->count(), 0);
 }
 
 void LongPressDetectorTest::pressOutsideActiveWindowIsIgnored() {
     Harness h;
     // e.g. the dock, which never takes input focus from the text field.
     h.inActiveWindow = false;
-    h.detector->handleInputFocus(true, kCaret);
+    h.detector->handleInputFocus(true);
     h.press(QPoint(101, 208));
     h.waitPastThreshold();
     QCOMPARE(h.started->count(), 0);
 }
 
-void LongPressDetectorTest::noFocusOrCaretIsIgnored() {
+void LongPressDetectorTest::missingOrLostFocusDoesNotStart() {
     Harness h;
     h.press(QPoint(101, 208));
     h.waitPastThreshold();
     QCOMPARE(h.started->count(), 0);
 
-    // Password fields report focus without a caret.
-    h.detector->handleRelease(QPoint(101, 208));
-    h.detector->handleInputFocus(true, QRect());
+    h.detector->handleInputFocus(true);
     h.press(QPoint(101, 208));
-    h.waitPastThreshold();
-    QCOMPARE(h.started->count(), 0);
-
-    h.detector->handleRelease(QPoint(101, 208));
-    h.detector->handleInputFocus(true, kCaret);
-    h.detector->handleInputFocus(false, QRect());
-    h.press(QPoint(101, 208));
+    h.detector->handleInputFocus(false);
     h.waitPastThreshold();
     QCOMPARE(h.started->count(), 0);
 }
@@ -203,7 +157,7 @@ void LongPressDetectorTest::noFocusOrCaretIsIgnored() {
 void LongPressDetectorTest::busySessionIsNotStarted() {
     Harness h;
     h.canStart = false;
-    h.detector->handleInputFocus(true, kCaret);
+    h.detector->handleInputFocus(true);
     h.press(QPoint(101, 208));
     h.waitPastThreshold();
     h.detector->handleRelease(QPoint(101, 208));
@@ -214,7 +168,7 @@ void LongPressDetectorTest::busySessionIsNotStarted() {
 
 void LongPressDetectorTest::disablingCancelsHoldAndIgnoresPresses() {
     Harness h;
-    h.detector->handleInputFocus(true, kCaret);
+    h.detector->handleInputFocus(true);
     h.press(QPoint(101, 208));
     QTRY_COMPARE(h.started->count(), 1);
 

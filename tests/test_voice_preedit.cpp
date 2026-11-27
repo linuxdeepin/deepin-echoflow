@@ -35,23 +35,27 @@ void TestVoicePreedit::voiceInputEligibility_data()
 {
     QTest::addColumn<bool>("password");
     QTest::addColumn<bool>("sensitive");
+    QTest::addColumn<bool>("disabled");
     QTest::addColumn<bool>("allowed");
 
-    QTest::newRow("normal") << false << false << true;
-    QTest::newRow("password-only") << true << false << false;
-    QTest::newRow("sensitive-only") << false << true << false;
-    QTest::newRow("password-and-sensitive") << true << true << false;
+    QTest::newRow("normal") << false << false << false << true;
+    QTest::newRow("password-only") << true << false << false << false;
+    QTest::newRow("sensitive-only") << false << true << false << false;
+    QTest::newRow("password-and-sensitive") << true << true << false << false;
+    QTest::newRow("input-method-disabled") << false << false << true << false;
 }
 
 void TestVoicePreedit::voiceInputEligibility()
 {
     QFETCH(bool, password);
     QFETCH(bool, sensitive);
+    QFETCH(bool, disabled);
     QFETCH(bool, allowed);
 
     fcitx::CapabilityFlags capabilities = fcitx::CapabilityFlag::Preedit;
     if (password) capabilities |= fcitx::CapabilityFlag::Password;
     if (sensitive) capabilities |= fcitx::CapabilityFlag::Sensitive;
+    if (disabled) capabilities |= fcitx::CapabilityFlag::Disable;
     QCOMPARE(echoflow::isVoiceInputAllowed(capabilities), allowed);
 }
 

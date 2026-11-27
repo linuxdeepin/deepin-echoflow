@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cmath>
 #include <exception>
+#include <filesystem>
 #include <sstream>
 
 namespace echoflow {
@@ -419,9 +420,46 @@ std::string VoiceSession::handleCommand(const std::string& command)
 
 std::string VoiceSession::startRecording()
 {
+    std::error_code modelError;
+    if (!cfg_.crispModelPath.empty()
+        && !std::filesystem::exists(cfg_.crispModelPath, modelError) && !modelError) {
+        ui_.send("MODEL_REQUIRED");
+        return "ERR model-not-installed";
+    }
     joinCompletedWorker();
 
-    std::uint64_t phaseVersion = 0;
+    std::uint64_t generation;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        generation = ++nextGeneration_;
+    }
+    const auto failStart = [&](const std::string& error) {
+        // The plugin may have accepted the generation even if its reply timed out.
+        try {
+            const auto [ok, detail] = committer_.cancelVoiceSession(generation);
+            if (!ok) log("voice begin rollback cancel failed: " + detail);
+        } catch (const std::exception& e) {
+            log(std::string("voice begin rollback cancel failed: ") + e.what());
+        }
+        const auto [phase, version] = phaseSnapshot();
+        publishPhase(phase, version, true);
+        return "ERR " + error;
+    };
+
+    // Focus notifications can be stale by the time a mouse hold elapses.
+    // Bind the current eligible input context before opening the microphone.
+    std::string beginError;
+    try {
+        const auto [ok, detail] = committer_.beginVoiceSession(generation);
+        if (!ok) beginError = detail.empty() ? "voice session begin rejected" : detail;
+    } catch (const std::exception& e) {
+        beginError = e.what();
+    }
+    if (!beginError.empty()) {
+        log("voice session begin failed: " + beginError);
+        return failStart(beginError);
+    }
+
     try {
         const auto polishSession = streamingPolisher_ ? streamingPolisher_->start() : 0;
         if (partialCallbackState_) {
@@ -434,6 +472,8 @@ std::string VoiceSession::startRecording()
             partialCallbackState_->pendingPolished.clear();
             partialCallbackState_->lastPublished.clear();
             partialCallbackState_->published = false;
+            partialCallbackState_->generation = generation;
+            partialCallbackState_->revision = 0;
         }
         if (livePipeline_) {
             livePipeline_->start();
@@ -450,64 +490,17 @@ std::string VoiceSession::startRecording()
                 log(std::string("voice start rollback failed: ") + cancelError.what());
             }
         }
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            phaseVersion = setStateLocked(SessionState::Idle);
-            runningGeneration_ = 0;
-            cancelRequested_ = false;
-            commitClaimed_ = false;
-            finalizationStartPublished_ = false;
-        }
-        publishPhase(SessionState::Idle, phaseVersion);
-        return "ERR " + std::string(e.what());
+        return failStart(e.what());
     }
 
-    std::uint64_t generation = 0;
+    std::uint64_t phaseVersion;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        runningGeneration_ = ++nextGeneration_;
-        generation = runningGeneration_;
+        runningGeneration_ = generation;
         cancelRequested_ = false;
         commitClaimed_ = false;
         finalizationStartPublished_ = false;
         phaseVersion = setStateLocked(SessionState::Recording);
-    }
-    if (partialCallbackState_) {
-        std::lock_guard<std::mutex> lock(partialCallbackState_->mutex);
-        partialCallbackState_->generation = generation;
-        partialCallbackState_->revision = 0;
-    }
-    std::string beginError;
-    try {
-        const auto [ok, detail] = committer_.beginVoiceSession(generation);
-        if (!ok) beginError = detail.empty() ? "voice session begin rejected" : detail;
-    } catch (const std::exception& e) {
-        beginError = e.what();
-    }
-    if (!beginError.empty()) {
-        log("voice session begin failed: " + beginError);
-        if (streamingPolisher_) streamingPolisher_->cancel();
-        // A timed-out BEGIN may already have bound the plugin's input context.
-        // Cancel this generation even when receipt of BEGIN is uncertain.
-        try {
-            const auto [ok, detail] = committer_.cancelVoiceSession(generation);
-            if (!ok) log("voice begin rollback cancel failed: " + detail);
-        } catch (const std::exception& e) {
-            log(std::string("voice begin rollback cancel failed: ") + e.what());
-        }
-        try {
-            if (livePipeline_) livePipeline_->cancel();
-            else recorder_->stop();
-        } catch (const std::exception& e) {
-            log(std::string("voice start rollback failed: ") + e.what());
-        }
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            phaseVersion = setStateLocked(SessionState::Idle);
-            runningGeneration_ = 0;
-        }
-        publishPhase(SessionState::Idle, phaseVersion);
-        return "ERR " + beginError;
     }
     publishPhase(SessionState::Recording, phaseVersion);
     setAudioLevelAccepting(true);

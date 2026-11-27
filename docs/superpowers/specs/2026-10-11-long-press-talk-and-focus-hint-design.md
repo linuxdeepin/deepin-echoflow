@@ -126,12 +126,14 @@ not make the hint flicker.
 - **UI host** owns presentation and mouse handling:
   - `CapsuleController` tracks focus and caret, decides hint visibility, and
     converts native caret pixels to Qt logical coordinates;
-  - `LongPressDetector` is a pure state machine fed with presses, releases,
-    pointer positions, and caret updates, emitting started, finished, and
-    cancelled signals that map to `START`, `STOP`, and `CANCEL`;
-  - `XEventMonitorSource` adapts the deepin D-Bus service to the detector;
-  - `X11ActiveWindow` compares the window under the pointer with the active
-    window through xcb.
+  - `LongPressDetector` uses button events, pointer positions, and input focus
+    to emit started, finished, and cancelled signals that map to `START`,
+    `STOP`, and `CANCEL`.
+  - `PointerEventSource` selects the session backend and exposes button
+    events, the pointer position in Qt logical coordinates, and the
+    active-window check.
+  - `XEventMonitorSource` adapts the deepin X11 D-Bus service and compares
+    the window under the pointer with the active window through XCB.
 
 ## Settings
 

@@ -6,6 +6,10 @@ set -euo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PREFIX="${PREFIX:-$HOME/.local}"
 STATE_DIR="${STATE_DIR:-$HOME/.local/share/deepin-echoflow}"
+CONFIG_ROOT="$HOME/.config"
+if [[ "${XDG_CONFIG_HOME:-}" == /* ]]; then
+  CONFIG_ROOT="$XDG_CONFIG_HOME"
+fi
 SYSTEMD_USER_DIR="${SYSTEMD_USER_DIR:-$HOME/.config/systemd/user}"
 AUTOSTART_DIR="${AUTOSTART_DIR:-$HOME/.config/autostart}"
 
@@ -49,6 +53,7 @@ fi
 echo "deepin-echoflow user services and binaries removed."
 echo "Preserved state/config:"
 echo "  $STATE_DIR"
-echo "  $HOME/.config/deepin-echoflow"
-echo "  ${XDG_CONFIG_HOME:-$HOME/.config}/echoflow (legacy)"
+echo "  $CONFIG_ROOT/deepin/deepin-echoflow"
+echo "  $CONFIG_ROOT/deepin-echoflow (legacy)"
+echo "  $CONFIG_ROOT/echoflow (legacy)"
 echo "  $HOME/.local/share/echoflow (legacy)"

@@ -63,6 +63,15 @@ std::string CrispAsrEngine::languageCode(const std::string& value)
 CrispAsrEngine::CrispAsrEngine(Config cfg)
     : cfg_(std::move(cfg))
 {
+    loadSessionIfAvailable();
+}
+
+void CrispAsrEngine::loadSessionIfAvailable()
+{
+    std::error_code modelError;
+    if (!std::filesystem::exists(cfg_.crispModelPath, modelError) && !modelError) {
+        return;
+    }
     session_ = std::make_unique<CrispSession>(cfg_.crispModelPath, cfg_.crispBackend,
                                               cfg_.crispThreads);
     if (session_->isLoaded()) {
@@ -83,6 +92,9 @@ CrispAsrEngine::~CrispAsrEngine() = default;
 
 std::string CrispAsrEngine::transcribe(const std::filesystem::path& audio)
 {
+    if (!session_) {
+        loadSessionIfAvailable();
+    }
     if (!session_ || !session_->isLoaded()) {
         log("crisp session not loaded, cannot transcribe");
         return {};

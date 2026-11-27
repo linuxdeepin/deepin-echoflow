@@ -115,6 +115,10 @@ void UiSocketServer::readAudioPending()
 
 void UiSocketServer::applyMessage(const QString& message)
 {
+    if (message == QStringLiteral("MODEL_REQUIRED")) {
+        emit modelRequired();
+        return;
+    }
     // Older services must not revive the focus-tracking capsule or place
     // metering back on the state channel.
     if (message.startsWith(QStringLiteral("SHOW_TOOLTIP"))
