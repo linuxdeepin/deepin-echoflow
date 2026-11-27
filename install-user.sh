@@ -6,16 +6,22 @@ set -euo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PREFIX="${PREFIX:-$HOME/.local}"
 STATE_DIR="${STATE_DIR:-$HOME/.local/share/deepin-echoflow}"
-CONFIG_ROOT="${XDG_CONFIG_HOME:-$HOME/.config}"
+CONFIG_ROOT="$HOME/.config"
+if [[ "${XDG_CONFIG_HOME:-}" == /* ]]; then
+  CONFIG_ROOT="$XDG_CONFIG_HOME"
+fi
 CONFIG_DIR_EXPLICIT="${CONFIG_DIR+x}"
-CONFIG_DIR="${CONFIG_DIR:-$CONFIG_ROOT/deepin-echoflow}"
+CONFIG_DIR="${CONFIG_DIR:-$CONFIG_ROOT/deepin/deepin-echoflow}"
 CONFIG_FILE="$CONFIG_DIR/deepin-echoflow.conf"
-# Match ProjectPaths.h: prefer the new config, otherwise retain the old config
-# and its model directory in place. Explicit CONFIG_DIR always takes priority.
-if [[ -z "$CONFIG_DIR_EXPLICIT" && ! -e "$CONFIG_FILE" \
-      && -f "$CONFIG_ROOT/echoflow/echoflow.conf" ]]; then
-  CONFIG_DIR="$CONFIG_ROOT/echoflow"
-  CONFIG_FILE="$CONFIG_DIR/echoflow.conf"
+# Match ProjectPaths.h so upgrades keep the config and its models together.
+if [[ -z "$CONFIG_DIR_EXPLICIT" && ! -e "$CONFIG_FILE" ]]; then
+  if [[ -f "$CONFIG_ROOT/deepin-echoflow/deepin-echoflow.conf" ]]; then
+    CONFIG_DIR="$CONFIG_ROOT/deepin-echoflow"
+    CONFIG_FILE="$CONFIG_DIR/deepin-echoflow.conf"
+  elif [[ -f "$CONFIG_ROOT/echoflow/echoflow.conf" ]]; then
+    CONFIG_DIR="$CONFIG_ROOT/echoflow"
+    CONFIG_FILE="$CONFIG_DIR/echoflow.conf"
+  fi
 fi
 SYSTEMD_USER_DIR="${SYSTEMD_USER_DIR:-$HOME/.config/systemd/user}"
 AUTOSTART_DIR="${AUTOSTART_DIR:-$HOME/.config/autostart}"

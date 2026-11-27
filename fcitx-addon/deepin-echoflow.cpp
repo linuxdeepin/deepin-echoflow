@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "CommandClient.h"
+#include "CommitSocket.h"
 #include "VoiceInputPolicy.h"
 #include "VoicePreedit.h"
 
@@ -41,6 +42,7 @@ namespace {
 
 constexpr const char *kCommitSocketName = "deepin-echoflow-fcitx.sock";
 constexpr size_t kMaxMessageSize = 65536;
+constexpr uint64_t kCommitSocketRetryUsec = 100000;
 // Chromium blurs and refocuses its input context several times right after a
 // click; focus reports within this window of a program's first focus still
 // count as that first focus, so the one-per-program hint is not lost to churn.
@@ -151,74 +153,49 @@ public:
                 return true;
             });
         blurTimer_->setEnabled(false);
-        setupCommitSocket();
+        if (!setupCommitSocket()) {
+            commitSocketTimer_ = instance_->eventLoop().addTimeEvent(
+                CLOCK_MONOTONIC, fcitx::now(CLOCK_MONOTONIC) + kCommitSocketRetryUsec, 0,
+                [this](fcitx::EventSourceTime *timer, uint64_t) {
+                    if (setupCommitSocket()) {
+                        timer->setEnabled(false);
+                    } else {
+                        timer->setNextInterval(kCommitSocketRetryUsec);
+                        timer->setEnabled(true);
+                    }
+                    return true;
+                });
+        }
         registerEventWatchers();
     }
 
     ~EchoFlow() override {
+        commitSocketTimer_.reset();
         ioEvent_.reset();
         clearVoicePreedit();
-        unlinkOwnedCommitSocket();
-        if (fd_ >= 0) {
-            close(fd_);
-            fd_ = -1;
-        }
     }
 
 private:
-    void unlinkOwnedCommitSocket() {
-        if (!socketBound_ || fd_ < 0) {
-            return;
+    bool setupCommitSocket() {
+        const auto path = commitSocketPath();
+        switch (commitSocket_.open(path)) {
+        case echoflow::CommitSocket::Result::Busy:
+            return false;
+        case echoflow::CommitSocket::Result::Failed:
+            FCITX_ERROR() << "deepin-echoflow failed to bind " << path
+                          << ": " << strerror(commitSocket_.error());
+            return true;
+        case echoflow::CommitSocket::Result::Listening:
+            break;
         }
-        struct stat fdStat {};
-        struct stat pathStat {};
-        if (fstat(fd_, &fdStat) != 0 ||
-            stat(commitSocketPath_.c_str(), &pathStat) != 0) {
-            return;
-        }
-        if (fdStat.st_dev == pathStat.st_dev &&
-            fdStat.st_ino == pathStat.st_ino) {
-            unlink(commitSocketPath_.c_str());
-        }
-    }
-
-    void setupCommitSocket() {
-        commitSocketPath_ = commitSocketPath();
-        sockaddr_un addr {};
-        if (commitSocketPath_.size() >= sizeof(addr.sun_path)) {
-            FCITX_ERROR() << "deepin-echoflow socket path too long: "
-                          << commitSocketPath_;
-            return;
-        }
-
-        fd_ = socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-        if (fd_ < 0) {
-            FCITX_ERROR() << "deepin-echoflow failed to create socket: "
-                          << strerror(errno);
-            return;
-        }
-
-        addr.sun_family = AF_UNIX;
-        std::strncpy(addr.sun_path, commitSocketPath_.c_str(),
-                     sizeof(addr.sun_path) - 1);
-        unlink(commitSocketPath_.c_str());
-        if (bind(fd_, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0) {
-            FCITX_ERROR() << "deepin-echoflow failed to bind " << commitSocketPath_
-                          << ": " << strerror(errno);
-            close(fd_);
-            fd_ = -1;
-            return;
-        }
-        socketBound_ = true;
-        chmod(commitSocketPath_.c_str(), S_IRUSR | S_IWUSR);
-
+        chmod(path.c_str(), S_IRUSR | S_IWUSR);
         ioEvent_ = instance_->eventLoop().addIOEvent(
-            fd_, fcitx::IOEventFlag::In,
+            commitSocket_.fd(), fcitx::IOEventFlag::In,
             [this](fcitx::EventSourceIO *, int fd, fcitx::IOEventFlags flags) {
                 return handleReadable(fd, flags);
             });
-        FCITX_INFO() << "deepin-echoflow commit socket listening on "
-                     << commitSocketPath_;
+        FCITX_INFO() << "deepin-echoflow commit socket listening on " << path;
+        return true;
     }
 
     void registerEventWatchers() {
@@ -598,21 +575,20 @@ private:
         if (peerLen == 0 || peer.sun_path[0] == '\0') {
             return;
         }
-        if (sendto(fd_, message, strlen(message), 0,
+        if (sendto(commitSocket_.fd(), message, strlen(message), 0,
                    reinterpret_cast<const sockaddr *>(&peer), peerLen) < 0) {
             FCITX_WARN() << "deepin-echoflow reply failed: " << strerror(errno);
         }
     }
 
     fcitx::Instance *instance_ = nullptr;
-    int fd_ = -1;
-    bool socketBound_ = false;
+    echoflow::CommitSocket commitSocket_;
     bool rightCtrlDown_ = false;
-    std::string commitSocketPath_;
     // program name -> monotonic timestamp of its first FOCUS in this run.
     std::map<std::string, int64_t> hintedPrograms_;
     std::map<std::string, int> liveInputContexts_;
     std::unique_ptr<fcitx::EventSourceIO> ioEvent_;
+    std::unique_ptr<fcitx::EventSourceTime> commitSocketTimer_;
     std::unique_ptr<fcitx::EventSourceTime> blurTimer_;
     // Whether a FocusOut's BLUR is still within the debounce window, and the
     // program that lost focus (empty when the event carried no input context).

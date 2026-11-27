@@ -18,6 +18,9 @@ public:
     ~UiSocketServer() override;
     bool start(QString* error);
 
+signals:
+    void modelRequired();
+
 private:
     bool bindSocket(const QString& path, int& fd, bool& bound, QString* error);
     void readPending();

@@ -15,7 +15,7 @@ find_package(Qt6 REQUIRED COMPONENTS Core Gui Qml Quick Widgets Network DBus Lin
 find_package(Qt6 QUIET COMPONENTS WaylandClient)
 find_package(Dtk6 COMPONENTS Widget Core Gui REQUIRED)
 include(GNUInstallDirs)
-# Long-press checks the active window through the X server directly.
+# The X11 pointer backend checks the active window through XCB.
 find_path(XCB_INCLUDE_DIR xcb/xcb.h)
 find_library(XCB_LIBRARY xcb)
 if(NOT XCB_INCLUDE_DIR OR NOT XCB_LIBRARY)
@@ -29,7 +29,7 @@ add_executable(deepin-echoflow-ui
     UiSocketServer.cpp
     LongPressDetector.cpp
     ScreenGeometry.cpp
-    X11ActiveWindow.cpp
+    PointerEventSource.cpp
     XEventMonitorSource.cpp
     EchoFlowSettings.cpp
     SettingsDialog.cpp

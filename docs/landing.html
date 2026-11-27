@@ -552,7 +552,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
         <div class="cell reveal" style="transition-delay:.06s">
           <div class="ic"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg></div>
           <h3>一键下载模型</h3>
-          <p>首次运行引导完成设置，支持 hf-mirror 与 Hugging Face 双下载源。</p>
+          <p>首次语音输入缺少模型时打开设置向导，支持 hf-mirror 与 Hugging Face 双下载源。</p>
         </div>
         <div class="cell reveal" style="transition-delay:.12s">
           <div class="ic"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg></div>
@@ -642,7 +642,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
           <ol class="qs-steps" data-pane="deb">
             <li><span class="no2">01</span><div><h4>下载安装包</h4><p>从 GitHub Releases 下载最新的 <code>deepin-echoflow_*.deb</code>。</p></div></li>
             <li><span class="no2">02</span><div><h4>安装并启动</h4><p>安装后会尝试在当前桌面会话中重启 Fcitx5、启动录音唤醒服务和 EchoFlow 托盘。没有桌面会话时，EchoFlow 会在下次登录时启动。</p></div></li>
-            <li><span class="no2">03</span><div><h4>下载模型，开口</h4><p>跟随首次运行引导下载 Qwen3-ASR，之后按住右 Ctrl 就能说话。</p></div></li>
+            <li><span class="no2">03</span><div><h4>下载模型，开口</h4><p>按住右 Ctrl。如果还没有模型，按向导下载 Qwen3-ASR。</p></div></li>
           </ol>
           <ol class="qs-steps" data-pane="src" hidden>
             <li><span class="no2">01</span><div><h4>准备环境</h4><p>deepin 25 或兼容发行版，安装 Fcitx5 与 PipeWire。</p></div></li>
@@ -655,7 +655,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 <pre class="term-body" data-pane="deb"><span class="c"># 从 Releases 下载最新安装包后</span>
 <span class="p">$ </span>sudo apt install ./deepin-echoflow_*.deb
 
-<span class="c"># 跟随首次运行引导下载 Qwen3-ASR</span>
+<span class="c"># 按住右 Ctrl，缺少模型时会打开设置向导</span>
 <span class="c"># 然后：按住右 Ctrl，说话，松开 ✨</span></pre>
 <pre class="term-body" data-pane="src" hidden><span class="p">$ </span>git clone https://github.com/hualet/echoflow.git
 <span class="p">$ </span>cd deepin-echoflow

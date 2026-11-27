@@ -25,7 +25,7 @@ deepin-echoflow 不止是语音转文字。它直接接入 Fcitx5 输入法框�
 
 - **离线识别，隐私安全**——录音和识别全部在本机完成，不经过任何云端服务。
 - **右 Ctrl 即按即说**——焦点在输入框时，按住右 `Ctrl` 开始录音，松开即结束并上屏。无需离开键盘。
-- **输入框长按说话**——在输入框中按住鼠标左键约半秒开始录音，松开即转写上屏；输入框获得焦点时会在光标下方短暂提示。仅支持 X11 会话，可在设置中关闭。
+- **输入框长按说话**——输入框有焦点时，在其窗口内按住鼠标左键约半秒开始录音。松开后转写结果上屏。仅支持 X11 会话，可在设置中关闭。
 - **Fcitx5 原生上屏**——文本通过 Fcitx5 的 `commitString` 提交到当前输入框，不走剪贴板，不模拟按键，永远不会打错窗口。
 - **模型常驻复用**——流式识别首次录音时加载模型，后续录音和取消后重录复用权重；每次录音独立清理音频和解码状态。录音过程中后台分段转写，首次加载仍有冷启动等待。
 - **录音中实时预览**——识别文字在输入框中以预编辑显示，胶囊波纹反馈实际麦克风音量。
@@ -57,7 +57,9 @@ cmake --build build
 ```
 
 安装完成后会安装 `deepin-echoflow.service` 与 `deepin-echoflow.socket` 用户单元。登录时启动器导入图形会话环境、启动 UI 和录音唤醒 socket；service 仅在录音命令到达时启动，空闲 10 分钟后正常退出。
-Fcitx 将焦点和光标信息直接发送到 UI socket；服务未启动时，鼠标长按仍可判断输入框位置，普通输入不会唤醒语音服务。
+Fcitx 将焦点和光标信息直接发送到 UI socket。长按使用输入焦点来触发，录音前会向
+Fcitx 验证当前输入上下文。应用负责上报密码、敏感或禁用输入法的状态。文字光标坐标用于
+定位界面提示。普通输入不会唤醒语音服务。
 
 本地安装会同时重载 Fcitx，使用户目录中的 addon 和对应的绝对模块路径
 立即生效。使用 `--no-start` 时不会修改当前 Fcitx 会话，稍后需手动执行
@@ -78,7 +80,7 @@ deepin-echoflow-session-start
 
 ### 第三步：下载模型 & 开始使用
 
-1. 按首次使用向导下载模型。也可以点击托盘图标 → **设置** → **识别模型**，下载 `Qwen3-ASR-0.6B`（轻量）或 `Qwen3-ASR-1.7B`（高精度），再从 **模型** 下拉框选中它。
+1. 在输入框内首次按住右 `Ctrl` 时，如果还没有识别模型，会自动打开设置向导。也可以点击托盘图标 → **设置** → **识别模型**，下载 `Qwen3-ASR-0.6B`（轻量）或 `Qwen3-ASR-1.7B`（高精度），再从 **模型** 下拉框选中它。
 2. 切换到任意可输入文本的窗口，确认输入法处于激活状态。
 3. 按住右 `Ctrl`，看到语音胶囊出现在屏幕中下部，开始说话。
 4. 松开右 `Ctrl`，识别结果直接上屏。
@@ -130,7 +132,7 @@ systemctl --user status deepin-echoflow.service
 
 ### 配置文件
 
-`~/.config/deepin-echoflow/deepin-echoflow.conf` 中的常用项：
+`~/.config/deepin/deepin-echoflow/deepin-echoflow.conf` 中的常用项：
 
 | 配置项 | 说明 | 默认值 |
 | --- | --- | --- |
@@ -275,10 +277,11 @@ UI 优先处理状态消息，积压音量只显示最新值，新一轮录音�
 
 界面品牌名称保留 **EchoFlow**，包括窗口标题、托盘提示、使用向导和桌面显示名称。
 项目包名、程序、插件、桌面文件名及 systemd 服务统一使用 `deepin-echoflow`。
-新配置位于 `~/.config/deepin-echoflow/deepin-echoflow.conf`，默认录音目录为
-`~/.local/share/deepin-echoflow/recordings`。升级时若只有旧的
-`~/.config/echoflow/echoflow.conf`，会继续读取该文件及同目录下的模型，无需重新下载；
-新旧配置同时存在时优先使用新配置。`install-user.sh` 会停止旧服务并清理旧启动入口。
+新配置默认位于 `~/.config/deepin/deepin-echoflow/deepin-echoflow.conf`。设置了
+`XDG_CONFIG_HOME` 时，以该目录代替 `~/.config`。默认录音目录为
+`~/.local/share/deepin-echoflow/recordings`。升级时若新配置尚未创建，依次查找配置根目录下的
+`deepin-echoflow/deepin-echoflow.conf` 和 `echoflow/echoflow.conf`，继续使用找到的配置和
+同目录内的模型。`install-user.sh` 会停止旧服务并清理旧启动入口。
 
 修改配置后，重启已运行的服务即可生效；未运行时，下次唤醒会加载新配置：
 
@@ -302,7 +305,7 @@ UI 优先处理状态消息，积压音量只显示最新值，新一轮录音�
 ```bash
 python3 scripts/compare-denoise.py \
   --binary build/service/deepin-echoflow-service \
-  --model ~/.config/deepin-echoflow/qwen3-asr-0.6b/qwen3-asr-0.6b-q4_k.gguf \
+  --model ~/.config/deepin/deepin-echoflow/qwen3-asr-0.6b/qwen3-asr-0.6b-q4_k.gguf \
   --manifest /path/to/manifest.json --output /tmp/denoise-comparison.json
 ```
 
@@ -317,7 +320,7 @@ python3 scripts/compare-denoise.py \
 ./uninstall-user.sh
 ```
 
-卸载会保留 `~/.config/deepin-echoflow` 和 `~/.local/share/deepin-echoflow` 下的用户数据和模型。
+卸载会保留新旧配置目录中的设置和模型，以及 `~/.local/share/deepin-echoflow` 下的用户数据。
 
 ## 开发者
 
@@ -363,7 +366,7 @@ python3 scripts/check-release-performance.py \
   --baseline-ref v0.2.1 \
   --candidate-ref HEAD \
   --version 0.2.2 \
-  --config "$HOME/.config/deepin-echoflow/deepin-echoflow.conf" \
+  --config "$HOME/.config/deepin/deepin-echoflow/deepin-echoflow.conf" \
   --model /path/to/model-or-model-directory \
   --manifest /path/to/release-manifest.json \
   --iterations 3 \

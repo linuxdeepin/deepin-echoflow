@@ -3,11 +3,7 @@
 
 #include "LongPressDetector.h"
 
-#include "ScreenGeometry.h"
-
 #include <utility>
-
-using echoflow::hasCaret;
 
 LongPressDetector::LongPressDetector(CursorProvider cursor, CanStart canStart,
                                      QObject *parent)
@@ -85,24 +81,12 @@ void LongPressDetector::handleRelease(QPoint position) {
     }
 }
 
-void LongPressDetector::handleInputFocus(bool focused, QRect caret) {
+void LongPressDetector::handleInputFocus(bool focused) {
     focused_ = focused;
-    caret_ = focused ? caret : QRect();
 }
 
 bool LongPressDetector::movedFromPress(const QPoint &position) const {
     return (position - pressPosition_).manhattanLength() > options_.moveTolerance;
-}
-
-bool LongPressDetector::pressLandedInText() const {
-    if (!focused_ || !hasCaret(caret_)) {
-        return false;
-    }
-    // Evaluated after the hold threshold, so a caret the click itself moved
-    // (to the press point, a line end, or the last line) is already current.
-    const int y = pressPosition_.y();
-    return y >= caret_.top() - options_.moveTolerance
-        && y <= caret_.bottom() + options_.belowCaretReach;
 }
 
 void LongPressDetector::pollCursor() {
@@ -121,10 +105,9 @@ void LongPressDetector::holdElapsed() {
         return;
     }
     const bool moved = cursor_ && movedFromPress(cursor_());
-    const bool inText = pressLandedInText();
     const bool inActiveWindow = !pointerInActiveWindow_ || pointerInActiveWindow_();
     const bool canStart = !canStart_ || canStart_();
-    if (moved || !inText || !inActiveWindow || !canStart) {
+    if (moved || !focused_ || !inActiveWindow || !canStart) {
         reset();
         return;
     }

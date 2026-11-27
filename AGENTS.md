@@ -132,8 +132,9 @@ four-segment form (e.g. `0.1.1.0`).
 
 Runtime sockets live under `/run/user/$UID/`: `deepin-echoflow-control.sock`,
 `deepin-echoflow-fcitx.sock`, and `deepin-echoflow-ui.sock`. Config lives at
-`~/.config/deepin-echoflow/deepin-echoflow.conf`; `Config::modelDir` is derived from the
-selected model and config directory. `service/ModelCatalog.h` is the single
+`~/.config/deepin/deepin-echoflow/deepin-echoflow.conf` by default, with fallback
+for existing configs under `deepin-echoflow/` and `echoflow/` in the config root.
+`Config::modelDir` is derived from the selected model and config directory. `service/ModelCatalog.h` is the single
 source of truth for model IDs, display names, Hugging Face repos, and file
 lists, for both ASR models and the separate polish models
 (`polishModelCatalog()`). Check polish output from the build tree with

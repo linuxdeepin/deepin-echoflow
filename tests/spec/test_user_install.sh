@@ -88,10 +88,10 @@ assert_ordered() {
 run_install() {
   local home="$1"
   shift
-  HOME="$home" \
+  env -u CONFIG_DIR HOME="$home" \
   PREFIX="$home/prefix with spaces" \
   STATE_DIR="$home/state" \
-  CONFIG_DIR="$home/config" \
+  XDG_CONFIG_HOME="$home/xdg-config" \
   SYSTEMD_USER_DIR="$home/systemd" \
   AUTOSTART_DIR="$home/autostart" \
   DISPLAY= WAYLAND_DISPLAY= \
@@ -103,6 +103,9 @@ run_install() {
 DEFAULT_HOME="$TEST_ROOT/default-home"
 : > "$TEST_LOG"
 default_output="$(run_install "$DEFAULT_HOME")"
+default_config="$DEFAULT_HOME/xdg-config/deepin/deepin-echoflow/deepin-echoflow.conf"
+[[ -f "$default_config" ]] || fail "fresh install did not use the deepin config directory"
+grep -qFx "Config: $default_config" <<< "$default_output" || fail "fresh install reported the wrong config"
 assert_logged "systemctl --user daemon-reload"
 assert_logged "systemctl --user disable --now deepin-echoflow-ui.service"
 assert_logged "systemctl --user disable --now deepin-echoflow.service"
@@ -172,7 +175,8 @@ upgrade_output="$(env -u CONFIG_DIR HOME="$UPGRADE_HOME" XDG_CONFIG_HOME="$UPGRA
 grep -qFx 'existing user config' "$UPGRADE_CONFIG/echoflow/echoflow.conf" || fail "legacy config changed"
 grep -qFx 'existing model' "$UPGRADE_CONFIG/echoflow/qwen3-asr-0.6b/model.gguf" || fail "legacy model changed"
 grep -qF "Config: $UPGRADE_CONFIG/echoflow/echoflow.conf" <<< "$upgrade_output" || fail "legacy config not selected"
-[[ ! -e "$UPGRADE_CONFIG/deepin-echoflow/deepin-echoflow.conf" ]] || fail "upgrade replaced config with defaults"
+[[ ! -e "$UPGRADE_CONFIG/deepin-echoflow/deepin-echoflow.conf" ]] || fail "upgrade created a second config"
+[[ ! -e "$UPGRADE_CONFIG/deepin/deepin-echoflow/deepin-echoflow.conf" ]] || fail "upgrade replaced config with defaults"
 for old_entry in "$UPGRADE_HOME/systemd/echoflow.service" \
   "$UPGRADE_HOME/autostart/echoflow-autostart.desktop" \
   "$UPGRADE_HOME/.local/share/fcitx5/addon/echoflow.conf" \
@@ -191,11 +195,13 @@ mkdir -p \
   "$UNINSTALL_PREFIX/share/applications" \
   "$UNINSTALL_PREFIX/share/icons/hicolor/scalable/apps" \
   "$UNINSTALL_HOME/state" \
+  "$UNINSTALL_HOME/.config/deepin/deepin-echoflow" \
   "$UNINSTALL_HOME/.config/deepin-echoflow" \
   "$UNINSTALL_HOME/.config/autostart"
 : > "$UNINSTALL_PREFIX/share/applications/deepin-echoflow.desktop"
 : > "$UNINSTALL_PREFIX/share/icons/hicolor/scalable/apps/deepin-echoflow.svg"
 : > "$UNINSTALL_HOME/state/preserved"
+: > "$UNINSTALL_HOME/.config/deepin/deepin-echoflow/preserved"
 : > "$UNINSTALL_HOME/.config/deepin-echoflow/preserved"
 : > "$UNINSTALL_HOME/.config/autostart/deepin-echoflow-autostart.desktop"
 : > "$TEST_LOG"
@@ -208,7 +214,8 @@ PATH="$FAKE_BIN:/usr/bin:/bin" \
 [[ ! -e "$UNINSTALL_PREFIX/share/applications/deepin-echoflow.desktop" ]] || fail "desktop entry not removed"
 [[ ! -e "$UNINSTALL_PREFIX/share/icons/hicolor/scalable/apps/deepin-echoflow.svg" ]] || fail "icon not removed"
 [[ -e "$UNINSTALL_HOME/state/preserved" ]] || fail "state was removed"
-[[ -e "$UNINSTALL_HOME/.config/deepin-echoflow/preserved" ]] || fail "config was removed"
+[[ -e "$UNINSTALL_HOME/.config/deepin/deepin-echoflow/preserved" ]] || fail "config was removed"
+[[ -e "$UNINSTALL_HOME/.config/deepin-echoflow/preserved" ]] || fail "legacy config was removed"
 [[ ! -e "$UNINSTALL_HOME/.config/autostart/deepin-echoflow-autostart.desktop" ]] || fail "autostart entry was not removed"
 
 echo "ok   - executable install and uninstall behavior"

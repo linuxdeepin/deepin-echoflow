@@ -18,7 +18,6 @@
 
 #include <QAction>
 #include <QCommandLineParser>
-#include <QCursor>
 #include <QDebug>
 #include <QDir>
 #include <QFile>
@@ -55,13 +54,11 @@
 #include "OnboardingDialog.h"
 #include "OnboardingSetupController.h"
 #include "OnboardingState.h"
-#include "ScreenGeometry.h"
+#include "PointerEventSource.h"
 #include "SettingsDialog.h"
 #include "SetupCommandRunner.h"
 #include "UiActivationHost.h"
 #include "UiSocketServer.h"
-#include "X11ActiveWindow.h"
-#include "XEventMonitorSource.h"
 
 namespace {
 
@@ -388,34 +385,37 @@ int main(int argc, char **argv) {
     }
 
     // Press-and-hold in a text field records until the button is released.
-    XEventMonitorSource buttonSource;
+    const auto buttonSource = PointerEventSource::createForSession();
     LongPressDetector longPress(
-        [] { return QCursor::pos(); },
+        [&buttonSource] {
+            return buttonSource ? buttonSource->pointerPosition() : QPoint{};
+        },
         [&controller] { return controller.idle(); });
-    longPress.setPointerInActiveWindow(&echoflow::pointerInActiveWindow);
+    longPress.setPointerInActiveWindow([&buttonSource] {
+        return buttonSource && buttonSource->pointerInActiveWindow();
+    });
     QObject::connect(&controller, &CapsuleController::inputFocusChanged,
                      &longPress, &LongPressDetector::handleInputFocus);
-    QObject::connect(&buttonSource, &XEventMonitorSource::leftPressed, &longPress,
-                     [&controller, &longPress](QPoint position) {
-                         const QPoint logical = echoflow::nativeToLogical(position);
-                         controller.notePointerPress(logical);
-                         longPress.handlePress(logical);
-                     });
-    QObject::connect(&buttonSource, &XEventMonitorSource::leftReleased, &longPress,
-                     [&longPress](QPoint position) {
-                         longPress.handleRelease(echoflow::nativeToLogical(position));
-                     });
+    if (buttonSource) {
+        QObject::connect(buttonSource.get(), &PointerEventSource::leftPressed,
+                         &longPress, [&controller, &longPress](QPoint position) {
+                             controller.notePointerPress(position);
+                             longPress.handlePress(position);
+                         });
+        QObject::connect(buttonSource.get(), &PointerEventSource::leftReleased,
+                         &longPress, &LongPressDetector::handleRelease);
+        QObject::connect(buttonSource.get(), &PointerEventSource::activeChanged,
+                         &longPress, [&](bool active) {
+                             longPress.setEnabled(active);
+                             controller.setLongPressHint(active);
+                         });
+    }
     QObject::connect(&longPress, &LongPressDetector::holdStarted, &app,
                      [wakeupPath] { sendControlCommand(wakeupPath, "START"); });
     QObject::connect(&longPress, &LongPressDetector::holdFinished, &app,
                      [wakeupPath] { sendControlCommand(wakeupPath, "STOP"); });
     QObject::connect(&longPress, &LongPressDetector::holdCancelled, &app,
                      [wakeupPath] { sendControlCommand(wakeupPath, "CANCEL"); });
-    QObject::connect(&buttonSource, &XEventMonitorSource::activeChanged, &app,
-                     [&](bool active) {
-                         longPress.setEnabled(active);
-                         controller.setLongPressHint(active);
-                     });
 
     auto *interactionSettings = echoflow::EchoFlowSettings::instance()->dsettings();
     const auto interactionEnabled = [interactionSettings](const QString &key) {
@@ -426,11 +426,12 @@ int main(int argc, char **argv) {
     const QString focusHintKey = QStringLiteral("basic.interaction.focus_hint");
     auto applyInteractionSettings = [&] {
         bool longPressActive = false;
-        if (interactionEnabled(longPressKey)) {
-            longPressActive = buttonSource.start();
-        } else {
-            // Do not keep observing global buttons once the user opts out.
-            buttonSource.stop();
+        if (buttonSource) {
+            if (interactionEnabled(longPressKey)) {
+                longPressActive = buttonSource->start();
+            } else {
+                buttonSource->stop();
+            }
         }
         longPress.setEnabled(longPressActive);
         controller.setLongPressHint(longPressActive);
@@ -531,6 +532,11 @@ int main(int argc, char **argv) {
         }
     };
 
+    QObject::connect(&server, &UiSocketServer::modelRequired, &app, [&] {
+        if (!onboardingDialog || !onboardingDialog->isVisible()) {
+            activationHandler();
+        }
+    });
     QObject::connect(guideAction, &QAction::triggered, &app,
                      [&] { showOnboarding(true); });
     QObject::connect(settingsAction, &QAction::triggered, openSettings);
@@ -544,7 +550,7 @@ int main(int argc, char **argv) {
     });
 
     uiReady = true;
-    if (pendingActivation || !onboardingState.isComplete()) {
+    if (pendingActivation) {
         pendingActivation = false;
         QTimer::singleShot(0, &app, activationHandler);
     }

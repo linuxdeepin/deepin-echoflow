@@ -109,7 +109,11 @@ expect_log() {
 }
 
 run_isolated() {
-    env -i PATH="$PATH" TEST_LOG="$TEST_LOG" TEST_UID="$UID" "$@"
+    # Resolve the UID after env -i drops fakeroot's preload.
+    env -i PATH="$PATH" TEST_LOG="$TEST_LOG" bash -c '
+        export TEST_UID="$UID"
+        exec env "$@"
+    ' bash "$@"
 }
 
 postinst="$ROOT/debian/postinst"

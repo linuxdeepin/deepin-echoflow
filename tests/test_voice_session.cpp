@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Hualet Wang
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <QFile>
+#include <QTemporaryDir>
 #include <QtTest/QtTest>
 
 #include "VoiceSession.h"
@@ -766,6 +768,7 @@ class TestVoiceSession : public QObject {
 
 private slots:
     void ctrlStartsRecording();
+    void missingModelPromptsOnlyWhenRecordingIsRequested();
     void focusIsRelayedToUi();
     void typedIsRelayedWithoutDisturbingRecording();
     void blurIsRelayedBeforeCancellation();
@@ -850,6 +853,40 @@ static VoiceSession makeLiveSession(
     FakeLivePipeline& pipeline, FakeCommitter& committer, FakeUi& ui)
 {
     return VoiceSession(Config::defaultConfig(), pipeline, committer, ui);
+}
+
+void TestVoiceSession::missingModelPromptsOnlyWhenRecordingIsRequested()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const auto modelPath = directory.filePath(QStringLiteral("model.gguf"));
+    auto cfg = Config::defaultConfig();
+    cfg.crispModelPath = modelPath.toStdString();
+    FakeLivePipeline pipeline;
+    FakeCommitter committer;
+    FakeUi ui;
+    VoiceSession session(cfg, pipeline, committer, ui);
+
+    QVERIFY(ui.messages().empty());
+    session.handleCommand("FOCUS 100 200 2 18");
+    session.handleCommand("STATUS");
+    session.handleCommand("STOP");
+    QCOMPARE(ui.messages(), (std::vector<std::string>{"FOCUS 100 200 2 18", "IDLE"}));
+    ui.clear();
+
+    QCOMPARE(session.handleCommand("START"), std::string("ERR model-not-installed"));
+    QCOMPARE(session.state(), SessionState::Idle);
+    QCOMPARE(pipeline.starts(), 0);
+    QCOMPARE(ui.messages(), (std::vector<std::string>{"MODEL_REQUIRED"}));
+
+    QFile downloaded(modelPath);
+    QVERIFY(downloaded.open(QIODevice::WriteOnly));
+    downloaded.close();
+    ui.clear();
+    QCOMPARE(session.handleCommand("START"), std::string("RECORDING"));
+    QCOMPARE(pipeline.starts(), 1);
+    QCOMPARE(ui.messages(), (std::vector<std::string>{"RECORDING"}));
+    session.handleCommand("CANCEL");
 }
 
 void TestVoiceSession::ctrlStartsRecording()
@@ -1335,7 +1372,21 @@ void TestVoiceSession::livePipelineStartFailureRollsBack()
 {
     FakeLivePipeline pipeline;
     pipeline.throwOnStart = true;
-    FakeCommitter committer;
+    struct BindingCommitter : FakeCommitter {
+        std::uint64_t bound = 0;
+        bool cancelled = false;
+
+        std::pair<bool, std::string> beginVoiceSession(std::uint64_t generation) override
+        {
+            bound = generation;
+            return {true, "OK"};
+        }
+        std::pair<bool, std::string> cancelVoiceSession(std::uint64_t generation) override
+        {
+            cancelled = bound != 0 && bound == generation;
+            return {cancelled, cancelled ? "OK" : "no binding"};
+        }
+    } committer;
     FakeUi ui;
     auto session = makeLiveSession(pipeline, committer, ui);
 
@@ -1343,6 +1394,7 @@ void TestVoiceSession::livePipelineStartFailureRollsBack()
     QCOMPARE(session.state(), SessionState::Idle);
     QCOMPARE(pipeline.starts(), 1);
     QCOMPARE(pipeline.cancels(), 1);
+    QVERIFY(committer.cancelled);
 }
 
 void TestVoiceSession::beginFailureCancelsAcceptedGeneration_data()
@@ -1394,7 +1446,8 @@ void TestVoiceSession::beginFailureCancelsAcceptedGeneration()
     QCOMPARE(committer.cancellations.size(), size_t(1));
     QCOMPARE(committer.cancellations.front(), committer.failedGeneration);
     QCOMPARE(committer.bound, std::uint64_t(0));
-    QCOMPARE(pipeline.cancels(), 1);
+    QCOMPARE(pipeline.starts(), 0);
+    QCOMPARE(pipeline.cancels(), 0);
     QCOMPARE(session.handleCommand("START"), std::string("RECORDING"));
     QVERIFY(committer.bound != 0);
     QVERIFY(committer.bound != committer.failedGeneration);

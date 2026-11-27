@@ -18,7 +18,6 @@
 #include <chrono>
 #include <sstream>
 #include <iomanip>
-#include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <iostream>
@@ -30,15 +29,6 @@
 namespace fs = std::filesystem;
 
 namespace {
-
-fs::path defaultConfigPath()
-{
-    if (const char* configHome = std::getenv("XDG_CONFIG_HOME")) {
-        return echoflow::projectConfigPath(configHome);
-    }
-    const char* home = std::getenv("HOME");
-    return echoflow::projectConfigPath(fs::path(home ? home : "/tmp") / ".config");
-}
 
 void printUsage()
 {
@@ -142,7 +132,7 @@ std::string polishOrRaw(echoflow::ITextPolisher* polisher, const std::string& te
 
 int main(int argc, char** argv)
 {
-    fs::path configPath = defaultConfigPath();
+    fs::path configPath = echoflow::defaultProjectConfigPath();
     bool selfTest = false;
     bool printDefault = false;
     bool transcribeJson = false;
@@ -188,8 +178,9 @@ int main(int argc, char** argv)
         cfg = echoflow::loadDtkConf(configPath);
     } else {
         cfg = echoflow::Config::defaultConfig();
-        cfg.modelDir =
-            (configPath.parent_path() / echoflow::normalizeModelName(cfg.modelName)).string();
+        cfg.modelName = echoflow::normalizeModelName(cfg.modelName);
+        cfg.modelDir = (configPath.parent_path() / cfg.modelName).string();
+        cfg.crispModelPath = (fs::path(cfg.modelDir) / (cfg.modelName + "-q4_k.gguf")).string();
         cfg.polishModelPath =
             echoflow::polishModelPathFor(configPath.parent_path(), cfg.polishModelName);
     }

@@ -110,6 +110,7 @@ struct Polisher : ITextPolisher {
 class TestUiNotifier : public QObject {
     Q_OBJECT
 private slots:
+    void modelRequiredReachesUiHost();
     void audioUsesIndependentQueue();
     void fullAudioQueueStillDeliversStates();
     void fullAudioQueueStillFinishesCapsule_data();
@@ -121,6 +122,22 @@ private slots:
     void fullReceiverDoesNotBlock();
     void busyUiCannotBlockStopOrCancel();
 };
+
+void TestUiNotifier::modelRequiredReachesUiHost()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const auto path = directory.filePath(QStringLiteral("echo.sock"));
+    CapsuleController controller([](std::string_view) { return true; });
+    UiSocketServer server(path, &controller);
+    QString error;
+    QVERIFY2(server.start(&error), qPrintable(error));
+    QSignalSpy required(&server, &UiSocketServer::modelRequired);
+    UnixDatagramUiNotifier notifier(path.toStdString());
+    notifier.send("MODEL_REQUIRED");
+    QTRY_COMPARE(required.count(), 1);
+    QVERIFY(controller.idle());
+}
 
 void TestUiNotifier::audioUsesIndependentQueue()
 {

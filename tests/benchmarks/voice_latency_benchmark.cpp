@@ -4,6 +4,7 @@
 #include "CrispAsrEngine.h"
 #include "Config.h"
 #include "Interfaces.h"
+#include "ProjectPaths.h"
 #include "VoiceSession.h"
 
 #include <algorithm>
@@ -71,19 +72,10 @@ std::string jsonEscape(const std::string& value)
     return out;
 }
 
-fs::path defaultConfigPath()
-{
-    if (const char* configHome = std::getenv("XDG_CONFIG_HOME")) {
-        return fs::path(configHome) / "deepin-echoflow" / "deepin-echoflow.conf";
-    }
-    const char* home = std::getenv("HOME");
-    return fs::path(home ? home : "/tmp") / ".config" / "deepin-echoflow" / "deepin-echoflow.conf";
-}
-
 echoflow::Config loadConfig(const std::optional<fs::path>& path,
                             const std::optional<fs::path>& modelDir)
 {
-    fs::path configPath = path.value_or(defaultConfigPath());
+    const fs::path configPath = path ? *path : echoflow::defaultProjectConfigPath();
     echoflow::Config cfg;
     if (fs::exists(configPath)) {
         cfg = echoflow::loadDtkConf(configPath);

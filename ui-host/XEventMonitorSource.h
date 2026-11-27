@@ -3,15 +3,15 @@
 
 #pragma once
 
-#include <QObject>
-#include <QPoint>
+#include "PointerEventSource.h"
+
 #include <QString>
 
 class QDBusServiceWatcher;
 
 // Adapts deepin's XEventMonitor session service, which reports global X11
-// button events without grabbing the pointer. Positions are native pixels.
-class XEventMonitorSource final : public QObject {
+// button events without grabbing the pointer.
+class XEventMonitorSource final : public PointerEventSource {
     Q_OBJECT
 
 public:
@@ -27,20 +27,17 @@ public:
     // Only X11 sessions can observe global buttons this way.
     static bool platformSupported();
 
-    bool start();
-    void stop();
-    bool active() const;
-
-signals:
-    void leftPressed(QPoint position);
-    void leftReleased(QPoint position);
-    void activeChanged(bool active);
+    bool start() override;
+    void stop() override;
+    QPoint pointerPosition() const override;
+    bool pointerInActiveWindow() const override;
 
 private slots:
     void handleButtonPress(int button, int x, int y, const QString &id);
     void handleButtonRelease(int button, int x, int y, const QString &id);
 
 private:
+    bool active() const;
     bool registerWith(const Endpoint &endpoint);
     void disconnectSignals();
     void setRegistration(const Endpoint *endpoint, const QString &id);
