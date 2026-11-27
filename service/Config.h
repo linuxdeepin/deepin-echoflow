@@ -64,6 +64,20 @@ struct Config {
 };
 
 Config loadDtkConf(const std::filesystem::path& path);
+
+// The service parses this snapshot and checks it again once its control socket
+// can receive reload requests.
+class ConfigFileSnapshot {
+public:
+    explicit ConfigFileSnapshot(std::filesystem::path path);
+    Config load() const;
+    bool changed() const;
+
+private:
+    std::filesystem::path path_;
+    std::optional<std::string> contents_;
+};
+
 std::string normalizeModelName(const std::string& value);
 // <configDir>/<id>/<gguf> for a polish catalog id, or empty when unknown.
 std::string polishModelPathFor(const std::filesystem::path& configDir, const std::string& id);

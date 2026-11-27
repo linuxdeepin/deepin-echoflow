@@ -191,14 +191,22 @@ std::string stripPunctuation(const std::string& text)
     return result;
 }
 
-Config loadDtkConf(const fs::path& path)
+namespace {
+
+std::optional<std::string> readConfigContents(const fs::path& path)
+{
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        return std::nullopt;
+    }
+    std::ostringstream contents;
+    contents << file.rdbuf();
+    return contents.str();
+}
+
+Config parseDtkConf(std::istream& in, const fs::path& path)
 {
     Config cfg = Config::defaultConfig();
-    std::ifstream in(path);
-    if (!in) {
-        return cfg;
-    }
-
     std::string line;
     std::string section;
     while (std::getline(in, line)) {
@@ -335,6 +343,31 @@ Config loadDtkConf(const fs::path& path)
     }
     cfg.polishModelPath = polishModelPathFor(base, cfg.polishModelName);
     return cfg;
+}
+
+}  // namespace
+
+Config loadDtkConf(const fs::path& path)
+{
+    std::ifstream in(path);
+    return in ? parseDtkConf(in, path) : Config::defaultConfig();
+}
+
+ConfigFileSnapshot::ConfigFileSnapshot(fs::path path)
+    : path_(std::move(path))
+    , contents_(readConfigContents(path_))
+{
+}
+
+Config ConfigFileSnapshot::load() const
+{
+    std::istringstream in(contents_.value_or(std::string()));
+    return parseDtkConf(in, path_);
+}
+
+bool ConfigFileSnapshot::changed() const
+{
+    return contents_ != readConfigContents(path_);
 }
 
 }  // namespace echoflow

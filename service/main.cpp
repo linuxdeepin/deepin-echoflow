@@ -8,6 +8,7 @@
 #include "CrispAsrEngine.h"
 #include "CrispLiveVoicePipeline.h"
 #include "LocalLlmPolisher.h"
+#include "ModelUseLock.h"
 #include "Recorder.h"
 #include "SelfTest.h"
 #include "Server.h"
@@ -132,7 +133,7 @@ std::string polishOrRaw(echoflow::ITextPolisher* polisher, const std::string& te
 
 int main(int argc, char** argv)
 {
-    fs::path configPath = echoflow::defaultProjectConfigPath();
+    std::optional<fs::path> requestedConfigPath;
     bool selfTest = false;
     bool printDefault = false;
     bool transcribeJson = false;
@@ -142,7 +143,7 @@ int main(int argc, char** argv)
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--config" && i + 1 < argc) {
-            configPath = argv[++i];
+            requestedConfigPath = argv[++i];
         } else if (arg == "--self-test") {
             selfTest = true;
         } else if (arg == "--print-default-config") {
@@ -174,16 +175,14 @@ int main(int argc, char** argv)
     }
 
     echoflow::Config cfg;
-    if (fs::exists(configPath)) {
-        cfg = echoflow::loadDtkConf(configPath);
-    } else {
-        cfg = echoflow::Config::defaultConfig();
-        cfg.modelName = echoflow::normalizeModelName(cfg.modelName);
-        cfg.modelDir = (configPath.parent_path() / cfg.modelName).string();
-        cfg.crispModelPath = (fs::path(cfg.modelDir) / (cfg.modelName + "-q4_k.gguf")).string();
-        cfg.polishModelPath =
-            echoflow::polishModelPathFor(configPath.parent_path(), cfg.polishModelName);
+    echoflow::ModelUseLock modelLock(echoflow::controlSocketPath(cfg));
+    if (modelLock.lockForUse() != echoflow::ModelUseLock::Result::Acquired) {
+        std::fprintf(stderr, "could not acquire EchoFlow model lock\n");
+        return 1;
     }
+    echoflow::ConfigFileSnapshot startupConfig(requestedConfigPath ? *requestedConfigPath
+                                                                  : echoflow::defaultProjectConfigPath());
+    cfg = startupConfig.load();
 
     if (selfTest) {
         return echoflow::runSelfTest(cfg);
@@ -256,7 +255,7 @@ int main(int argc, char** argv)
         echoflow::CrispLiveVoicePipeline livePipeline(cfg);
         echoflow::VoiceSession session(cfg, livePipeline, committer, ui);
         session.setTextPolisher(polisher.get());
-        echoflow::Server server(cfg, session);
+        echoflow::Server server(cfg, session, std::move(startupConfig));
         return server.run();
     }
 
@@ -264,6 +263,6 @@ int main(int argc, char** argv)
     echoflow::CrispAsrEngine asr(cfg);
     echoflow::VoiceSession session(cfg, recorder, asr, committer, ui);
     session.setTextPolisher(polisher.get());
-    echoflow::Server server(cfg, session);
+    echoflow::Server server(cfg, session, std::move(startupConfig));
     return server.run();
 }

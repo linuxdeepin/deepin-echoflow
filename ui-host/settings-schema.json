@@ -29,7 +29,8 @@
             {
               "key": "model_name",
               "name": "Model",
-              "type": "combobox",
+              "type": "modelpicker",
+              "reset": false,
               "default": "qwen3-asr-0.6b"
             },
             {
@@ -92,13 +93,14 @@
             {
               "key": "enabled",
               "text": "Refine recognition results with a local language model before committing (removes filler words and self-corrections, adds punctuation)",
-              "type": "checkbox",
+              "type": "polishcheckbox",
               "default": false
             },
             {
               "key": "model_name",
               "name": "Model",
-              "type": "combobox",
+              "type": "modelpicker",
+              "reset": false,
               "default": "qwen3-0.6b"
             },
             {

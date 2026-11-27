@@ -255,28 +255,28 @@
 <context>
     <name>QObject</name>
     <message>
-        <location filename="../main.cpp" line="346"/>
+        <location filename="../main.cpp" line="332"/>
         <source>Failed to load the settings schema.</source>
         <translation>无法加载设置 schema。</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="450"/>
+        <location filename="../main.cpp" line="440"/>
         <location filename="../SettingsTranslation.cpp" line="18"/>
         <source>Usage Guide</source>
         <translation>使用引导</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="451"/>
+        <location filename="../main.cpp" line="441"/>
         <source>Settings</source>
         <translation>设置</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="453"/>
+        <location filename="../main.cpp" line="443"/>
         <source>Quit</source>
         <translation>退出</translation>
     </message>
     <message>
-        <location filename="../SettingsDialog.cpp" line="70"/>
+        <location filename="../SettingsDialog.cpp" line="146"/>
         <source>Unknown model</source>
         <translation>未知模型</translation>
     </message>
@@ -326,6 +326,7 @@
         <translation>识别模型</translation>
     </message>
     <message>
+        <location filename="../SettingsDialog.cpp" line="136"/>
         <location filename="../SettingsTranslation.cpp" line="21"/>
         <source>Model</source>
         <translation>模型</translation>
@@ -484,7 +485,7 @@
 <context>
     <name>echoflow::EchoFlowSettings</name>
     <message>
-        <location filename="../EchoFlowSettings.cpp" line="220"/>
+        <location filename="../EchoFlowSettings.cpp" line="224"/>
         <source>System default</source>
         <translation>系统默认</translation>
     </message>
@@ -516,54 +517,103 @@
 <context>
     <name>echoflow::ModelRowWidget</name>
     <message>
-        <location filename="../ModelRowWidget.cpp" line="75"/>
-        <location filename="../ModelRowWidget.cpp" line="144"/>
-        <location filename="../ModelRowWidget.cpp" line="155"/>
+        <location filename="../ModelRowWidget.cpp" line="62"/>
+        <location filename="../ModelRowWidget.cpp" line="161"/>
+        <source>Uninstall</source>
+        <translation>卸载</translation>
+    </message>
+    <message>
+        <location filename="../ModelRowWidget.cpp" line="58"/>
+        <location filename="../ModelRowWidget.cpp" line="59"/>
+        <location filename="../ModelRowWidget.cpp" line="160"/>
         <source>Cancel</source>
         <translation>取消</translation>
     </message>
     <message>
-        <location filename="../ModelRowWidget.cpp" line="100"/>
         <source>Unknown</source>
-        <translation>未知</translation>
+        <translation type="vanished">未知</translation>
     </message>
     <message>
-        <location filename="../ModelRowWidget.cpp" line="113"/>
         <source>Downloaded</source>
-        <translation>已下载</translation>
+        <translation type="vanished">已下载</translation>
     </message>
     <message>
-        <location filename="../ModelRowWidget.cpp" line="117"/>
+        <location filename="../ModelRowWidget.cpp" line="55"/>
         <source>Download</source>
         <translation>下载</translation>
     </message>
     <message>
-        <location filename="../ModelRowWidget.cpp" line="164"/>
+        <location filename="../ModelRowWidget.cpp" line="152"/>
+        <location filename="../ModelRowWidget.cpp" line="170"/>
+        <source>At least one model must remain installed.</source>
+        <translation>至少需保留 1 个模型。</translation>
+    </message>
+    <message>
+        <location filename="../ModelRowWidget.cpp" line="156"/>
+        <source>Uninstall model?</source>
+        <translation>确认卸载该模型？</translation>
+    </message>
+    <message>
+        <location filename="../ModelRowWidget.cpp" line="157"/>
+        <source>The files for %1 will be removed from this device.</source>
+        <translation>将从此设备删除 %1 的模型文件。</translation>
+    </message>
+    <message>
+        <location filename="../ModelRowWidget.cpp" line="181"/>
+        <source>Models are in use. Try again when voice input is idle.</source>
+        <translation>模型正在使用，请在语音输入空闲后重试。</translation>
+    </message>
+    <message>
+        <location filename="../ModelRowWidget.cpp" line="182"/>
+        <source>Could not release the models. Restart EchoFlow and try again.</source>
+        <translation>无法释放模型。请重启 EchoFlow 后重试。</translation>
+    </message>
+    <message>
+        <location filename="../ModelRowWidget.cpp" line="187"/>
+        <location filename="../ModelRowWidget.cpp" line="242"/>
+        <source>Could not uninstall the model.</source>
+        <translation>无法卸载该模型。</translation>
+    </message>
+    <message>
+        <location filename="../ModelRowWidget.cpp" line="224"/>
+        <source>Could not save the model settings.</source>
+        <translation>无法保存模型设置。</translation>
+    </message>
+    <message>
+        <source>Could not save the replacement model.</source>
+        <translation type="vanished">无法保存替代模型设置。</translation>
+    </message>
+    <message>
         <source>Retry</source>
-        <translation>重试</translation>
+        <translation type="vanished">重试</translation>
     </message>
 </context>
 <context>
     <name>echoflow::SettingsDialog</name>
     <message>
-        <location filename="../SettingsDialog.cpp" line="46"/>
+        <location filename="../SettingsDialog.cpp" line="80"/>
         <source>EchoFlow Settings</source>
         <translation>EchoFlow 设置</translation>
     </message>
     <message>
-        <location filename="../SettingsDialog.cpp" line="56"/>
+        <location filename="../SettingsDialog.cpp" line="90"/>
         <source>Usage Guide</source>
         <translation>使用引导</translation>
     </message>
     <message>
-        <location filename="../SettingsDialog.cpp" line="58"/>
+        <location filename="../SettingsDialog.cpp" line="92"/>
         <source>Open</source>
         <translation>打开</translation>
     </message>
     <message>
-        <location filename="../SettingsDialog.cpp" line="60"/>
+        <location filename="../SettingsDialog.cpp" line="94"/>
         <source>Open the usage guide</source>
         <translation>打开使用引导</translation>
+    </message>
+    <message>
+        <location filename="../SettingsDialog.cpp" line="117"/>
+        <source>Download a polish model to enable polishing.</source>
+        <translation>请先下载润色模型，再开启润色功能。</translation>
     </message>
 </context>
 </TS>

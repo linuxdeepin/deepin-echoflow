@@ -24,6 +24,10 @@ namespace echoflow {
 
 namespace {
 
+const QString kRecognitionModel = QStringLiteral("basic.model.model_name");
+const QString kPolishModel = QStringLiteral("basic.polish.model_name");
+const QString kPolishEnabled = QStringLiteral("basic.polish.enabled");
+
 struct AudioSourceItem {
     QString name;
     QString description;
@@ -162,7 +166,7 @@ bool EchoFlowSettings::init(const QString &configPath) {
             QStringLiteral("basic.recognition.stream_transcription"),
             QStringLiteral("basic.recognition.noise_suppression"),
             QStringLiteral("basic.recognition.stream_step_ms"),
-            QStringLiteral("basic.polish.enabled"),
+            kPolishEnabled,
             QStringLiteral("basic.polish.model_name"),
             QStringLiteral("basic.recording.min_record_seconds"),
             QStringLiteral("basic.recording.rate"),
@@ -208,7 +212,7 @@ void EchoFlowSettings::sync() {
 
 void EchoFlowSettings::populateComboBoxes() {
     // model_name items are populated dynamically by refreshModelNameItems()
-    // (only downloaded models, plus the current selection).
+    // (only downloaded models, plus the current recognition selection).
     setComboBoxItems(dsettings_, QStringLiteral("basic.model.mirror"),
                      QStringList{QStringLiteral("hf-mirror"),
                                  QStringLiteral("official")});
@@ -221,14 +225,6 @@ void EchoFlowSettings::populateComboBoxes() {
                                   QStringLiteral("Chinese"), QStringLiteral("Spanish"),
                                   QStringLiteral("Portuguese"), QStringLiteral("French"),
                                   QStringLiteral("Italian")});
-    QStringList polishKeys;
-    QStringList polishValues;
-    for (const ModelEntry &e : polishModelCatalog()) {
-        polishKeys << QString::fromStdString(e.id);
-        polishValues << QString::fromStdString(e.displayName);
-    }
-    setComboBoxItems(dsettings_, QStringLiteral("basic.polish.model_name"),
-                     polishKeys, polishValues);
     setComboBoxItems(dsettings_, QStringLiteral("basic.recording.rate"),
                      QStringList{QStringLiteral("8000"), QStringLiteral("16000"),
                                   QStringLiteral("22050"), QStringLiteral("44100"),
@@ -254,31 +250,53 @@ void EchoFlowSettings::populateComboBoxes() {
                      sourceKeys, sourceValues);
 }
 
+Dtk::Core::DSettingsOption *EchoFlowSettings::modelSelection(const ModelEntry &entry) const {
+    return dsettings_ ? dsettings_->option(findPolishModel(entry.id) ? kPolishModel
+                                                                  : kRecognitionModel)
+                      : nullptr;
+}
+
+std::filesystem::path EchoFlowSettings::modelDirectory(const ModelEntry &entry) const {
+    return std::filesystem::path(QFileInfo(configPath_).absolutePath().toStdString()) / entry.id;
+}
+
 void EchoFlowSettings::refreshModelNameItems() {
     if (!dsettings_) {
         return;
     }
-    Dtk::Core::DSettingsOption *opt =
-        dsettings_->option(QStringLiteral("basic.model.model_name"));
-    if (!opt) {
-        return;
-    }
-    const QString confDir = QFileInfo(configPath_).path();
-    QStringList items;
-    // Keep the currently-selected model visible even if it is not downloaded.
-    const QString current = opt->value().toString();
-    if (!current.isEmpty() && !items.contains(current)) {
-        items << current;
-    }
-    // Add every model already present on disk.
-    for (const ModelEntry &e : modelCatalog()) {
-        const QString id = QString::fromStdString(e.id);
-        const QString dir = confDir + QLatin1Char('/') + id;
-        if (isModelPresent(std::filesystem::path(dir.toStdString()), e) && !items.contains(id)) {
-            items << id;
+    const auto refresh = [this](const QString &key, const std::vector<ModelEntry> &catalog) {
+        auto option = dsettings_->option(key);
+        if (!option) {
+            return;
         }
-    }
-    setComboBoxItems(dsettings_, QStringLiteral("basic.model.model_name"), items);
+        const QString current = option->value().toString();
+        const bool isPolish = key == kPolishModel;
+        QStringList keys;
+        QStringList names;
+        for (const ModelEntry &entry : catalog) {
+            const QString id = QString::fromStdString(entry.id);
+            if ((!isPolish && id == current) || isModelPresent(modelDirectory(entry), entry)) {
+                keys << id;
+                names << (isPolish ? QString::fromStdString(entry.displayName) : id);
+            }
+        }
+        if (isPolish) {
+            if (!keys.contains(current)) {
+                option->setValue(keys.value(0, QStringLiteral("")));
+            }
+            if (keys.isEmpty()) {
+                if (auto enabled = dsettings_->option(kPolishEnabled)) {
+                    enabled->setValue(false);
+                }
+            }
+        } else if (!current.isEmpty() && !keys.contains(current)) {
+            keys.prepend(current);
+            names.prepend(current);
+        }
+        setComboBoxItems(dsettings_, key, keys, names);
+    };
+    refresh(kRecognitionModel, modelCatalog());
+    refresh(kPolishModel, polishModelCatalog());
 }
 
 void EchoFlowSettings::setComboBoxItems(Dtk::Core::DSettings *settings,

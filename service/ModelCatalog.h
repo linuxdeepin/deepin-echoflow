@@ -69,7 +69,8 @@ inline std::vector<std::string> missingModelFiles(
     const std::filesystem::path& dir, const ModelEntry& e) {
     std::vector<std::string> missing;
     for (const auto& file : e.files) {
-        if (!std::filesystem::exists(dir / file)) {
+        std::error_code error;
+        if (!std::filesystem::is_regular_file(dir / file, error)) {
             missing.push_back(file);
         }
     }

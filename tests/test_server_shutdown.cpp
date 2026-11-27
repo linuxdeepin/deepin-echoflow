@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "Server.h"
+#include "ModelUninstallGuard.h"
 
+#include <QSaveFile>
 #include <QTemporaryDir>
 #include <QtTest/QtTest>
 
@@ -18,10 +20,22 @@ using namespace echoflow;
 class Pipeline final : public ILiveVoicePipeline {
 public:
     void start() override {}
-    std::string finish() override { return {}; }
+    std::string finish() override
+    {
+        if (finishGate >= 0) {
+            char proceed;
+            if (write(events, "F", 1) == 1) {
+                const auto bytes = read(finishGate, &proceed, 1);
+                (void)bytes;
+            }
+        }
+        return {};
+    }
     void cancel() override { cancelled = true; }
     void setPartialTextCallback(std::function<void(const std::string&)>) override {}
     bool cancelled = false;
+    int events = -1;
+    int finishGate = -1;
 };
 
 class CommitterProbe final : public ICommitter {
@@ -72,6 +86,8 @@ class TestServerShutdown : public QObject {
     Q_OBJECT
 private slots:
     void sigtermCancelsActiveRecording();
+    void releaseModelsWaitsForIdle();
+    void settingsChangeDuringStartupPreservesWakeup();
 };
 
 void TestServerShutdown::sigtermCancelsActiveRecording()
@@ -119,6 +135,112 @@ void TestServerShutdown::sigtermCancelsActiveRecording()
     child.pid = 0;
     QVERIFY(WIFEXITED(status));
     QCOMPARE(WEXITSTATUS(status), 0);
+}
+
+void TestServerShutdown::releaseModelsWaitsForIdle()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const auto path = directory.filePath("control.sock").toStdString();
+    int activation[2];
+    QCOMPARE(socketpair(AF_UNIX, SOCK_DGRAM, 0, activation), 0);
+    int events[2];
+    QCOMPARE(pipe(events), 0);
+    int finalize[2];
+    QCOMPARE(pipe(finalize), 0);
+    Child child{fork()};
+    QVERIFY(child.pid >= 0);
+    if (child.pid == 0) {
+        close(activation[0]);
+        close(events[0]);
+        close(finalize[1]);
+        int result = 1;
+        {
+            ModelUseLock modelLock(path);
+            if (modelLock.lockForUse() == ModelUseLock::Result::Acquired) {
+                Pipeline pipeline;
+                pipeline.events = events[1];
+                pipeline.finishGate = finalize[0];
+                CommitterProbe committer(events[1]);
+                Notifier notifier;
+                Config config;
+                VoiceSession session(config, pipeline, committer, notifier);
+                Server server(config, session);
+                result = server.run(activation[1], path);
+            }
+        }
+        _exit(result);
+    }
+    close(activation[1]);
+    close(events[1]);
+    close(finalize[0]);
+    QCOMPARE(send(activation[0], "START", 5, 0), ssize_t(5));
+    QCOMPARE(nextEvent(events[0]), 'B');
+
+    ModelUseLock uninstallLock(path);
+    QCOMPARE(acquireModelUninstallLock(path, uninstallLock), ModelUseLock::Result::Busy);
+    QCOMPARE(send(activation[0], "STOP", 4, 0), ssize_t(4));
+    QCOMPARE(nextEvent(events[0]), 'F');
+    QCOMPARE(acquireModelUninstallLock(path, uninstallLock), ModelUseLock::Result::Busy);
+    QCOMPARE(write(finalize[1], "F", 1), ssize_t(1));
+    close(finalize[1]);
+    QCOMPARE(nextEvent(events[0]), 'C');
+    QTRY_COMPARE(acquireModelUninstallLock(path, uninstallLock), ModelUseLock::Result::Acquired);
+    close(activation[0]);
+    QCOMPARE(nextEvent(events[0]), '\0');
+    close(events[0]);
+    int status = 0;
+    QCOMPARE(waitpid(child.pid, &status, 0), child.pid);
+    child.pid = 0;
+    QVERIFY(WIFEXITED(status));
+    QCOMPARE(WEXITSTATUS(status), 0);
+}
+
+void TestServerShutdown::settingsChangeDuringStartupPreservesWakeup()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString configPath = directory.filePath("config.ini");
+    const auto writeConfig = [&configPath](const QByteArray& model) {
+        QSaveFile file(configPath);
+        const QByteArray contents = "[basic.model.model_name]\nvalue=" + model + '\n';
+        return file.open(QIODevice::WriteOnly) && file.write(contents) == contents.size()
+            && file.commit();
+    };
+    QVERIFY(writeConfig("qwen3-asr-0.6b"));
+    ConfigFileSnapshot startupConfig(configPath.toStdString());
+    Config config = startupConfig.load();
+    QCOMPARE(config.modelName, "qwen3-asr-0.6b");
+    QVERIFY(!startupConfig.changed());
+    // Model initialization is still in progress. No control socket exists yet.
+    QVERIFY(writeConfig("qwen3-asr-1.7b"));
+
+    int activation[2];
+    QCOMPARE(socketpair(AF_UNIX, SOCK_DGRAM, 0, activation), 0);
+    QCOMPARE(send(activation[0], "START", 5, 0), ssize_t(5));
+    close(activation[0]);
+    Child child{fork()};
+    QVERIFY(child.pid >= 0);
+    if (child.pid == 0) {
+        qputenv("ECHOFLOW_IDLE_TIMEOUT_MS", "100");
+        Pipeline pipeline;
+        CommitterProbe committer(-1);
+        Notifier notifier;
+        VoiceSession session(config, pipeline, committer, notifier);
+        Server server(config, session, std::move(startupConfig));
+        _exit(server.run(activation[1], directory.filePath("control.sock").toStdString()));
+    }
+    int status = 0;
+    QCOMPARE(waitpid(child.pid, &status, 0), child.pid);
+    child.pid = 0;
+    char pending[16];
+    const auto size = recv(activation[1], pending, sizeof(pending), MSG_DONTWAIT);
+    close(activation[1]);
+    QVERIFY(WIFEXITED(status));
+    QCOMPARE(WEXITSTATUS(status), 0);
+    QCOMPARE(size, ssize_t(5));
+    QCOMPARE(QByteArray(pending, size), QByteArray("START"));
+    QCOMPARE(ConfigFileSnapshot(configPath.toStdString()).load().modelName, "qwen3-asr-1.7b");
 }
 
 QTEST_GUILESS_MAIN(TestServerShutdown)

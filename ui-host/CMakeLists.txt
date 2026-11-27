@@ -36,6 +36,8 @@ add_executable(deepin-echoflow-ui
     ModelDownloader.cpp
     ModelDownloadCoordinator.cpp
     ModelRowWidget.cpp
+    ModelUninstallGuard.cpp
+    ../service/ModelUseLock.cpp
     UiActivationServer.cpp
     UiActivationHost.cpp
     OnboardingState.cpp
